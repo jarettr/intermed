@@ -1,0 +1,91 @@
+{
+  "schema": "intermed-rule-pack-v1",
+  "id": "intermed-core-datalog",
+  "rules": [
+    {
+      "id": "datalog-duplicate-id",
+      "kind": "group-distinct",
+      "input_kinds": ["mod", "plugin"],
+      "group_by": "subject",
+      "distinct": "attr:file",
+      "min_count": 2,
+      "finding": {
+        "id": "duplicate-id:{group}",
+        "severity": "error",
+        "category": "metadata",
+        "title": "Duplicate id '{group}' in {count} files",
+        "explanation": "The id '{group}' is declared by multiple archives: {values}. Only one can load.",
+        "fix": "Remove the duplicate/older jar.",
+        "tags": ["metadata", "duplicate", "datalog"]
+      }
+    },
+    {
+      "id": "datalog-mixin-overlap-hot",
+      "kind": "fact-finding",
+      "input_kinds": ["mixin_overlap"],
+      "where_all": {
+        "attr:hot_path": "true"
+      },
+      "finding": {
+        "id": "mixin-overlap:{subject}",
+        "severity": "error",
+        "category": "mixin",
+        "title": "Mixin target overlap: {subject}",
+        "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
+        "fix": "Check mod compatibility notes and prefer versions known to share this target.",
+        "tags": ["mixin", "overlap", "datalog"]
+      }
+    },
+    {
+      "id": "datalog-mixin-overlap",
+      "kind": "fact-finding",
+      "input_kinds": ["mixin_overlap"],
+      "where_all": {
+        "attr:hot_path": "false"
+      },
+      "finding": {
+        "id": "mixin-overlap:{subject}",
+        "severity": "warn",
+        "category": "mixin",
+        "title": "Mixin target overlap: {subject}",
+        "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
+        "fix": "Check mod compatibility notes and prefer versions known to share this target.",
+        "tags": ["mixin", "overlap", "datalog"]
+      }
+    },
+    {
+      "id": "datalog-mixin-overwrite-hot",
+      "kind": "fact-finding",
+      "input_kinds": ["high_risk_overwrite"],
+      "where_all": {
+        "attr:hot_path": "true"
+      },
+      "finding": {
+        "id": "mixin-overwrite:{subject}->{attr:target}",
+        "severity": "error",
+        "category": "mixin",
+        "title": "High-risk @Overwrite mixin: {attr:target}",
+        "explanation": "{subject} overwrites code in {attr:target}. @Overwrite has a high compatibility risk because it replaces target behavior.",
+        "fix": "Prefer versions without competing overwrites, or remove one conflicting mod.",
+        "tags": ["mixin", "overwrite", "datalog"]
+      }
+    },
+    {
+      "id": "datalog-mixin-overwrite",
+      "kind": "fact-finding",
+      "input_kinds": ["high_risk_overwrite"],
+      "where_all": {
+        "attr:hot_path": "false"
+      },
+      "finding": {
+        "id": "mixin-overwrite:{subject}->{attr:target}",
+        "severity": "warn",
+        "category": "mixin",
+        "title": "High-risk @Overwrite mixin: {attr:target}",
+        "explanation": "{subject} overwrites code in {attr:target}. @Overwrite has a high compatibility risk because it replaces target behavior.",
+        "fix": "Prefer versions without competing overwrites, or remove one conflicting mod.",
+        "tags": ["mixin", "overwrite", "datalog"]
+      }
+    }
+  ]
+}

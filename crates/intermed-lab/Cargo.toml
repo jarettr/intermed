@@ -1,0 +1,10 @@
+[package]
+name = "intermed-lab"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Phase 8 — compatibility lab (corpus + smoke tests) — structured stub; contract wired, implementation deferred."
+
+[dependencies]
+intermed-doctor-core.workspace = true

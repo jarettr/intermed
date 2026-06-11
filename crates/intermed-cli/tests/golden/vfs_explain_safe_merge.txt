@@ -1,0 +1,11 @@
+InterMed VFS
+Target: <TMP>/mods
+Resource writers: 2
+Collisions: 1
+Scan failures: 0
+  safe-crdt-merge: 1
+
+data/minecraft/tags/items/test.json [safe-crdt-merge]
+  writers: alpha, beta
+  archives: alpha.jar, beta.jar
+  reason: Minecraft tag values can be merged as a deterministic set

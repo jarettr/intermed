@@ -1,0 +1,11 @@
+[package]
+name = "intermed-deps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer C — dependency / version reasoner. Imperative in Phase 1 (semver); PubGrub adoption is a later phase."
+
+[dependencies]
+semver.workspace = true
+intermed-doctor-core.workspace = true

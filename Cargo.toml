@@ -1,0 +1,71 @@
+[workspace]
+resolver = "2"
+members = [
+    # ── Phase 0/1: working core ───────────────────────────────────────────
+    "crates/intermed-facts",
+    "crates/intermed-evidence",
+    "crates/intermed-report",
+    "crates/intermed-doctor-core",
+    "crates/intermed-minecraft-scan",
+    "crates/intermed-log",
+    "crates/intermed-deps",
+    "crates/intermed-rules",
+    "crates/intermed-cli",
+    # ── Later phases: structured stubs (real Collector/Rule contracts) ─────
+    "crates/intermed-vfs",              # Layer E  — Phase 3
+    "crates/intermed-packops",          # Layer E  — Phase 3
+    "crates/intermed-mixin-intel",      # Layer F  — Phase 4
+    "crates/intermed-security-audit",   # Layer G  — Phase 6
+    "crates/intermed-sbom",             # Layer H  — Phase 6
+    "crates/intermed-spark-bridge",     # Layer I  — Phase 7
+    "crates/intermed-lab",              # Layer K  — Phase 8
+    "crates/intermed-runtime-preflight",# Layer L  — Phase 9
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/intermed/intermed"
+authors = ["InterMed authors"]
+
+[workspace.dependencies]
+# Foundation
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+thiserror = "1"
+anyhow = "1"
+
+# Scanning / parsing (Tier 1 — pure, no JVM)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+toml = "0.8"
+serde_yaml = "0.9"
+regex = "1"
+semver = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Internal crates
+intermed-facts = { path = "crates/intermed-facts" }
+intermed-evidence = { path = "crates/intermed-evidence" }
+intermed-report = { path = "crates/intermed-report" }
+intermed-doctor-core = { path = "crates/intermed-doctor-core" }
+intermed-minecraft-scan = { path = "crates/intermed-minecraft-scan" }
+intermed-log = { path = "crates/intermed-log" }
+intermed-deps = { path = "crates/intermed-deps" }
+intermed-rules = { path = "crates/intermed-rules" }
+intermed-vfs = { path = "crates/intermed-vfs" }
+intermed-packops = { path = "crates/intermed-packops" }
+intermed-mixin-intel = { path = "crates/intermed-mixin-intel" }
+intermed-security-audit = { path = "crates/intermed-security-audit" }
+intermed-sbom = { path = "crates/intermed-sbom" }
+intermed-spark-bridge = { path = "crates/intermed-spark-bridge" }
+intermed-lab = { path = "crates/intermed-lab" }
+intermed-runtime-preflight = { path = "crates/intermed-runtime-preflight" }
+
+[profile.release]
+lto = "thin"
+strip = true

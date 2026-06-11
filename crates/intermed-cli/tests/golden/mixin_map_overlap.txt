@@ -1,0 +1,18 @@
+InterMed Mixin Map
+Target: <TMP>/mods
+Configs: 2
+Mixin classes: 2
+Overlaps: 1
+High-risk overwrites: 1
+Scan failures: 0
+
+Overlaps:
+net.minecraft.client.render.WorldRenderer [hot]
+  mods: alpha, beta
+  classes: alpha.mixin.RenderMixin, beta.mixin.RenderMixin
+  operations: inject, overwrite
+
+High-risk overwrites:
+beta -> net.minecraft.client.render.WorldRenderer
+  mixin: beta.mixin.RenderMixin
+  hot_path: true

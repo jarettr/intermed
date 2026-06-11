@@ -1,0 +1,31 @@
+[package]
+name = "intermed-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The `intermed` command-line workbench. Composition root: wires collectors and rules into the diagnosis engine."
+
+[[bin]]
+name = "intermed"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+serde_json.workspace = true
+intermed-doctor-core.workspace = true
+intermed-report.workspace = true
+intermed-minecraft-scan.workspace = true
+intermed-log.workspace = true
+intermed-deps.workspace = true
+intermed-rules.workspace = true
+intermed-vfs.workspace = true
+intermed-packops.workspace = true
+intermed-mixin-intel.workspace = true
+intermed-security-audit.workspace = true
+intermed-sbom.workspace = true
+intermed-spark-bridge.workspace = true
+intermed-runtime-preflight.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

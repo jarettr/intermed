@@ -1,0 +1,19 @@
+NOTE Resource can be merged safely: data/minecraft/tags/items/test.json
+id: resource-conflict:data/minecraft/tags/items/test.json
+rule: resource-conflict
+
+2 writer(s) touch this path: alpha, beta. Minecraft tag values can be merged as a deterministic set
+
+Fix candidates:
+- Generate an overlay preview and inspect the merged tag values.
+
+Evidence:
+- f# Subject weight=1.00: resource_collision subject=data/minecraft/tags/items/test.json
+  attrs: {"archives":"alpha.jar,beta.jar","class":"safe-crdt-merge","reason":"Minecraft tag values can be merged as a deterministic set","writers":"alpha,beta"}
+  source: data/minecraft/tags/items/test.json extractor=vfs-scanner
+- f# ConflictsWith weight=0.80: resource_writer subject=alpha
+  attrs: {"archive":"alpha.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":30}
+  source: alpha.jar!data/minecraft/tags/items/test.json extractor=vfs-scanner
+- f# ConflictsWith weight=0.80: resource_writer subject=beta
+  attrs: {"archive":"beta.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":29}
+  source: beta.jar!data/minecraft/tags/items/test.json extractor=vfs-scanner

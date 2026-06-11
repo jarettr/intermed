@@ -1,0 +1,10 @@
+[package]
+name = "intermed-sbom"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer H — SBOM / provenance / packaging hygiene — structured stub; contract wired, implementation deferred."
+
+[dependencies]
+intermed-doctor-core.workspace = true

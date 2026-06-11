@@ -1,0 +1,11 @@
+[package]
+name = "intermed-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer D — log & crash analyzer. Classifies known failure signatures and turns them into findings."
+
+[dependencies]
+regex.workspace = true
+intermed-doctor-core.workspace = true

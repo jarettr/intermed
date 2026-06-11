@@ -1,0 +1,13 @@
+[package]
+name = "intermed-doctor-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Diagnosis pipeline: target detection, Collector/Rule contracts, the engine, and the DoctorReport model."
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true
+intermed-facts.workspace = true
+intermed-evidence.workspace = true

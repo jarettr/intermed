@@ -1,0 +1,10 @@
+[package]
+name = "intermed-spark-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer I — spark / performance evidence bridge — structured stub; contract wired, implementation deferred."
+
+[dependencies]
+intermed-doctor-core.workspace = true

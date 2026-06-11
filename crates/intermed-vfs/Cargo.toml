@@ -1,0 +1,13 @@
+[package]
+name = "intermed-vfs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer E — resource/data conflict analyzer (VFS)."
+
+[dependencies]
+intermed-doctor-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true

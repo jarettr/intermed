@@ -1,0 +1,10 @@
+[package]
+name = "intermed-security-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer G — static security & supply-chain audit — structured stub; contract wired, implementation deferred."
+
+[dependencies]
+intermed-doctor-core.workspace = true

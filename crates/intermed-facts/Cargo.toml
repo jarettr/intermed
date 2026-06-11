@@ -1,0 +1,11 @@
+[package]
+name = "intermed-facts"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "InterMed fact model and fact store — the language-independent ground truth produced by collectors."
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true

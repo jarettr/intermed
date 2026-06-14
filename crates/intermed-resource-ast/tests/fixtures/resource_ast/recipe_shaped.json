@@ -1,0 +1,1 @@
+{"type": "create:crushing", "ingredients": [{"item": "minecraft:cobblestone"}, {"tag": "c:ingots/iron"}], "results": [{"item": "create:crushed_iron"}, {"item": "minecraft:gravel"}]}

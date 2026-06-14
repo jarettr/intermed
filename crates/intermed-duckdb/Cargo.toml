@@ -1,0 +1,37 @@
+[package]
+name = "intermed-duckdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer J — DuckDB columnar fact store and SQL rule backend (Appendix B.2, feature-gated)."
+
+[features]
+default = []
+duckdb = ["dep:duckdb"]
+
+[dependencies]
+chrono.workspace = true
+serde = { workspace = true, features = ["derive"] }
+intermed-doctor-core.workspace = true
+intermed-rules.workspace = true
+intermed-evidence.workspace = true
+intermed-facts.workspace = true
+intermed-log.workspace = true
+intermed-security-audit.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+duckdb = { version = "1.2", optional = true, features = ["bundled"] }
+
+[dev-dependencies]
+chrono.workspace = true
+intermed-rules.workspace = true
+intermed-vfs.workspace = true
+
+[[test]]
+name = "duckdb_backend"
+required-features = ["duckdb"]
+
+[[test]]
+name = "sql_codegen_exec"
+required-features = ["duckdb"]

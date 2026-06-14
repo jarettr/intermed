@@ -12,4 +12,9 @@ serde_json.workspace = true
 toml.workspace = true
 serde_yaml.workspace = true
 zip.workspace = true
+rayon.workspace = true
 intermed-doctor-core.workspace = true
+cafebabe.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

@@ -27,9 +27,9 @@ intermed rules check ./rules
 
 - Scans mixin config JSON files inside jars.
 - Resolves config package + `mixins`/`client`/`server` entries to class paths.
-- Reads class-file constant-pool UTF-8 entries when the class has a valid
-  `CAFEBABE` header; falls back to printable string extraction for tolerant
-  fixtures or partial class evidence.
+- Parses `@Mixin` and method annotations structurally via `cafebabe` (no string
+  guessing in bytecode). Unparseable class files yield empty targets and
+  `unknown` operations rather than failing the pack.
 - Detects Mixin operation evidence:
   - `@Inject`;
   - `@Redirect`;

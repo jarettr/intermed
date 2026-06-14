@@ -9,6 +9,8 @@ description = "Renderers for DoctorReport: terminal (ANSI), JSON, and SARIF 2.1.
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
 intermed-facts.workspace = true
 intermed-evidence.workspace = true
 intermed-doctor-core.workspace = true

@@ -8,17 +8,30 @@
 use intermed_evidence::Finding;
 use intermed_facts::FactStore;
 
+use crate::settings::DiagnosisSettings;
 use crate::target::Target;
 
 /// Context handed to a rule during evaluation.
 pub struct RuleCtx<'a> {
     pub store: &'a FactStore,
     pub target: &'a Target,
+    pub settings: &'a DiagnosisSettings,
 }
 
 impl<'a> RuleCtx<'a> {
-    pub fn new(store: &'a FactStore, target: &'a Target) -> Self {
-        Self { store, target }
+    pub fn new(store: &'a FactStore, target: &'a Target, settings: &'a DiagnosisSettings) -> Self {
+        Self {
+            store,
+            target,
+            settings,
+        }
+    }
+
+    /// Test helper: borrows a process-wide default [`DiagnosisSettings`].
+    pub fn for_test(store: &'a FactStore, target: &'a Target) -> Self {
+        use std::sync::LazyLock;
+        static DEFAULT: LazyLock<DiagnosisSettings> = LazyLock::new(DiagnosisSettings::default);
+        Self::new(store, target, &DEFAULT)
     }
 }
 

@@ -1,0 +1,373 @@
+{
+  "schema": "intermed-rule-pack-v2",
+  "id": "intermed-core",
+  "version": "0.1.0",
+  "publisher": "intermed",
+  "rules": [
+    {
+      "id": "duplicate-id",
+      "kind": "group-distinct",
+      "input_kinds": ["mod", "plugin"],
+      "group_by": "subject",
+      "distinct": "attr:file",
+      "min_count": 2,
+      "finding": {
+        "id": "duplicate-id:{group}",
+        "severity": "error",
+        "category": "metadata",
+        "title": "Duplicate id '{group}' in {count} files",
+        "explanation": "The id '{group}' is declared by multiple archives: {values}. Only one can load.",
+        "fix": "Remove the duplicate/older jar.",
+        "tags": ["metadata", "duplicate"]
+      }
+    },
+    {
+      "id": "known-incompatible-mods",
+      "kind": "join",
+      "left": { "kind": "mod_relationship", "alias": "r", "select": ["subject", "attr:related", "attr:type", "attr:reason"] },
+      "right": { "kind": "mod", "alias": "m2", "select": ["subject"] },
+      "on": "r.related = m2.subject",
+      "where": "r.type = 'known_incompatible' AND r.subject < r.related",
+      "finding": {
+        "id": "known-incompatible:{r.subject}->{r.related}",
+        "rule_id": "known-incompatible",
+        "severity": "error",
+        "category": "metadata",
+        "title": "Known-incompatible mods both installed: {r.subject} + {r.related}",
+        "explanation": "`{r.subject}` is known to be incompatible with `{r.related}`, and both are installed. {r.reason}",
+        "fix": "Remove one of `{r.subject}` or `{r.related}` — they cannot run together.",
+        "affects": ["{r.subject}", "{r.related}"],
+        "tags": ["incompatible", "relationship"]
+      }
+    },
+    {
+      "id": "loader-mismatch",
+      "kind": "join",
+      "left": { "kind": "mod", "alias": "m", "select": ["subject", "attr:loader"] },
+      "right": { "kind": "environment", "alias": "e", "select": ["attr:loader"] },
+      "on": "TRUE",
+      "where": "m.subject IS NOT NULL AND e.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader != e.loader",
+      "finding": {
+        "id": "loader-mismatch:{m.subject}",
+        "severity": "error",
+        "category": "loader",
+        "title": "'{m.subject}' is a {m.loader} mod on a {e.loader} instance",
+        "explanation": "{m.subject} is built for {m.loader}, but this instance runs {e.loader}. It will not load.",
+        "fix": "Use the {e.loader} build of this mod, or remove it.",
+        "tags": ["loader", "mismatch"]
+      }
+    },
+    {
+      "id": "side-mismatch-client-on-server",
+      "kind": "join",
+      "left": { "kind": "mod_side", "alias": "m", "select": ["subject", "attr:side"] },
+      "right": { "kind": "environment", "alias": "e", "select": ["attr:side"] },
+      "on": "TRUE",
+      "where": "m.side IS NOT NULL AND m.side != 'both' AND e.side = 'server' AND m.side = 'client'",
+      "finding": {
+        "id": "side-mismatch:{m.subject}",
+        "severity": "warn",
+        "category": "loader",
+        "title": "'{m.subject}' is client-only on a server",
+        "explanation": "{m.subject} declares environment=client; on a dedicated server it is dead weight or may error.",
+        "tags": ["side"]
+      }
+    },
+    {
+      "id": "side-mismatch-server-on-client",
+      "kind": "join",
+      "left": { "kind": "mod_side", "alias": "m", "select": ["subject", "attr:side"] },
+      "right": { "kind": "environment", "alias": "e", "select": ["attr:side"] },
+      "on": "TRUE",
+      "where": "m.side IS NOT NULL AND m.side != 'both' AND e.side = 'client' AND m.side = 'server'",
+      "finding": {
+        "id": "side-mismatch:{m.subject}",
+        "severity": "note",
+        "category": "loader",
+        "title": "'{m.subject}' is server-only on a client",
+        "explanation": "{m.subject} declares environment=server; it will do nothing client-side.",
+        "tags": ["side"]
+      }
+    },
+    {
+      "id": "resource-conflict-safe-crdt-merge",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "safe-crdt-merge" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "note",
+        "category": "resource",
+        "title": "Resource can be merged safely: {subject}",
+        "explanation": "{writer_count} writer(s) touch this path: {writers_list}. {attr:reason}",
+        "fix": "Generate an overlay preview and inspect the merged tag values.",
+        "tags": ["resource", "safe-crdt-merge"]
+      }
+    },
+    {
+      "id": "resource-conflict-json-merge",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "json-merge-candidate" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "JSON resource needs merge review: {subject}",
+        "explanation": "{writer_count} writer(s) touch this path: {writers_list}. {attr:reason}",
+        "fix": "Review the JSON files; InterMed can stage a deterministic overlay preview.",
+        "tags": ["resource", "json-merge-candidate"]
+      }
+    },
+    {
+      "id": "resource-conflict-unsafe-replace",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "unsafe-replace" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Resource override is order-dependent: {subject}",
+        "explanation": "{writer_count} writer(s) touch this path: {writers_list}. {attr:reason}",
+        "fix": "Choose the intended winner or add a compatibility datapack/resourcepack overlay.",
+        "tags": ["resource", "unsafe-replace"]
+      }
+    },
+    {
+      "id": "resource-conflict-tag-replace",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "tag-replace-order-dependent" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Tag merge is order-dependent (replace): {subject}",
+        "explanation": "{writer_count} writer(s) touch this tag: {writers_list}. {attr:reason}",
+        "fix": "A writer uses \"replace\": true. Confirm the intended winner; the set union is not order-independent.",
+        "tags": ["resource", "tag-replace-order-dependent"]
+      }
+    },
+    {
+      "id": "resource-conflict-tag-mixed-required",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "tag-mixed-required" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "note",
+        "category": "resource",
+        "title": "Tag entries carry required flags: {subject}",
+        "explanation": "{writer_count} writer(s) touch this tag: {writers_list}. {attr:reason}",
+        "fix": "Review the optional/required entries; values still union but semantics can differ.",
+        "tags": ["resource", "tag-mixed-required"]
+      }
+    },
+    {
+      "id": "resource-conflict-tag-invalid",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "tag-invalid" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Invalid tag document: {subject}",
+        "explanation": "{writer_count} writer(s) touch this tag path: {writers_list}. {attr:reason}",
+        "fix": "Inspect the malformed tag JSON; it cannot be merged as a tag.",
+        "tags": ["resource", "tag-invalid"]
+      }
+    },
+    {
+      "id": "resource-conflict-json-override",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "json-override" },
+      "evidence": {
+        "kind": "resource_writer",
+        "on": "primary.subject = related.attr:path",
+        "relation": "conflicts_with",
+        "weight": 0.8
+      },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Single-document JSON override: {subject}",
+        "explanation": "{writer_count} writer(s) define this {attr:domain}: {writers_list}. {attr:reason}",
+        "fix": "Only one definition survives by load order. Choose the intended winner or rename one.",
+        "tags": ["resource", "json-override"]
+      }
+    },
+    {
+      "id": "mixin-overlap-hot",
+      "kind": "fact-finding",
+      "input_kinds": ["mixin_overlap"],
+      "where_all": { "attr:hot_path": "true" },
+      "finding": {
+        "id": "mixin-overlap:{subject}",
+        "severity": "error",
+        "category": "mixin",
+        "title": "Mixin target overlap: {subject}",
+        "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
+        "fix": "Check mod compatibility notes and prefer versions known to share this target.",
+        "tags": ["mixin", "overlap"]
+      }
+    },
+    {
+      "id": "mixin-overlap",
+      "kind": "fact-finding",
+      "input_kinds": ["mixin_overlap"],
+      "where_all": { "attr:hot_path": "false" },
+      "finding": {
+        "id": "mixin-overlap:{subject}",
+        "severity": "warn",
+        "category": "mixin",
+        "title": "Mixin target overlap: {subject}",
+        "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
+        "fix": "Check mod compatibility notes and prefer versions known to share this target.",
+        "tags": ["mixin", "overlap"]
+      }
+    },
+    {
+      "id": "mixin-overwrite-hot",
+      "kind": "fact-finding",
+      "input_kinds": ["high_risk_overwrite"],
+      "where_all": { "attr:hot_path": "true" },
+      "finding": {
+        "id": "mixin-overwrite:{subject}->{attr:target}",
+        "severity": "error",
+        "category": "mixin",
+        "title": "High-risk @Overwrite mixin: {attr:target}",
+        "explanation": "{subject} overwrites code in {attr:target}. @Overwrite has a high compatibility risk because it replaces target behavior.",
+        "fix": "Prefer versions without competing overwrites, or remove one conflicting mod.",
+        "tags": ["mixin", "overwrite"]
+      }
+    },
+    {
+      "id": "mixin-overwrite",
+      "kind": "fact-finding",
+      "input_kinds": ["high_risk_overwrite"],
+      "where_all": { "attr:hot_path": "false" },
+      "finding": {
+        "id": "mixin-overwrite:{subject}->{attr:target}",
+        "severity": "warn",
+        "category": "mixin",
+        "title": "High-risk @Overwrite mixin: {attr:target}",
+        "explanation": "{subject} overwrites code in {attr:target}. @Overwrite has a high compatibility risk because it replaces target behavior.",
+        "fix": "Prefer versions without competing overwrites, or remove one conflicting mod.",
+        "tags": ["mixin", "overwrite"]
+      }
+    },
+    {
+      "id": "unknown-source",
+      "kind": "fact-finding",
+      "input_kinds": ["unknown_source"],
+      "finding": {
+        "id": "unknown-source:{subject}",
+        "severity": "warn",
+        "category": "security",
+        "title": "Unknown mod provenance: {subject}",
+        "explanation": "This jar has no recognizable Fabric/Quilt/Forge manifest. Provenance and supply-chain trust cannot be established.",
+        "fix": "Prefer mods from Modrinth or CurseForge with verifiable metadata.",
+        "tags": ["sbom", "provenance"]
+      }
+    },
+    {
+      "id": "unsigned-jar",
+      "kind": "fact-finding",
+      "input_kinds": ["signature_status"],
+      "where_all": { "attr:status": "unsigned" },
+      "finding": {
+        "id": "unsigned-jar:{subject}",
+        "severity": "note",
+        "category": "security",
+        "title": "Jar is not JAR-signed: {subject}",
+        "explanation": "No META-INF/*.SF signature block was found. Most Fabric/Forge mods ship unsigned; this is informational only.",
+        "fix": "Verify mod source manually if supply-chain trust matters.",
+        "tags": ["sbom", "signature"]
+      }
+    },
+    {
+      "id": "sbom-security-correlation",
+      "kind": "correlation",
+      "anchor": { "kind": "sbom", "alias": "s", "select": ["subject", "attr:trust_score"] },
+      "related_kinds": [
+        "uses_process_spawn",
+        "uses_unsafe",
+        "uses_dynamic_class_definition",
+        "uses_script_engine"
+      ],
+      "match_on": "s.subject = related.attr:archive",
+      "where": "s.attr:trust_score < {settings.sbom.well_identified_trust}",
+      "finding": {
+        "id": "low-trust-capability:{subject}",
+        "severity": "warn",
+        "category": "security",
+        "title": "Low-provenance jar `{subject}` exercises high-risk capability",
+        "explanation": "`{subject}` could not be confidently identified (trust score {trust}/100) yet statically references high-risk capability/capabilities: {capabilities}. Unknown provenance combined with a dangerous capability is a stronger supply-chain concern than either signal alone.",
+        "fix": "Establish the mod's provenance (known platform + signed/manifest) before trusting a jar that spawns processes, loads native code, or evaluates scripts.",
+        "tags": ["sbom", "security", "correlation"]
+      }
+    },
+    {
+      "id": "forge-coremod-present",
+      "kind": "fact-finding",
+      "input_kinds": ["coremod"],
+      "finding": {
+        "id": "coremod:{subject}:{attr:name}",
+        "rule_id": "coremod",
+        "severity": "note",
+        "category": "mixin",
+        "title": "Mod ships a Forge coremod: {subject}",
+        "explanation": "`{subject}` declares the coremod `{attr:name}` — a JavaScript bytecode-manipulation script that rewrites classes at load time, outside the loader's mixin/compatibility machinery. Coremods bypass conflict detection and break often across Minecraft/Forge updates, so review this mod first when triaging hard crashes or class-loading errors.",
+        "fix": "Prefer mixins or access transformers over coremods where possible, and check for an updated build of this mod after any Minecraft/Forge upgrade.",
+        "tags": ["coremod", "forge", "bytecode"]
+      }
+    }
+  ]
+}

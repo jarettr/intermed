@@ -8,4 +8,4 @@ Scan failures: 0
 data/minecraft/tags/items/test.json [safe-crdt-merge]
   writers: alpha, beta
   archives: alpha.jar, beta.jar
-  reason: Minecraft tag values can be merged as a deterministic set
+  reason: all writers append values without replace — a deterministic, order-independent set union

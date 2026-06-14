@@ -6,13 +6,25 @@ rust-version.workspace = true
 license.workspace = true
 description = "The `intermed` command-line workbench. Composition root: wires collectors and rules into the diagnosis engine."
 
+[lib]
+name = "intermed_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "intermed"
 path = "src/main.rs"
 
+[build-dependencies]
+clap = { workspace = true, features = ["derive"] }
+clap_complete = "4"
+clap_mangen = "0.2"
+
 [dependencies]
 clap.workspace = true
+rayon.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+intermed-config.workspace = true
 intermed-doctor-core.workspace = true
 intermed-report.workspace = true
 intermed-minecraft-scan.workspace = true
@@ -20,12 +32,26 @@ intermed-log.workspace = true
 intermed-deps.workspace = true
 intermed-rules.workspace = true
 intermed-vfs.workspace = true
+intermed-resource-ast.workspace = true
 intermed-packops.workspace = true
+intermed-dynamics.workspace = true
 intermed-mixin-intel.workspace = true
 intermed-security-audit.workspace = true
 intermed-sbom.workspace = true
 intermed-spark-bridge.workspace = true
+intermed-lab.workspace = true
 intermed-runtime-preflight.workspace = true
+intermed-duckdb.workspace = true
+strsim = "0.11"
+
+[features]
+default = []
+duckdb = ["intermed-duckdb/duckdb"]
 
 [dev-dependencies]
 zip.workspace = true
+intermed-security-audit = { path = "../intermed-security-audit" }
+
+[[test]]
+name = "duckdb_e2e"
+required-features = ["duckdb"]

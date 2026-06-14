@@ -4,8 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer C — dependency / version reasoner. Imperative in Phase 1 (semver); PubGrub adoption is a later phase."
+description = "Layer C — dependency / version reasoner with PubGrub global resolution."
 
 [dependencies]
 semver.workspace = true
+pubgrub.workspace = true
+creeper-semver-pubgrub.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 intermed-doctor-core.workspace = true

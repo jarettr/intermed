@@ -4,7 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Phase 8 — compatibility lab (corpus + smoke tests) — structured stub; contract wired, implementation deferred."
+description = "Layer K — Compatibility Lab: reproducible corpus locks, smoke-test ingestion/classification, and compatibility matrices (Phase 8)."
 
 [dependencies]
 intermed-doctor-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+regex.workspace = true
+rayon.workspace = true
+thiserror.workspace = true

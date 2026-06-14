@@ -6,11 +6,20 @@
 //! JSON + SARIF) the design doc asked us to carry forward.
 
 use intermed_doctor_core::DoctorReport;
+use intermed_facts::Fact;
 
+mod demo;
+mod html;
 mod sarif;
 mod terminal;
 
-pub use sarif::to_sarif;
+pub use demo::{
+    build_demo_report, render_markdown as render_demo_markdown, render_html as render_demo_html,
+    write_demo_artifacts, DemoArtifacts, DemoReport, DemoReportError, DEMO_REPORT_HTML,
+    DEMO_REPORT_JSON, DEMO_REPORT_SCHEMA, DEMO_SUMMARY_MD,
+};
+pub use html::{render_html, render_html_with_facts};
+pub use sarif::{to_sarif, to_sarif_with_facts};
 pub use terminal::render_terminal;
 
 /// Output format selector.
@@ -22,16 +31,33 @@ pub enum Format {
     Json,
     /// SARIF 2.1.0 for IDE / CI ingestion.
     Sarif,
+    /// Self-contained static HTML (lab-matrix style).
+    Html,
 }
 
-/// Render a report in the requested format.
+/// Render a report in the requested format (without the fact corpus).
 pub fn render(report: &DoctorReport, format: Format) -> String {
+    render_with_facts(report, &[], format)
+}
+
+/// Render a report, using the run's facts where a format can show more with them
+/// (SARIF physical locations, the HTML provenance/heatmap/explorer tabs).
+pub fn render_with_facts(report: &DoctorReport, facts: &[Fact], format: Format) -> String {
     match format {
-        Format::Terminal { color } => render_terminal(report, color),
+        Format::Terminal { color } => {
+            terminal::render_terminal_with_facts(report, color, facts)
+        }
         Format::Json => serde_json::to_string_pretty(report)
             .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
-        Format::Sarif => serde_json::to_string_pretty(&to_sarif(report))
+        Format::Sarif => serde_json::to_string_pretty(&to_sarif_with_facts(report, facts))
             .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
+        Format::Html => {
+            if facts.is_empty() {
+                render_html(report)
+            } else {
+                render_html_with_facts(report, facts)
+            }
+        }
     }
 }
 
@@ -65,6 +91,10 @@ mod tests {
             path: "./mods".into(),
             kind: TargetKind::ModsDir,
             mods_dir: None,
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            spark_report: None,
         };
         assemble(
             "0.1.0-test",
@@ -76,6 +106,7 @@ mod tests {
                 id: "missing-dependency".into(),
                 findings: 1,
             }],
+            None,
         )
     }
 
@@ -92,5 +123,9 @@ mod tests {
         let sarif = render(&r, Format::Sarif);
         assert!(sarif.contains("\"version\": \"2.1.0\""));
         assert!(sarif.contains("InterMed Doctor"));
+
+        let html = render(&r, Format::Html);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("fabric-api"));
     }
 }

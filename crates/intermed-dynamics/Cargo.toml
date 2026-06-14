@@ -1,0 +1,11 @@
+[package]
+name = "intermed-dynamics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer E (dynamics) — script-engine sensors. Parses KubeJS/CraftTweaker load logs for removed recipes/items and injects them as facts."
+
+[dependencies]
+regex.workspace = true
+intermed-doctor-core.workspace = true

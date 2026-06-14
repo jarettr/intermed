@@ -1,0 +1,84 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH intermed 1  "intermed 0.1.0" 
+.SH NAME
+intermed \- InterMed — Minecraft modpack/server evidence engine
+.SH SYNOPSIS
+\fBintermed\fR [\fB\-\-config\fR] [\fB\-\-dump\-config\fR] [\fB\-\-quiet\fR] [\fB\-v\fR|\fB\-\-verbose\fR]... [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+InterMed builds a fact graph from Minecraft servers, instances, mods directories, and logs, then derives findings with full provenance.
+.PP
+See docs/EXAMPLES.md for copy\-paste recipes for every subcommand.
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<FILE>\fR
+Config file (`intermed\-config\-v1` TOML). Overrides discovery; see docs/CONFIG.md
+.TP
+\fB\-\-dump\-config\fR
+Print the effective default config as TOML and exit (no subcommand required)
+.TP
+\fB\-\-quiet\fR
+Suppress informational progress messages on stderr (errors still print)
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Increase informational detail (repeatable: `\-v`, `\-vv`)
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+intermed\-doctor(1)
+Diagnose a server, instance, mods directory, or log/crash file
+.TP
+intermed\-vfs(1)
+Inspect resource/data overrides and generate overlay previews
+.TP
+intermed\-deps(1)
+Layer\-C dependency graph and PubGrub resolution
+.TP
+intermed\-mixin\-map(1)
+Inspect static Mixin targets, overlaps, and overwrite risks
+.TP
+intermed\-spark\-map(1)
+Import and summarize Spark performance reports
+.TP
+intermed\-lab(1)
+Compatibility Lab: corpus locks, smoke\-test ingestion, matrices
+.TP
+intermed\-rules(1)
+Validate declarative rule packs
+.TP
+intermed\-db(1)
+Query the DuckDB analytics store (`\-\-features duckdb`)
+.TP
+intermed\-history(1)
+Recurring conflicts across persisted diagnosis runs
+.TP
+intermed\-trends(1)
+Time\-series analytics over persisted runs
+.TP
+intermed\-cache(1)
+Jar scan cache maintenance (`stats`, `prune`, `clear`)
+.TP
+intermed\-sbom(1)
+SBOM export (SPDX / CycloneDX) from a mods directory
+.TP
+intermed\-demo(1)
+Presentation demo: aggregate a small real\-mod run into launcher\-facing reports
+.TP
+intermed\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH EXTRA
+Examples:
+  intermed doctor ./mods
+  intermed doctor ./server \-\-mixin\-risk \-\-json
+  intermed vfs explain ./mods
+  intermed mixin\-map ./mods
+  intermed rules check ./rules
+
+More: docs/EXAMPLES.md | Man: docs/man/intermed.1
+.SH VERSION
+v0.1.0

@@ -12,7 +12,9 @@ use intermed_facts::{kind, FactStore};
 
 use crate::collector::{CollectorOutcome, CollectorStatus};
 use crate::layer::Layer;
-use crate::target::{Environment, Loader, Side, Target, TargetKind};
+use crate::profile::DiagnosticProfile;
+use crate::instance_layout::LayoutKind;
+use crate::target::{Environment, InstanceType, Loader, Side, Target, TargetKind};
 
 /// Schema identifier embedded in every report (mirrors the old
 /// `intermed-release-check-v1` convention).
@@ -113,6 +115,9 @@ pub struct DoctorReport {
     pub collectors: Vec<CollectorReport>,
     pub rules: Vec<RuleStat>,
     pub deferred_layers: Vec<DeferredLayer>,
+    /// Wall-clock phase timings and jar-cache counters (present in `--json` output).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<DiagnosticProfile>,
     // evidence_graph: serialized per-finding via `findings[].evidence` in v1.
     // attachments: reserved for Phase 7+ (spark/JFR payloads).
 }
@@ -138,17 +143,78 @@ fn environment_from_facts(store: &FactStore) -> Environment {
         env.loader = f.attr("loader").and_then(Loader::parse);
         env.minecraft_version = f.attr("mc_version").map(str::to_string);
         env.launcher = f.attr("launcher").map(str::to_string);
-        env.side = match f.attr("side") {
-            Some("client") => Some(Side::Client),
-            Some("server") => Some(Side::Server),
-            Some("both") => Some(Side::Both),
-            _ => None,
-        };
+        env.host_launcher = f.attr("host_launcher").map(str::to_string);
+        env.layout = f.attr("layout").and_then(parse_layout_kind);
+        env.instance_type = f.attr("instance_type").and_then(parse_instance_type);
+        env.side = f
+            .attr("side")
+            .and_then(parse_side)
+            .or_else(|| env.instance_type.map(InstanceType::to_side));
     }
     if let Some(f) = store.by_kind(kind::JAVA_RUNTIME).next() {
         env.java_version = f.attr("version").map(str::to_string);
     }
     env
+}
+
+fn parse_side(value: &str) -> Option<Side> {
+    match value {
+        "client" => Some(Side::Client),
+        "server" => Some(Side::Server),
+        "both" => Some(Side::Both),
+        _ => None,
+    }
+}
+
+fn parse_instance_type(value: &str) -> Option<InstanceType> {
+    match value {
+        "server" => Some(InstanceType::Server),
+        "client" => Some(InstanceType::Client),
+        "integrated" => Some(InstanceType::Integrated),
+        _ => None,
+    }
+}
+
+fn parse_layout_kind(value: &str) -> Option<LayoutKind> {
+    match value {
+        "prism-instance" => Some(LayoutKind::PrismInstance),
+        "multimc-instance" => Some(LayoutKind::MultiMcInstance),
+        "dot-minecraft" => Some(LayoutKind::DotMinecraft),
+        "curseforge-pack" => Some(LayoutKind::CurseForgePack),
+        "modrinth-pack" => Some(LayoutKind::ModrinthPack),
+        "dedicated-server" => Some(LayoutKind::DedicatedServer),
+        "bare-mods-dir" => Some(LayoutKind::BareModsDir),
+        "unknown" => Some(LayoutKind::Unknown),
+        _ => None,
+    }
+}
+
+/// De-duplicate findings by `(rule_id, id)`.
+///
+/// The identity of a finding occurrence is the pair `(rule_id, id)`. The *same*
+/// rule re-emitting the same id is a true duplicate (e.g. the imperative and
+/// declarative backends of one rule agreeing). Two *different* rules that happen
+/// to pick the same id are distinct findings and must both survive — collapsing
+/// them by bare id would silently hide a backend disagreement. On a genuine
+/// within-rule duplicate we keep the higher-severity copy.
+fn dedup_findings(findings: &mut Vec<Finding>) {
+    let mut by_key: BTreeMap<(String, String), usize> = BTreeMap::new();
+    let mut keep = vec![true; findings.len()];
+    for i in 0..findings.len() {
+        let key = (findings[i].rule_id.clone(), findings[i].id.clone());
+        if let Some(&prev) = by_key.get(&key) {
+            if findings[i].severity > findings[prev].severity {
+                keep[prev] = false;
+                by_key.insert(key, i);
+            } else {
+                keep[i] = false;
+            }
+        } else {
+            by_key.insert(key, i);
+        }
+    }
+    let mut iter = keep.into_iter();
+    findings.retain(|_| iter.next().unwrap_or(true));
 }
 
 /// Assemble the final report from everything gathered during a run.
@@ -160,13 +226,9 @@ pub fn assemble(
     mut findings: Vec<Finding>,
     collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
     rule_stats: Vec<RuleStat>,
+    profile: Option<DiagnosticProfile>,
 ) -> DoctorReport {
-    // Defensive de-duplication: a finding id identifies one occurrence, so if
-    // two rules (or two facts) produced the same id, keep the first.
-    {
-        let mut seen = std::collections::HashSet::new();
-        findings.retain(|f| seen.insert(f.id.clone()));
-    }
+    dedup_findings(&mut findings);
 
     // Stable ordering: worst severity first, then by id.
     findings.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.id.cmp(&b.id)));
@@ -228,5 +290,37 @@ pub fn assemble(
         collectors: collector_reports,
         rules: rule_stats,
         deferred_layers,
+        profile,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finding(rule_id: &str, id: &str, sev: Severity) -> Finding {
+        Finding::builder(rule_id, id).severity(sev).build()
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_rules_sharing_an_id() {
+        let mut findings = vec![
+            finding("rule-a", "foo", Severity::Warn),
+            finding("rule-b", "foo", Severity::Error),
+        ];
+        dedup_findings(&mut findings);
+        // Different rules, same id → both kept (backend disagreement visible).
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
+    fn dedup_collapses_same_rule_keeping_higher_severity() {
+        let mut findings = vec![
+            finding("rule-a", "foo", Severity::Warn),
+            finding("rule-a", "foo", Severity::Error),
+        ];
+        dedup_findings(&mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, Severity::Error);
     }
 }

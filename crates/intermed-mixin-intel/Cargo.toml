@@ -7,10 +7,13 @@ license.workspace = true
 description = "Layer F — mixin intelligence / preflight risk map."
 
 [dependencies]
+cafebabe = "0.9.0"
 intermed-doctor-core.workspace = true
-regex.workspace = true
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
 zip.workspace = true
 
 [dev-dependencies]

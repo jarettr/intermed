@@ -4,7 +4,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer H — SBOM / provenance / packaging hygiene — structured stub; contract wired, implementation deferred."
+description = "Layer H — SBOM / provenance / packaging hygiene (Phase 6)."
 
 [dependencies]
 intermed-doctor-core.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+zip.workspace = true

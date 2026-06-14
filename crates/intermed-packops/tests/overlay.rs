@@ -29,13 +29,16 @@ fn overlay_preview_merges_safe_tag_and_writes_manifest() {
         )],
     );
 
-    let plan = write_overlay_preview(&mods, &out).unwrap();
+    let plan = write_overlay_preview(&mods, &out, false).unwrap();
     assert_eq!(plan.manifest.items.len(), 1);
     assert_eq!(
         plan.manifest.items[0].path,
         "data/minecraft/tags/items/test.json"
     );
     assert_eq!(plan.manifest.items[0].source, "merged tag values");
+    assert!(plan.manifest.items[0].safe_to_apply);
+    assert!(plan.manifest.safe_to_apply);
+    assert!(plan.manifest.skipped.is_empty());
 
     let merged = std::fs::read_to_string(out.join("data/minecraft/tags/items/test.json")).unwrap();
     assert!(merged.contains("minecraft:dirt"));
@@ -50,6 +53,47 @@ fn overlay_preview_merges_safe_tag_and_writes_manifest() {
 }
 
 #[test]
+fn overlay_skips_unsafe_winners_by_default_and_stages_with_flag() {
+    let root = temp_dir("unsafe");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+
+    // Two mods write the same recipe (a single-document override).
+    write_fabric_jar(
+        &mods.join("gamma.jar"),
+        "gamma",
+        &[("data/example/recipes/widget.json", br#"{"type":"a"}"#)],
+    );
+    write_fabric_jar(
+        &mods.join("delta.jar"),
+        "delta",
+        &[("data/example/recipes/widget.json", br#"{"type":"b"}"#)],
+    );
+
+    // Default: not staged, surfaced as skipped, output stays safe.
+    let safe_out = root.join("overlay-safe");
+    let plan = write_overlay_preview(&mods, &safe_out, false).unwrap();
+    assert!(plan.manifest.items.is_empty());
+    assert_eq!(plan.manifest.skipped.len(), 1);
+    assert!(plan.manifest.safe_to_apply);
+    assert!(!safe_out.join("data/example/recipes/widget.json").exists());
+
+    // Opt in: staged as a lexical-winner preview, marked unsafe.
+    let unsafe_out = root.join("overlay-unsafe");
+    let plan = write_overlay_preview(&mods, &unsafe_out, true).unwrap();
+    assert_eq!(plan.manifest.items.len(), 1);
+    assert!(!plan.manifest.items[0].safe_to_apply);
+    assert!(!plan.manifest.items[0].runtime_order_known);
+    assert!(!plan.manifest.safe_to_apply);
+    assert!(plan.manifest.skipped.is_empty());
+    assert!(unsafe_out
+        .join("data/example/recipes/widget.json")
+        .exists());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn overlay_refuses_existing_output_directory() {
     let root = temp_dir("existing-out");
     let mods = root.join("mods");
@@ -57,7 +101,7 @@ fn overlay_refuses_existing_output_directory() {
     std::fs::create_dir_all(&mods).unwrap();
     std::fs::create_dir_all(&out).unwrap();
 
-    let err = write_overlay_preview(&mods, &out).unwrap_err();
+    let err = write_overlay_preview(&mods, &out, false).unwrap_err();
     assert!(err.to_string().contains("already exists"));
 
     std::fs::remove_dir_all(root).ok();
@@ -73,7 +117,7 @@ fn overlay_does_not_remove_preexisting_temp_directory() {
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(tmp.join("owner.txt"), "not ours").unwrap();
 
-    let err = write_overlay_preview(&mods, &out).unwrap_err();
+    let err = write_overlay_preview(&mods, &out, false).unwrap_err();
     assert!(err
         .to_string()
         .contains("temporary overlay path already exists"));
@@ -92,7 +136,7 @@ fn overlay_cleans_temp_directory_after_stage_error() {
     let out = root.join("overlay");
     let tmp = root.join(format!(".overlay.tmp-{}", std::process::id()));
 
-    let err = write_overlay_preview(&mods, &out).unwrap_err();
+    let err = write_overlay_preview(&mods, &out, false).unwrap_err();
     assert!(err.to_string().contains("mods directory does not exist"));
     assert!(!tmp.exists());
 

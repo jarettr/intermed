@@ -1,0 +1,59 @@
+{
+  "schema": "intermed-demo-corpus-v1",
+  "audience": "ATLauncher",
+  "title": "InterMed presentation corpus",
+  "description": "Small set of real Modrinth mods that tell a launcher story: healthy pack, broken dependency, mixed loaders, duplicate ids, and a Forge stack.",
+  "root": "/home/mak/intermed_corpus",
+  "scenarios": [
+    {
+      "id": "fabric_clean",
+      "title": "Healthy Fabric 1.20.1",
+      "subtitle": "Sodium · Iris · Lithium · Fabric API · Mod Menu",
+      "role": "baseline",
+      "loader": "fabric",
+      "mc_version": "1.20.1",
+      "jar_count": 7,
+      "narrative": "A recognizable performance stack — the kind of instance ATLauncher ships every day. InterMed surfaces mixin intelligence and resource notes without false missing-dependency noise."
+    },
+    {
+      "id": "broken_deps",
+      "title": "Broken dependency",
+      "subtitle": "Iris without Sodium",
+      "role": "error",
+      "loader": "fabric",
+      "mc_version": "1.20.1",
+      "jar_count": 1,
+      "narrative": "Iris requires Sodium. One ERROR with provenance — actionable before the user ever clicks Play."
+    },
+    {
+      "id": "mixed_loader",
+      "title": "Mixed loaders",
+      "subtitle": "Fabric Lithium + Forge JEI",
+      "role": "warning",
+      "loader": "mixed",
+      "mc_version": "1.20.1",
+      "jar_count": 2,
+      "narrative": "Launcher instances occasionally accumulate cross-loader jars. InterMed flags mixed-loader-pack before a cryptic crash."
+    },
+    {
+      "id": "duplicate",
+      "title": "Duplicate mod id",
+      "subtitle": "Two Sodium versions side by side",
+      "role": "error",
+      "loader": "fabric",
+      "mc_version": "1.20.1",
+      "jar_count": 2,
+      "narrative": "Pack updates sometimes leave two builds of the same mod. duplicate-id catches it deterministically."
+    },
+    {
+      "id": "forge_pack",
+      "title": "Forge content pack",
+      "subtitle": "Create · JEI · Jade · Architectury",
+      "role": "baseline",
+      "loader": "forge",
+      "mc_version": "1.20.1",
+      "jar_count": 5,
+      "narrative": "Second ecosystem proof: Forge metadata, mixin overwrite effects, and resource-order notes on a real Create install."
+    }
+  ]
+}

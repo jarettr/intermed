@@ -1,0 +1,53 @@
+{
+  "diagnostics": [],
+  "domain": "tag",
+  "parse_status": "parsed",
+  "references": [
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "uses-item",
+      "required": true,
+      "target": "minecraft:iron_ingot"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "uses-item",
+      "required": true,
+      "target": "minecraft:gold_ingot"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "uses-item",
+      "required": false,
+      "target": "create:zinc_ingot"
+    },
+    {
+      "conditioned": false,
+      "is_tag": true,
+      "namespace": "c",
+      "relation": "uses-tag",
+      "required": true,
+      "target": "c:ingots/copper"
+    }
+  ],
+  "resource_path": "data/c/tags/items/ingots.json",
+  "summary": {
+    "entries": [
+      "c:ingots/copper",
+      "create:zinc_ingot",
+      "minecraft:gold_ingot",
+      "minecraft:iron_ingot"
+    ],
+    "entry_count": 4,
+    "has_required_flag": true,
+    "kind": "tag",
+    "registry": "items",
+    "replace": false
+  }
+}

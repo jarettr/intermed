@@ -7,5 +7,7 @@ license.workspace = true
 description = "Layer D — log & crash analyzer. Classifies known failure signatures and turns them into findings."
 
 [dependencies]
+rayon.workspace = true
 regex.workspace = true
+serde_json.workspace = true
 intermed-doctor-core.workspace = true

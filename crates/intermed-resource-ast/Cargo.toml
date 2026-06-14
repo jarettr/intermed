@@ -1,0 +1,20 @@
+[package]
+name = "intermed-resource-ast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layer M — resource/data semantics (typed resource AST over Layer-E VFS)."
+
+[dependencies]
+intermed-doctor-core.workspace = true
+intermed-rules.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

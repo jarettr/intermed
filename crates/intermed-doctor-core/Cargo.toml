@@ -8,6 +8,10 @@ description = "Diagnosis pipeline: target detection, Collector/Rule contracts, t
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
+sha2.workspace = true
+zip.workspace = true
+thiserror.workspace = true
 intermed-facts.workspace = true
 intermed-evidence.workspace = true

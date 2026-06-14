@@ -21,6 +21,7 @@ pub enum Layer {
     Rules,            // J
     Lab,              // K
     RuntimePreflight, // L
+    DataSemantics,    // M
 }
 
 impl Layer {
@@ -39,6 +40,7 @@ impl Layer {
             Layer::Rules => "J",
             Layer::Lab => "K",
             Layer::RuntimePreflight => "L",
+            Layer::DataSemantics => "M",
         }
     }
 
@@ -56,6 +58,7 @@ impl Layer {
             Layer::Rules => "Rule engine",
             Layer::Lab => "Compatibility lab",
             Layer::RuntimePreflight => "Runtime preflight",
+            Layer::DataSemantics => "Resource / data semantics (AST)",
         }
     }
 
@@ -73,6 +76,7 @@ impl Layer {
             Layer::Performance => 7,
             Layer::Lab => 8,
             Layer::RuntimePreflight => 9,
+            Layer::DataSemantics => 3,
         }
     }
 }

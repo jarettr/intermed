@@ -3,16 +3,89 @@ Target: <TMP>/mods
 Configs: 2
 Mixin classes: 2
 Overlaps: 1
+Interactions: 1
+Risk assessments: 1
 High-risk overwrites: 1
+Apply failures: 2
 Scan failures: 0
+
+Top Mixin Clusters:
+1. net.minecraft.client.render.WorldRenderer [hot]
+   Mods: alpha, beta
+   Risk: 80 (certainty 100, apply-failure 55, semantic 100, blast 30, fragility 0)
+   Main reasons:
+   - @Overwrite involved
+   - Injection semantics weight +16
+   - Hot-path target
+   - 2 mods touch this target
+   - 2 interaction edge(s)
+   Actions:
+   - verify the target class/method exists in this version; run with --minecraft-jar for full apply verification
+   - test with each conflicting mod disabled and compare Spark profiles
 
 Overlaps:
 net.minecraft.client.render.WorldRenderer [hot]
   mods: alpha, beta
   classes: alpha.mixin.RenderMixin, beta.mixin.RenderMixin
   operations: inject, overwrite
+  method_conflict: true
+  effect: `alpha` injects into `net.minecraft.client.render.WorldRenderer` at site `m0()V@HEAD` (@HEAD).
+  effect: `beta` fully replaces `net.minecraft.client.render.WorldRenderer#m0()V` via @Overwrite.
+
+Mixin Complexity Score (per mod):
+beta — 26/100 (1 class(es), 1 target(s), 1 site(s))
+alpha — 21/100 (1 class(es), 1 target(s), 1 site(s))
+
+Interactions:
+alpha ↔ beta on net.minecraft.client.render.WorldRenderer (Both inject into site `m0()V@HEAD` on `net.minecraft.client.render.WorldRenderer`)
+
+Conflict edges:
+same-injection-point — alpha.mixin.RenderMixin (beta.mixin.RenderMixin) @ net.minecraft.client.render.WorldRenderer
+  site: m0()V@HEAD
+overwrite-vs-injector — beta.mixin.RenderMixin (alpha.mixin.RenderMixin) @ net.minecraft.client.render.WorldRenderer
+  site: m0()V::overwrite-vs-inject
+
+Recommendations:
+Prefer @Inject / @ModifyReturnValue over @Overwrite — net.minecraft.client.render.WorldRenderer (m0()V@HEAD)
+  Replace @Overwrite with a targeted @Inject (HEAD/RETURN + CallbackInfoReturnable) or MixinExtras @ModifyReturnValue / @WrapOperation, so other mixins can still compose with the method instead of being locked out by a full replacement.
+  Docs: https://github.com/LlamaLad7/MixinExtras/wiki/ModifyReturnValue
+  Example:
+    @Mixin(WorldRenderer.class)
+    public class RenderMixin {
+        @Inject(method = "m0", at = @At("HEAD"), cancellable = true)
+        private void intermed$guard(WorldRenderer self, CallbackInfo ci) {
+            // narrow change — other mixins can still inject at RETURN
+        }
+    }
+    
+    // Or with MixinExtras (composable return rewrite):
+    @ModifyReturnValue(method = "m0")
+    private static boolean intermed$wrap(boolean original) {
+        return original; // compose with upstream mixins
+    }
+@Overwrite locks out another mod's injectors — net.minecraft.client.render.WorldRenderer (m0()V::overwrite-vs-inject)
+  `beta` @Overwrites a method that `alpha` injects into — the overwrite replaces the whole body, so the other mod's hooks silently stop applying. Convert the @Overwrite to @Inject / @ModifyReturnValue / @WrapOperation so both survive.
+  Docs: https://github.com/LlamaLad7/MixinExtras/wiki/ModifyReturnValue
+Ship a refmap for named Minecraft targets — net.minecraft.client.render.WorldRenderer (apply:)
+  This mixin targets named Minecraft classes but no refmap is present, so its references will not resolve to the runtime (intermediary) namespace. Ensure the mixin annotation processor runs and the refmap is bundled.
+  Docs: https://github.com/SpongePowered/Mixin/wiki/Injection-Point-Selection
+Ship a refmap for named Minecraft targets — net.minecraft.client.render.WorldRenderer (apply:)
+  This mixin targets named Minecraft classes but no refmap is present, so its references will not resolve to the runtime (intermediary) namespace. Ensure the mixin annotation processor runs and the refmap is bundled.
+  Docs: https://github.com/SpongePowered/Mixin/wiki/Injection-Point-Selection
+
+Mixin effects:
+alpha — net.minecraft.client.render.WorldRenderer#m0()V
+  site_key: m0()V@HEAD
+  `alpha` injects into `net.minecraft.client.render.WorldRenderer` at site `m0()V@HEAD` (@HEAD).
+  kinds: entry-modification
+beta — net.minecraft.client.render.WorldRenderer#m0()V
+  site_key: m0()V@HEAD
+  `beta` fully replaces `net.minecraft.client.render.WorldRenderer#m0()V` via @Overwrite.
+  kinds: full-method-replacement
 
 High-risk overwrites:
 beta -> net.minecraft.client.render.WorldRenderer
   mixin: beta.mixin.RenderMixin
+  site_key: m0()V@HEAD
   hot_path: true
+  effect: `beta` fully replaces `net.minecraft.client.render.WorldRenderer#m0()V` via @Overwrite.

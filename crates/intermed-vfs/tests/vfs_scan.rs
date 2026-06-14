@@ -79,13 +79,15 @@ fn scan_classifies_all_collision_classes_deterministically() {
         classes["data/minecraft/tags/items/test.json"],
         ConflictClass::SafeCrdtMerge
     );
+    // A recipe is a single-document file: two writers means a load-order
+    // override, classified as such rather than the generic "unsafe replace".
     assert_eq!(
         classes["data/example/recipes/widget.json"],
-        ConflictClass::UnsafeReplace
+        ConflictClass::JsonOverride
     );
     assert_eq!(
         classes["assets/example/lang/en_us.json"],
-        ConflictClass::JsonMergeCandidate
+        ConflictClass::LangJsonMerge
     );
     assert_eq!(classes["pack.mcmeta"], ConflictClass::Identical);
 

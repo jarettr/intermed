@@ -1,0 +1,30 @@
+{
+  "diagnostics": [],
+  "domain": "model",
+  "parse_status": "parsed",
+  "references": [
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "parent-model",
+      "required": true,
+      "target": "minecraft:item/generated"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "uses-texture",
+      "required": true,
+      "target": "create:item/wrench"
+    }
+  ],
+  "resource_path": "assets/create/models/item/wrench.json",
+  "summary": {
+    "kind": "model",
+    "override_count": 0,
+    "parent": "minecraft:item/generated",
+    "texture_count": 1
+  }
+}

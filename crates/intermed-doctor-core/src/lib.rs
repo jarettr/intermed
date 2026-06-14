@@ -18,17 +18,47 @@
 
 pub mod collector;
 pub mod engine;
+pub mod io_util;
+pub mod jar_cache;
 pub mod layer;
+pub mod instance_layout;
+pub mod modpack;
+pub mod modpack_manifest;
+pub mod profile;
 pub mod report;
 pub mod rule;
+pub mod scan_filter;
+pub mod settings;
 pub mod target;
 
 pub use collector::{CollectCtx, Collector, CollectorOutcome, CollectorStatus, DeferredCollector};
 pub use engine::{DiagnosticEngine, DiagnosticRun, EngineBuilder};
+pub use io_util::write_atomic;
+pub use jar_cache::{
+    CacheStats, JarCache, JarCacheConfig, LocalDirRemoteTier, RemoteCacheTier,
+    CACHE_SCHEMA as JAR_CACHE_SCHEMA, DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES,
+    DEFAULT_CACHE_MIN_BYTES, DEFAULT_FINGERPRINT_REVERIFY_DAYS, DEFAULT_PRUNE_INTERVAL_DAYS,
+};
 pub use layer::Layer;
+pub use profile::{DiagnosticProfile, PhaseTiming, PROFILE_SCHEMA};
 pub use report::{DoctorReport, REPORT_SCHEMA};
 pub use rule::{Rule, RuleCtx};
-pub use target::{detect_target, Environment, Loader, Side, Target, TargetKind};
+pub use modpack::{materialize_modpack_archive, ModpackError, ModpackMount};
+pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
+pub use scan_filter::{
+    filter_jar_paths, list_jar_archives, parse_changed_since, should_scan_path,
+};
+pub use settings::{
+    default_settings, DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel,
+    MetadataSettings, MixinLevel, MixinSettings, ResourceAstLevel, ResourceSettings, ScanSettings,
+    SbomSettings, SecuritySettings,
+};
+pub use instance_layout::{
+    find_mods_directory, resolve_layout, resolve_game_root, LayoutKind, ResolvedLayout,
+};
+pub use target::{
+    detect_target, target_from_layout, Environment, InstanceType, Loader, Side, Target, TargetKind,
+};
 
 // Re-export the foundational crates so collector/rule crates can depend on just
 // `intermed-doctor-core` and still speak facts/findings.
@@ -91,8 +121,13 @@ mod tests {
             path: ".".into(),
             kind: TargetKind::ModsDir,
             mods_dir: Some(".".into()),
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            spark_report: None,
         };
-        let report = engine.diagnose(&target);
+        let run = engine.diagnose_with_facts(&target);
+        let report = &run.report;
 
         assert_eq!(report.schema, REPORT_SCHEMA);
         assert_eq!(report.findings.len(), 1);
@@ -101,5 +136,14 @@ mod tests {
         assert_eq!(report.deferred_layers.len(), 1);
         assert_eq!(report.deferred_layers[0].layer_code, "E");
         assert_eq!(report.exit_code(), 0);
+        assert_eq!(run.profile.schema, PROFILE_SCHEMA);
+        let phase_sum: u64 = run
+            .profile
+            .collectors
+            .iter()
+            .chain(run.profile.rules.iter())
+            .map(|p| p.duration_ms)
+            .sum();
+        assert!(run.profile.total_ms >= phase_sum);
     }
 }

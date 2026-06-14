@@ -1,0 +1,22 @@
+{
+  "diagnostics": [],
+  "domain": "lang",
+  "parse_status": "parsed",
+  "references": [],
+  "resource_path": "assets/create/lang/en_us.json",
+  "summary": {
+    "entries": [
+      [
+        "block.create.gearbox",
+        "Gearbox"
+      ],
+      [
+        "item.create.wrench",
+        "Wrench"
+      ]
+    ],
+    "format": "json",
+    "key_count": 2,
+    "kind": "lang"
+  }
+}

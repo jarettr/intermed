@@ -1,9 +1,11 @@
-# Donor Inventory (Phase 0)
+# Donor Inventory (Phase 0+)
 
 The new project is **Rust**; the legacy project is **100% Java** (~840 `.java`
 files). "Extraction" between languages is therefore **port-by-behavior, not
 copy** — the Java is a read-only *specification and reference implementation*,
 never source to be moved.
+
+**Current Rust implementation map:** [STATUS.md](STATUS.md)
 
 ## Legacy warehouse
 
@@ -26,31 +28,38 @@ JVM frontier; everything else is plain data/text and ports cleanly.
 | **2** | Reads Java `.class` bytecode (ASM) | Rust class-file parser (`cafebabe`/`noak`) **or** optional JVM worker |
 | **3** | Mutation / execution / monolith-entangled | Research-only; not in product path |
 
-## Tier 1 — port cleanly (Phase 1–3, 5–6)
+## Tier 1 — ported
 
-| Donor (legacy path) | Does | New home | Crate to use |
+| Donor (legacy path) | Does | New home | Status |
 |---|---|---|---|
-| `test-harness/.../analysis/LogAnalyzer.java` | regex log classification (zero non-stdlib imports) | `intermed-log` ✅ done | `regex` |
-| `app/.../resolver/SemVerConstraint.java` | version parse/compare | `intermed-deps` ✅ done | `semver` |
-| `app/.../resolver/PubGrubResolver.java` | dependency resolution | `intermed-deps` (later) | adopt **`pubgrub`** crate |
-| `intermed-runtime-core/.../metadata/ModMetadataParser.java` (**JSON path**) | fabric/quilt/forge/paper manifests | `intermed-minecraft-scan` ✅ done | `serde_json`+`toml`+`serde_yaml`+`zip` |
-| `app/.../vfs/CrdtJsonMergeEngine.java`, `VirtualFileSystemRouter.java` | JSON merge + fs routing | `intermed-vfs` ✅ extracted | `serde_json`+`zip` |
-| `intermed-packaging/.../ModSbomGenerator.java`, `PackagingService` | checksums, `.imod`/`.impack`, Ed25519 verify | `intermed-sbom` (Phase 6) | — |
-| `app/.../doctor/DoctorReport.java` etc. | report-DNA (ANSI/JSON/SARIF) | `intermed-report` ✅ ported & redesigned | — |
+| `test-harness/.../LogAnalyzer.java` | regex log classification | `intermed-log` | ✅ Phase 1 |
+| `app/.../resolver/SemVerConstraint.java` | version parse/compare | `intermed-deps` | ✅ Phase 1 |
+| `app/.../resolver/PubGrubResolver.java` | dependency resolution | `intermed-deps` | ✅ `pubgrub` + `creeper-semver-pubgrub` |
+| `intermed-runtime-core/.../metadata/ModMetadataParser.java` (**JSON path**) | fabric/quilt/forge manifests | `intermed-minecraft-scan` | ✅ Phase 1 |
+| `app/.../vfs/CrdtJsonMergeEngine.java`, `VirtualFileSystemRouter.java` | JSON merge + fs routing | `intermed-vfs`, `intermed-packops` | ✅ Phase 3 |
+| `app/.../doctor/DoctorReport.java` etc. | report-DNA (ANSI/JSON/SARIF) | `intermed-report` | ✅ redesigned |
+
+## Tier 1 — partial / later
+
+| Donor | Does | New home | Status |
+|---|---|---|---|
+| `intermed-packaging/.../ModSbomGenerator.java` | checksums, `.imod`/`.impack`, Ed25519 | `intermed-sbom` | ✅ jar scan; ⏳ signed pack verify |
+| `ModrinthClient`, loader installers (lab) | networked corpus + live smoke | `intermed-lab` traits | ⏳ deferred behind `CandidateProvider` / `SmokeRunner` |
 
 ## External backend adopted in Phase 5
 
 | Source | Does | New home | Note |
 |---|---|---|---|
-| Souffle Datalog | high-performance offline rule evaluation | `intermed-rules` optional `--logic=souffle` | real `.facts` + generated `.dl` execution; not required for default CLI |
+| Souffle Datalog | offline rule evaluation | `intermed-rules` `--logic=souffle` | optional external binary |
+| DuckDB | SQL rules + analytics | `intermed-duckdb` | feature-gated |
 
-## Tier 2 — the JVM frontier (Phase 4, 6)
+## Tier 2 — JVM frontier (ported deeper than early notes)
 
-| Donor | Does | New home | Note |
+| Donor | Does | New home | Rust depth (today) |
 |---|---|---|---|
-| `app/.../mixin/MixinASTAnalyzer.java` | mixin targets via ASM annotations | `intermed-mixin-intel` ✅ extracted as static intelligence | currently constant-pool/string evidence; structural parser remains the next fidelity step |
-| `intermed-runtime-core/.../metadata/ModMetadataParser.java` (**annotation path**) | Forge `@Mod` discovery via ASM | `intermed-minecraft-scan` (later) | only needed for annotation-only mods |
-| `intermed-security-agent/.../SecurityHookTransformer.java` | API-usage scan via ASM | `intermed-security-audit` (Phase 6) | port the *detection*, drop the *transformation* |
+| `app/.../mixin/MixinASTAnalyzer.java` | mixin targets via ASM | `intermed-mixin-intel` | ✅ configs + annotations + **handler bytecode**; refmap/Tiny **canonical** keys; `@At` **`site_key`**; `MixinInteractionEngine`; hierarchy index; semantics heuristics — see [LAYER-F-MIXIN](LAYER-F-MIXIN.md) |
+| `intermed-runtime-core/.../metadata/ModMetadataParser.java` (**annotation path**) | Forge `@Mod` via ASM | `intermed-minecraft-scan` | ⏳ annotation-only mods |
+| `intermed-security-agent/.../SecurityHookTransformer.java` | API scan via ASM | `intermed-security-audit` | ✅ constant-pool structural + reflection-corroborated + per-capability collapse + grouped findings — see [LAYER-G-SECURITY](LAYER-G-SECURITY.md) |
 
 ## Tier 3 — research-only (never product path yet)
 

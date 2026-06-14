@@ -8,13 +8,18 @@
 
 use intermed_facts::FactStore;
 
+use crate::jar_cache::JarCache;
 use crate::layer::Layer;
+use crate::settings::DiagnosisSettings;
 use crate::target::Target;
 
 /// Context handed to a collector: the target and the store to write into.
 pub struct CollectCtx<'a> {
     pub target: &'a Target,
     pub store: &'a mut FactStore,
+    /// Per-jar scan cache (`None` when `--no-cache` or cache disabled).
+    pub jar_cache: Option<&'a JarCache>,
+    pub settings: &'a DiagnosisSettings,
 }
 
 /// What happened when a collector ran.

@@ -4,7 +4,26 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer G — static security & supply-chain audit — structured stub; contract wired, implementation deferred."
+description = "Layer G — static security audit via constant-pool method references (Phase 6)."
+
+[features]
+default = ["noak-fallback"]
+# Secondary constant-pool parser, tried only when cafebabe rejects a class.
+# On by default (it buys back coverage on classes cafebabe cannot parse);
+# disable to drop the dependency: `--no-default-features`.
+noak-fallback = ["dep:noak"]
 
 [dependencies]
+cafebabe.workspace = true
 intermed-doctor-core.workspace = true
+intermed-minecraft-scan.workspace = true
+noak = { workspace = true, optional = true }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+zip.workspace = true

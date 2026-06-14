@@ -1,0 +1,63 @@
+{
+  "diagnostics": [],
+  "domain": "recipe",
+  "parse_status": "parsed",
+  "references": [
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "uses-recipe-type",
+      "required": true,
+      "target": "create:crushing"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "produces-item",
+      "required": true,
+      "target": "create:crushed_iron"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "produces-item",
+      "required": true,
+      "target": "minecraft:gravel"
+    },
+    {
+      "conditioned": false,
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "uses-item",
+      "required": true,
+      "target": "minecraft:cobblestone"
+    },
+    {
+      "conditioned": false,
+      "is_tag": true,
+      "namespace": "c",
+      "relation": "uses-tag",
+      "required": true,
+      "target": "c:ingots/iron"
+    }
+  ],
+  "resource_path": "data/create/recipe/gadget.json",
+  "summary": {
+    "has_conditions": false,
+    "ingredient_count": 2,
+    "ingredients": [
+      "c:ingots/iron",
+      "minecraft:cobblestone"
+    ],
+    "kind": "recipe",
+    "output_count": 2,
+    "outputs": [
+      "create:crushed_iron",
+      "minecraft:gravel"
+    ],
+    "recipe_type": "create:crushing"
+  }
+}

@@ -17,5 +17,31 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Build (generates man pages)
+        run: cargo build
+      - name: Man page present
+        run: test -f docs/man/intermed.1
+      - name: Shell completions present
+        run: |
+          test -f docs/completions/intermed.bash
+          test -f docs/completions/_intermed
+          test -f docs/completions/intermed.fish
+          test -f docs/completions/_intermed.ps1
       - name: Test
         run: cargo test
+      - name: Mod-scale benchmarks (50/100/200 mods)
+        run: cargo test -p intermed-cli --test mod_scale_bench -- --nocapture
+        env:
+          INTERMED_JOBS: "2"
+
+  duckdb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - name: DuckDB crate tests
+        run: cargo test -p intermed-duckdb --features duckdb
+      - name: CLI duckdb e2e
+        run: cargo test -p intermed-cli --features duckdb --test duckdb_e2e

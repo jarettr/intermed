@@ -13,6 +13,103 @@ use crate::refmap::Namespace;
 /// Implementation status surfaced in help text.
 pub const STATUS: &str = "active: mixin interaction graph + composite risk";
 
+/// The runtime *side* a mixin (or application site) applies to, derived from which
+/// config array it was declared in (`mixins` ⇒ [`Side::Both`], `client` ⇒
+/// [`Side::Client`], `server` ⇒ [`Side::Server`]) and any Fabric/Quilt object-form
+/// `environment` override (plan Phase 1).
+///
+/// The point of carrying side is that two mixins on opposite strict sides can never
+/// co-apply in one process, so a `client`-only vs `server`-only pair is *not* a
+/// conflict — see [`Side::compatible_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Side {
+    Client,
+    Server,
+    /// Applies on both sides (a common/`mixins` entry, or `environment = "*"`).
+    Both,
+    /// Side could not be determined (no array provenance recorded).
+    #[default]
+    Unknown,
+}
+
+impl Side {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Client => "client",
+            Side::Server => "server",
+            Side::Both => "both",
+            Side::Unknown => "unknown",
+        }
+    }
+
+    /// Two sides can co-apply in the same runtime unless one is strictly `client`
+    /// and the other strictly `server`. `Both`/`Unknown` are compatible with
+    /// everything (conservative: never suppress a real conflict on weak evidence).
+    pub fn compatible_with(self, other: Side) -> bool {
+        !matches!(
+            (self, other),
+            (Side::Client, Side::Server) | (Side::Server, Side::Client)
+        )
+    }
+
+    /// Widen two side observations of the *same* mixin into one: agreement keeps the
+    /// side, `Unknown` is the identity, and any genuine disagreement widens to
+    /// `Both` (the mixin is declared for more than one side).
+    pub fn merge(self, other: Side) -> Side {
+        match (self, other) {
+            (a, b) if a == b => a,
+            (Side::Unknown, b) => b,
+            (a, Side::Unknown) => a,
+            _ => Side::Both,
+        }
+    }
+}
+
+/// Whether a mixin / application site should be considered active in the analyzed
+/// environment, and *why* (plan Phase 1). Static analysis can rarely *confirm*
+/// activation, so the honest default for a normally-declared mixin is
+/// [`ActivationStatus::ActiveAssumed`], not "active".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActivationStatus {
+    /// Positive runtime evidence the mixin applied (reserved for log-join).
+    ActiveConfirmed,
+    /// Declared in a config with no gating — assumed to apply, not confirmed.
+    ActiveAssumed,
+    /// Excluded because its side is disjoint from the analyzed environment.
+    InactiveBySide,
+    /// The owning config declares an `IMixinConfigPlugin` that can toggle it.
+    ConditionalByPlugin,
+    /// An injector `constraints = …` makes application environment-conditional.
+    ConditionalByConstraint,
+    /// Activation could not be determined.
+    #[default]
+    Unknown,
+}
+
+impl ActivationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ActivationStatus::ActiveConfirmed => "active-confirmed",
+            ActivationStatus::ActiveAssumed => "active-assumed",
+            ActivationStatus::InactiveBySide => "inactive-by-side",
+            ActivationStatus::ConditionalByPlugin => "conditional-by-plugin",
+            ActivationStatus::ConditionalByConstraint => "conditional-by-constraint",
+            ActivationStatus::Unknown => "unknown",
+        }
+    }
+
+    /// `true` when application is gated/uncertain (plugin or constraint) — a
+    /// signal that absence-based conclusions about this mixin carry lower certainty.
+    pub fn is_conditional(self) -> bool {
+        matches!(
+            self,
+            ActivationStatus::ConditionalByPlugin | ActivationStatus::ConditionalByConstraint
+        )
+    }
+}
+
 /// Named and intermediary forms of one mixin target class when a Tiny bridge exists.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TargetNamespace {
@@ -38,6 +135,11 @@ pub struct MixinConfigRecord {
     /// lower confidence.
     #[serde(default)]
     pub plugin: Option<String>,
+    /// Per-mixin application [`Side`], keyed by the *short* mixin name as it appears
+    /// in the config (`mixins`/`client`/`server` arrays, plus object-form
+    /// `environment` overrides). Absent ⇒ side unknown for that mixin.
+    #[serde(default)]
+    pub mixin_sides: std::collections::BTreeMap<String, Side>,
 }
 
 /// Flat scan record for one mixin class (cache-friendly, CLI-facing).
@@ -52,6 +154,15 @@ pub struct MixinClassRecord {
     /// Per-target namespace bridge (populated when the jar ships Tiny mappings).
     #[serde(default)]
     pub target_namespace: std::collections::BTreeMap<String, TargetNamespace>,
+    /// The class namespace this mod's **loader** presents to mixins at runtime,
+    /// derived from the jar's loader metadata: [`Namespace::Intermediary`] for
+    /// Fabric/Quilt, [`Namespace::Named`] for Forge/NeoForge (official Mojang
+    /// names since 1.20.1), [`Namespace::Unknown`] when undetermined or a
+    /// multi-loader jar ships both manifests. Drives the `remap=false` /
+    /// `refmap_missing` apply-failure checks, which only fire when a target's
+    /// written namespace cannot resolve in this runtime namespace.
+    #[serde(default)]
+    pub runtime_namespace: Namespace,
     pub operations: Vec<MixinOperation>,
     /// Resolved injection points after refmap / mapping normalization.
     #[serde(default)]
@@ -83,6 +194,20 @@ pub struct MixinClassRecord {
     /// confirmed — it carries a certainty penalty (see [`crate::analyzer`]).
     #[serde(default)]
     pub plugin_gated: bool,
+    /// Application [`Side`] for this mixin class, resolved from its owning config's
+    /// array membership / object-form environment (plan Phase 1). `Both`/`Unknown`
+    /// are conservative — only a strict `Client`/`Server` pairing suppresses a
+    /// cross-mod conflict.
+    #[serde(default)]
+    pub side: Side,
+    /// Activation status (plan Phase 1): whether this mixin is assumed active, or
+    /// gated by a plugin / constraint and therefore only *conditionally* applied.
+    #[serde(default)]
+    pub activation: ActivationStatus,
+    /// Human-readable justification for [`MixinClassRecord::activation`] / `side`,
+    /// surfaced in `--explain` and the activation fact.
+    #[serde(default)]
+    pub activation_reason: String,
 }
 
 /// Semantic view of one mixin class — superset of [`MixinClassRecord`].
@@ -305,8 +430,15 @@ pub struct HandlerBodySummary {
     pub return_count: u32,
     pub exception_handlers: u32,
     pub uses_reflection: bool,
-    #[serde(default)]
-    pub string_literals: Vec<String>,
+    /// When the handler uses reflection, the string constants that look like a
+    /// reflective dispatch *target* (a qualified class name like `java.lang.Runtime`,
+    /// or a dangerous reflective member like `exec` / `defineClass`). Empty for
+    /// non-reflective handlers. This is the handler-granular analogue of the
+    /// security layer's jar-level "reflection-corroborated" string evidence: it
+    /// pinpoints *which* `@Inject`/`@Redirect` handler reflectively reaches an API
+    /// that static target analysis cannot see.
+    #[serde(default, alias = "string_literals")]
+    pub reflective_targets: Vec<String>,
     /// Handler emits a typed return (`ARETURN`, `IRETURN`, …) — may change the target method's result.
     #[serde(default)]
     pub modifies_return_value: bool,
@@ -401,6 +533,73 @@ pub struct TargetFieldWrite {
     pub source: ValueSource,
 }
 
+/// How precisely a handler's dataflow was resolved — rises as later refinement
+/// passes add information. The report and confidence scoring read this so a claim
+/// always carries its own certainty level (plan §0/§3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrecisionLevel {
+    /// Only structural opcode facts (a `cancel` *was* invoked) — no value provenance.
+    #[default]
+    Structural,
+    /// Operand/taint provenance resolved by the abstract interpreter.
+    Provenance,
+    /// Value sources (what is returned / cancelled / written) resolved precisely.
+    ValueSource,
+    /// Cross-layer refinement (hot-path / complexity) applied on top.
+    Full,
+}
+
+impl PrecisionLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrecisionLevel::Structural => "structural",
+            PrecisionLevel::Provenance => "provenance",
+            PrecisionLevel::ValueSource => "value-source",
+            PrecisionLevel::Full => "full",
+        }
+    }
+    /// Raise to at least `floor` (precision only ever increases through passes).
+    pub fn raise_to(&mut self, floor: PrecisionLevel) {
+        if floor > *self {
+            *self = floor;
+        }
+    }
+}
+
+/// Why a handler's dataflow could not be resolved precisely at some point — the
+/// auditable reasons behind [`HandlerDataflow::imprecise`] (plan §0/§1). Soundness
+/// is unaffected: an imprecise reason only ever *lowers* a claim to `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImpreciseReason {
+    /// A loop back-edge whose loop-carried state a single forward pass can't know.
+    LoopBackEdge,
+    /// A control-flow merge with mismatched operand-stack heights.
+    StackHeightMismatch,
+    /// A `tableswitch` / `lookupswitch` whose successors aren't enumerated.
+    Switch,
+    /// A merge point reachable only via an edge the analysis doesn't model.
+    UnmodeledMerge,
+    /// Exception control flow (`athrow` handler edges) not modeled.
+    ExceptionFlow,
+    /// The fixpoint hit its iteration cap and widened to conservative.
+    WideningCap,
+}
+
+impl ImpreciseReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImpreciseReason::LoopBackEdge => "loop-back-edge",
+            ImpreciseReason::StackHeightMismatch => "stack-height-mismatch",
+            ImpreciseReason::Switch => "switch",
+            ImpreciseReason::UnmodeledMerge => "unmodeled-merge",
+            ImpreciseReason::ExceptionFlow => "exception-flow",
+            ImpreciseReason::WideningCap => "widening-cap",
+        }
+    }
+}
+
 /// Precise dataflow / taint facts for one handler body, produced by the abstract
 /// interpreter in [`crate::dataflow`]. Unlike [`HandlerBodySummary`]'s flat
 /// counters, these distinguish *whether* a control-flow effect actually happens
@@ -455,6 +654,28 @@ pub struct HandlerDataflow {
     /// stack shape: structural booleans stay reliable, value sources may read
     /// `unknown` where precision was lost. Never produces a wrong precise claim.
     pub imprecise: bool,
+    /// How precisely this handler was resolved (rises through refinement passes).
+    #[serde(default)]
+    pub precision: PrecisionLevel,
+    /// Confidence in the value-level claims, 0–100. Structural booleans are always
+    /// reliable; this scores the *precise* fields (return source, field writes).
+    #[serde(default)]
+    pub confidence: u8,
+    /// The specific reasons precision was lost, for `--debug-mixin-dataflow` and
+    /// metrics. Empty ⇔ `!imprecise`.
+    #[serde(default)]
+    pub imprecise_reasons: Vec<ImpreciseReason>,
+}
+
+impl HandlerDataflow {
+    /// Record a precision-loss reason and set the (legacy) `imprecise` flag. The
+    /// single place degradation is recorded, so reasons and the flag never drift.
+    pub fn degrade(&mut self, reason: ImpreciseReason) {
+        self.imprecise = true;
+        if !self.imprecise_reasons.contains(&reason) {
+            self.imprecise_reasons.push(reason);
+        }
+    }
 }
 
 /// Semantic effect of a mixin handler — derived from [`HandlerBodySummary`] and injection context.
@@ -1051,6 +1272,31 @@ pub struct MixinScan {
     /// missing, remap-false suspicious) — see [`crate::apply_failure`].
     #[serde(default)]
     pub apply_failures: Vec<crate::apply_failure::ApplyFailure>,
+    /// Site-level application records — the central Phase-2 entity. One per
+    /// handler→target-method→injection-point tuple (plan Phase 2).
+    #[serde(default)]
+    pub application_sites: Vec<crate::site::ApplicationSite>,
+    /// Runtime classpath coverage for this scan (plan Phase 4): how complete the
+    /// analyzer's view of available classes was when verifying application.
+    #[serde(default)]
+    pub classpath_coverage: Option<crate::classpath::ClasspathCoverage>,
+    /// Site-level composition groups (plan Phases 9–10): handlers sharing one exact
+    /// injection point, ordered by priority and classified by how they compose.
+    #[serde(default)]
+    pub compositions: Vec<crate::composition::SiteComposition>,
+    /// Grouped, actionable risk diagnoses (plan Phase 13): the top-level picture.
+    #[serde(default)]
+    pub risk_clusters: Vec<crate::clusters::RiskCluster>,
+    /// Mixins that hook Minecraft data loaders — runtime resource mutations bridging
+    /// Layer F to Layer M (static datapack) and the Dynamics (script) layer.
+    #[serde(default)]
+    pub resource_mutations: Vec<crate::resource_bridge::RuntimeResourceMutation>,
+    /// Behaviour-grounded capabilities a mod earns via its mixin targets (Layer F → B).
+    #[serde(default)]
+    pub capabilities: Vec<crate::subsystem::MixinCapability>,
+    /// Security-sensitive subsystems mixins weave into (Layer F → G).
+    #[serde(default)]
+    pub security_surfaces: Vec<crate::subsystem::MixinSecuritySurface>,
     pub failures: Vec<MixinScanFailure>,
 }
 
@@ -1070,4 +1316,3 @@ pub struct MixinAnalysis {
     pub bloat: Vec<MixinBloatAssessment>,
     pub graph: MixinInteractionGraph,
 }
-

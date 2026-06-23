@@ -28,12 +28,14 @@
 use std::path::PathBuf;
 
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, Severity};
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, Layer, RuleCtx, Target, TargetKind,
 };
 
 use regex::Regex;
+
+pub mod script_scan;
 
 /// Confidence stamped on dynamics facts. Below the structural collectors (1.0):
 /// these are heuristic reads of free-form logs, not parsed registries.
@@ -302,6 +304,40 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+// ── Static script collector ────────────────────────────────────────────────
+
+/// Scans a pack's data-pack **scripts on disk** (KubeJS `.js`, CraftTweaker
+/// `.zs`) and emits runtime-removal/modification facts — the static counterpart
+/// to [`ScriptDynamicsCollector`], which reads run logs. Together they let the
+/// engine downgrade a static recipe finding that a script deletes anyway.
+pub struct StaticScriptCollector;
+
+/// Construct the static script-source collector.
+#[must_use]
+pub fn static_script_collector() -> StaticScriptCollector {
+    StaticScriptCollector
+}
+
+impl Collector for StaticScriptCollector {
+    fn id(&self) -> &'static str {
+        "static-script-scanner"
+    }
+    fn layer(&self) -> Layer {
+        Layer::Resource
+    }
+    fn applies(&self, target: &Target) -> bool {
+        !script_scan::script_files(target).is_empty()
+    }
+    fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+        let n = script_scan::script_files(ctx.target).len();
+        if n == 0 {
+            return CollectorOutcome::skipped("no KubeJS/CraftTweaker scripts found");
+        }
+        let emitted = script_scan::emit(ctx.store, ctx.target);
+        CollectorOutcome::active(emitted, format!("{n} script file(s) scanned"))
+    }
+}
+
 // ── Rule ─────────────────────────────────────────────────────────────────
 
 /// Folds runtime-removal facts into a single auditable note.
@@ -324,7 +360,10 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let recipes: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_RECIPE).collect();
         let items: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_ITEM).collect();
-        let loot_tables: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE).collect();
+        let loot_tables: Vec<&_> = ctx
+            .store
+            .by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE)
+            .collect();
         let tags: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_TAG).collect();
         if recipes.is_empty() && items.is_empty() && loot_tables.is_empty() && tags.is_empty() {
             return Vec::new();
@@ -338,10 +377,7 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
             .copied()
             .collect();
 
-        let mut engines: Vec<&str> = all_facts
-            .iter()
-            .filter_map(|f| f.attr("engine"))
-            .collect();
+        let mut engines: Vec<&str> = all_facts.iter().filter_map(|f| f.attr("engine")).collect();
         engines.sort_unstable();
         engines.dedup();
 
@@ -477,9 +513,11 @@ mod tests {
         assert_eq!(item_facts.len(), 3, "stick + brass_ingot + rice");
         assert_eq!(tag_facts.len(), 2, "logs + planks");
         assert_eq!(loot_facts.len(), 2, "dungeon + oak_log");
-        assert!(recipe_facts
-            .iter()
-            .any(|f| f.subject == "minecraft:furnace"));
+        assert!(
+            recipe_facts
+                .iter()
+                .any(|f| f.subject == "minecraft:furnace")
+        );
         assert!(item_facts.iter().any(|f| f.subject == "create:brass_ingot"));
 
         let note = run
@@ -498,7 +536,9 @@ mod tests {
     fn groovyscript_marker_regex_matches_bracketed_log_line() {
         let pat = patterns()
             .iter()
-            .find(|p| p.engine == engine::GROOVYSCRIPT && p.fact_kind == kind::RUNTIME_REMOVED_RECIPE)
+            .find(|p| {
+                p.engine == engine::GROOVYSCRIPT && p.fact_kind == kind::RUNTIME_REMOVED_RECIPE
+            })
             .expect("groovy recipe pattern");
         let re = Regex::new(pat.regex).expect("regex compiles");
         let line = "[INFO] [GroovyScript] Removed recipe 'create:mixing'";

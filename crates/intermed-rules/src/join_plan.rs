@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use intermed_doctor_core::facts::Fact;
 
-use crate::expr::{extract_equijoin_keys, resolve_term, ExprCtx};
+use crate::expr::{extract_equijoin_keys, term_value};
 
 /// Broadcast threshold: when one side has at most this many facts and `on` is
 /// `TRUE`, reuse bindings for the small side instead of a Cartesian product loop.
@@ -28,21 +28,54 @@ pub fn index_facts_by_term<'a>(
     facts: &[&'a Fact],
     alias: &str,
     key_term: &str,
-    settings: &BTreeMap<String, String>,
+    _settings: &BTreeMap<String, String>,
 ) -> HashMap<String, Vec<&'a Fact>> {
+    // Precompile the key-term resolver once, instead of building a `BTreeMap` binding +
+    // `ExprCtx` and re-parsing `key_term` for every fact (this index is built over tens
+    // of thousands of facts). Mirrors `resolve_term`'s single-binding semantics exactly.
+    let resolve = compile_key_resolver(alias, key_term);
     let mut map: HashMap<String, Vec<&'a Fact>> = HashMap::new();
     for fact in facts {
-        let bindings = single_binding(alias, fact);
-        let ctx = ExprCtx {
-            bindings: &bindings,
-            settings,
-            vars: None,
-        };
-        if let Some(key) = resolve_term(key_term, &ctx) {
+        if let Some(key) = resolve(fact) {
             map.entry(key).or_default().push(fact);
         }
     }
     map
+}
+
+/// A precompiled per-fact join-key extractor.
+type KeyResolver = Box<dyn Fn(&Fact) -> Option<String>>;
+
+/// Compile a join-key `term` into a per-fact extractor for a single bound `alias`.
+/// Matches [`resolve_term`] with a one-alias binding and `vars: None` exactly.
+fn compile_key_resolver(alias: &str, term: &str) -> KeyResolver {
+    if term == "subject" {
+        return Box::new(|f| Some(f.subject.clone()));
+    }
+    if let Some(attr) = term.strip_prefix("attr:") {
+        let attr = attr.to_string();
+        return Box::new(move |f| term_value(f, &attr));
+    }
+    if let Some((a, rest)) = term.split_once('.') {
+        if a != alias {
+            // Only the bound alias is in scope; any other alias resolves to nothing.
+            return Box::new(|_| None);
+        }
+        let rest = rest.to_string();
+        return Box::new(move |f| {
+            if let Some(attr) = rest.strip_prefix("attr:") {
+                term_value(f, attr)
+            } else if rest == "subject" {
+                Some(f.subject.clone())
+            } else if rest == "kind" {
+                Some(f.kind.clone())
+            } else {
+                term_value(f, &rest)
+            }
+        });
+    }
+    // A bare identifier resolves only against `vars`, which this path never supplies.
+    Box::new(|_| None)
 }
 
 /// Parse equijoin keys from an `on` / `match_on` expression.
@@ -87,16 +120,10 @@ fn term_belongs_to_alias(term: &str, alias: &str) -> bool {
     term.starts_with(&format!("{alias}."))
 }
 
-fn single_binding<'a>(alias: &str, fact: &'a Fact) -> BTreeMap<String, &'a Fact> {
-    let mut map = BTreeMap::new();
-    map.insert(alias.to_string(), fact);
-    map
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
+    use intermed_doctor_core::facts::{FactStore, kind};
 
     #[test]
     fn extracts_subject_archive_equijoin() {

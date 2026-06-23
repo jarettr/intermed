@@ -108,7 +108,7 @@
         "title": "Resource can be merged safely: {subject}",
         "explanation": "{writer_count} writer(s) touch this path: {writers_list}. {attr:reason}",
         "fix": "Generate an overlay preview and inspect the merged tag values.",
-        "tags": ["resource", "safe-crdt-merge"]
+        "tags": ["resource", "safe-crdt-merge", "safe-merge"]
       }
     },
     {
@@ -244,6 +244,166 @@
       }
     },
     {
+      "id": "resource-conflict-safe-json-object-merge",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "safe-json-object-merge" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "note",
+        "category": "resource",
+        "title": "Resource merges as a safe object union: {subject}",
+        "explanation": "{writer_count} writer(s) define disjoint keys in this {attr:domain}: {writers_list}. {attr:reason}",
+        "fix": "No action needed; an overlay can union these deterministically.",
+        "tags": ["resource", "safe-json-object-merge", "safe-merge"]
+      }
+    },
+    {
+      "id": "resource-conflict-root-metadata",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "root-metadata" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "info",
+        "category": "resource",
+        "title": "Root pack metadata present in multiple jars: {subject}",
+        "explanation": "{writer_count} jar(s) ship this root pack descriptor: {writers_list}. {attr:reason}",
+        "fix": "Expected for resource packs. A generated overlay carries its own pack.mcmeta.",
+        "tags": ["resource", "root-metadata"]
+      }
+    },
+    {
+      "id": "resource-conflict-order-dependent-atlas",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "order-dependent-atlas" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Atlas sources are order-dependent: {subject}",
+        "explanation": "{writer_count} writer(s) define this atlas: {writers_list}. {attr:reason}",
+        "fix": "Merge the atlas source lists into one file, or ensure one writer is authoritative.",
+        "tags": ["resource", "order-dependent-atlas"]
+      }
+    },
+    {
+      "id": "resource-conflict-order-dependent-sound-def",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "order-dependent-sound-def" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Conflicting sound definitions: {subject}",
+        "explanation": "{writer_count} writer(s) define overlapping sound events differently: {writers_list}. {attr:reason}",
+        "fix": "The disjoint events union safely; resolve the conflicting event(s) by choosing a winner.",
+        "tags": ["resource", "order-dependent-sound-def"]
+      }
+    },
+    {
+      "id": "resource-conflict-order-dependent-shader",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "order-dependent-shader" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Shader override is order-dependent: {subject}",
+        "explanation": "{writer_count} writer(s) override this shader: {writers_list}. {attr:reason}",
+        "fix": "Shader overrides are loader-specific; verify which mod should own this program.",
+        "tags": ["resource", "order-dependent-shader"]
+      }
+    },
+    {
+      "id": "resource-conflict-binary-override-functional",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "binary-override", "attr:domain": "shader" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Functional binary asset override: {subject}",
+        "explanation": "{writer_count} writer(s) ship differing bytes for this {attr:domain}: {writers_list}. {attr:reason}",
+        "fix": "A functional asset (shader/font) override can break rendering; choose the intended winner.",
+        "tags": ["resource", "binary-override"]
+      }
+    },
+    {
+      "id": "resource-conflict-binary-override-font",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "binary-override", "attr:domain": "font" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Functional binary asset override: {subject}",
+        "explanation": "{writer_count} writer(s) ship differing bytes for this {attr:domain}: {writers_list}. {attr:reason}",
+        "fix": "A functional asset (shader/font) override can break rendering; choose the intended winner.",
+        "tags": ["resource", "binary-override"]
+      }
+    },
+    {
+      "id": "resource-conflict-binary-override-cosmetic",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "binary-override" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "note",
+        "category": "resource",
+        "title": "Binary asset override: {subject}",
+        "explanation": "{writer_count} writer(s) ship differing bytes for this {attr:domain}: {writers_list}. {attr:reason}",
+        "fix": "Usually a cosmetic texture/sound override resolved by load order; verify if it matters.",
+        "tags": ["resource", "binary-override"]
+      }
+    },
+    {
+      "id": "tag-replace-platform",
+      "kind": "fact-finding",
+      "input_kinds": ["security_suspect_modification"],
+      "where_all": { "attr:detail": "platform_tag_replace" },
+      "finding": {
+        "id": "tag-replace-platform:{subject}",
+        "rule_id": "resource-semantics",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Mod replaces a platform/common tag: {subject}",
+        "explanation": "{attr:writer} sets \"replace\": true on a platform/convention tag ({subject}), which wipes entries other mods add to that broad tag. This can silently break cross-mod compatibility (e.g. ore/ingot conventions).",
+        "fix": "Use additive tag entries (replace=false) unless wiping the tag is intended.",
+        "tags": ["resource", "tag", "replace", "semantic-override"]
+      }
+    },
+    {
+      "id": "recipe-disabled-platform",
+      "kind": "fact-finding",
+      "input_kinds": ["security_suspect_modification"],
+      "where_all": { "attr:detail": "platform_recipe_disabled" },
+      "finding": {
+        "id": "recipe-disabled-platform:{subject}",
+        "rule_id": "resource-semantics",
+        "severity": "note",
+        "category": "resource",
+        "title": "Mod disables a platform recipe: {subject}",
+        "explanation": "{attr:writer} ships an empty/output-less recipe at {subject}, which removes a vanilla/platform recipe. Often intentional (a recipe-overhaul mod), but worth confirming.",
+        "fix": "Confirm the recipe removal is intended for your modset.",
+        "tags": ["resource", "recipe", "disabled"]
+      }
+    },
+    {
       "id": "mixin-overlap-hot",
       "kind": "fact-finding",
       "input_kinds": ["mixin_overlap"],
@@ -323,7 +483,8 @@
       "input_kinds": ["signature_status"],
       "where_all": { "attr:status": "unsigned" },
       "finding": {
-        "id": "unsigned-jar:{subject}",
+        "id": "artifact-signature-status:unsigned:{subject}",
+        "rule_id": "unsigned-jar",
         "severity": "note",
         "category": "security",
         "title": "Jar is not JAR-signed: {subject}",

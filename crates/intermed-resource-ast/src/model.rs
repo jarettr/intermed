@@ -67,51 +67,22 @@ impl From<intermed_doctor_core::ResourceAstLevel> for ResourceLevel {
     }
 }
 
-/// The Minecraft data/asset domain of a resource — *what kind of file* this is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ResourceDomain {
-    Tag,
-    Recipe,
-    Lang,
-    PackMcmeta,
-    Model,
-    Blockstate,
-    LootTable,
-    Atlas,
-    Advancement,
-    /// Valid JSON in a domain we don't model in detail.
-    GenericJson,
-    /// `.lang` properties / other `key=value` files.
-    Properties,
-    /// `.mcfunction` script.
-    McFunction,
-    /// Non-text / unmodelled asset (textures, sounds, …).
-    BinaryAsset,
+// The Minecraft data/asset domain of a resource — *what kind of file* this is —
+// is the canonical [`intermed_resource_identity::ResourceDomain`]. Re-exported so
+// existing `crate::model::ResourceDomain` references (and serde shapes) are
+// unchanged, while classification has a single source of truth.
+pub use intermed_resource_identity::ResourceDomain;
+
+/// Which domains parse at a given Layer-M level. This lives in Layer M (not the
+/// identity crate) because [`ResourceLevel`] is an analysis-depth concept, not a
+/// property of the resource itself. `Semantic` covers the MVP domains; `Full`
+/// adds the reference-heavy asset domains.
+pub trait DomainParseExt {
+    fn parsed_at(self, level: ResourceLevel) -> bool;
 }
 
-impl ResourceDomain {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ResourceDomain::Tag => "tag",
-            ResourceDomain::Recipe => "recipe",
-            ResourceDomain::Lang => "lang",
-            ResourceDomain::PackMcmeta => "pack-mcmeta",
-            ResourceDomain::Model => "model",
-            ResourceDomain::Blockstate => "blockstate",
-            ResourceDomain::LootTable => "loot-table",
-            ResourceDomain::Atlas => "atlas",
-            ResourceDomain::Advancement => "advancement",
-            ResourceDomain::GenericJson => "generic-json",
-            ResourceDomain::Properties => "properties",
-            ResourceDomain::McFunction => "mcfunction",
-            ResourceDomain::BinaryAsset => "binary-asset",
-        }
-    }
-
-    /// Whether this domain is parsed at the given level. `Semantic` covers the
-    /// MVP domains; `Full` adds the reference-heavy asset domains.
-    pub fn parsed_at(self, level: ResourceLevel) -> bool {
+impl DomainParseExt for ResourceDomain {
+    fn parsed_at(self, level: ResourceLevel) -> bool {
         match self {
             ResourceDomain::Tag
             | ResourceDomain::Recipe
@@ -121,11 +92,73 @@ impl ResourceDomain {
             | ResourceDomain::Blockstate
             | ResourceDomain::LootTable
             | ResourceDomain::Atlas
-            | ResourceDomain::Advancement => level.includes_full_domains(),
-            // Generic / binary / properties / mcfunction are classified but carry
-            // no domain summary; they still contribute namespace ownership.
+            | ResourceDomain::Advancement
+            | ResourceDomain::Predicate
+            | ResourceDomain::ItemModifier => level.includes_full_domains(),
+            // Structure (`.nbt` binary / `.snbt` stringified-NBT) is *not* JSON and
+            // has no parser — it is classified for namespace ownership but never
+            // parsed (parsing it produced false "invalid JSON" diagnostics).
+            ResourceDomain::Structure => false,
+            // Generic JSON is parsed at `full` only — it stores a canonical-JSON
+            // fingerprint so the generic-registry-object override (unmodelled
+            // datapack registries: damage types, trim materials, …) can compare
+            // writers. Heavier, hence gated to the opt-in full level.
+            ResourceDomain::GenericJson => level.includes_full_domains(),
+            // Binary / properties / mcfunction are classified but carry no domain
+            // summary; they still contribute namespace ownership.
             _ => false,
         }
+    }
+}
+
+/// A specific load condition gating a resource or reference (Forge/Fabric/NeoForge).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "type")]
+pub enum ResourceCondition {
+    /// E.g. `forge:mod_loaded` or `fabric:all_mods_loaded`
+    ModLoaded { modid: String },
+    /// E.g. `forge:not`
+    Not { condition: Box<ResourceCondition> },
+    /// E.g. `forge:and`
+    And { conditions: Vec<ResourceCondition> },
+    /// E.g. `forge:or`
+    Or { conditions: Vec<ResourceCondition> },
+    /// E.g. `forge:tag_empty`
+    TagEmpty { tag: String },
+    /// E.g. `forge:false`
+    False,
+    /// Any other condition we don't deeply model
+    Other { condition_type: String },
+}
+
+/// How fully Layer M understands a resource's *meaning* (as opposed to whether it
+/// parsed as JSON). A vanilla recipe is fully understood; a custom serializer's
+/// payload may be opaque, so diffs over it must not claim a precise semantic change
+/// they cannot actually see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SemanticOpacity {
+    /// Fully interpreted (vanilla schema).
+    #[default]
+    Transparent,
+    /// A modded schema we partially understand (extracted some structure).
+    PartiallyKnown,
+    /// A custom serializer whose payload we cannot interpret — compare by content
+    /// hash only, and never claim a precise semantic diff (output/ingredient).
+    OpaqueCustomSerializer,
+}
+
+impl SemanticOpacity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SemanticOpacity::Transparent => "transparent",
+            SemanticOpacity::PartiallyKnown => "partially-known",
+            SemanticOpacity::OpaqueCustomSerializer => "opaque-custom-serializer",
+        }
+    }
+    /// Whether the extracted semantic fields (outputs/ingredients) are reliable.
+    pub fn is_reliable(self) -> bool {
+        !matches!(self, SemanticOpacity::OpaqueCustomSerializer)
     }
 }
 
@@ -168,6 +201,9 @@ pub enum RefRelation {
     LootEntry,
     AtlasSource,
     AdvancementCriterion,
+    /// A reference extracted from an unmodelled datapack registry object by a
+    /// data-driven JSON-pointer spec (damage type → sound, trim material → asset…).
+    RegistryRef,
 }
 
 impl RefRelation {
@@ -180,10 +216,31 @@ impl RefRelation {
             RefRelation::ParentModel => "parent_model",
             RefRelation::UsesModel => "uses_model",
             RefRelation::UsesTexture => "uses_texture",
+            RefRelation::RegistryRef => "registry_ref",
             RefRelation::LootEntry => "loot_entry",
             RefRelation::AtlasSource => "atlas_source",
             RefRelation::AdvancementCriterion => "advancement_criterion",
         }
+    }
+
+    /// Whether a *cross-namespace* reference of this kind is evidence of a
+    /// load-time dependency on another mod.
+    ///
+    /// Client-asset references — model parents, model/texture uses, atlas sources —
+    /// are excluded: those targets are frequently runtime-generated, baked, or
+    /// supplied by a resource pack, so a target in an uninstalled namespace is not
+    /// proof of a missing mod (the same FP class the model-file resolver already
+    /// refuses to raise findings from). Data references (recipe type/items, loot,
+    /// tags, advancements, datapack registry refs) do imply a dependency.
+    #[must_use]
+    pub fn implies_dependency(self) -> bool {
+        !matches!(
+            self,
+            RefRelation::ParentModel
+                | RefRelation::UsesModel
+                | RefRelation::UsesTexture
+                | RefRelation::AtlasSource
+        )
     }
 }
 
@@ -198,11 +255,18 @@ pub struct ResourceReference {
     pub namespace: String,
     /// Whether absence of the target would break the resource (vs. optional).
     pub required: bool,
-    /// Whether this reference is gated behind a load condition (forge/fabric
+    /// Whether this reference is gated behind load conditions (forge/fabric
     /// `conditions`), so a missing target may be intentional.
-    pub conditioned: bool,
+    pub conditions: Vec<ResourceCondition>,
     /// Whether `target` is a tag reference (`#namespace:path`).
     pub is_tag: bool,
+}
+
+impl ResourceReference {
+    /// Returns true if this reference is gated by any load conditions.
+    pub fn is_conditioned(&self) -> bool {
+        !self.conditions.is_empty()
+    }
 }
 
 /// Severity of a parse-time diagnostic on a single resource.
@@ -212,6 +276,16 @@ pub enum DiagnosticSeverity {
     Info,
     Warning,
     Error,
+}
+
+impl DiagnosticSeverity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiagnosticSeverity::Info => "info",
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Error => "error",
+        }
+    }
 }
 
 /// A diagnostic produced while parsing one resource (malformed field, etc.).
@@ -251,6 +325,47 @@ pub enum ResourceSummary {
     Blockstate(crate::domain::blockstate::BlockstateSummary),
     LootTable(crate::domain::loot_table::LootTableSummary),
     Atlas(crate::domain::atlas::AtlasSummary),
-    /// No typed summary (generic/binary/skipped).
+    Advancement(crate::domain::advancement::AdvancementSummary),
+    Predicate(crate::domain::predicate::PredicateSummary),
+    ItemModifier(crate::domain::item_modifier::ItemModifierSummary),
+    /// Generic JSON: a content fingerprint (SHA-256 of canonical JSON) for the
+    /// generic-registry override diff. A *struct* variant, not a newtype — an
+    /// internally-tagged enum (`tag = "kind"`) cannot serialize a newtype holding
+    /// a primitive, which silently broke hashing when generic JSON was parsed.
+    GenericJson {
+        fingerprint: String,
+    },
+    /// No typed summary (binary/skipped).
     Generic,
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::RefRelation;
+
+    #[test]
+    fn client_asset_refs_do_not_imply_dependency() {
+        for r in [
+            RefRelation::ParentModel,
+            RefRelation::UsesModel,
+            RefRelation::UsesTexture,
+            RefRelation::AtlasSource,
+        ] {
+            assert!(!r.implies_dependency(), "{r:?} must not imply a dependency");
+        }
+    }
+
+    #[test]
+    fn data_refs_imply_dependency() {
+        for r in [
+            RefRelation::UsesRecipeType,
+            RefRelation::UsesItem,
+            RefRelation::UsesTag,
+            RefRelation::LootEntry,
+            RefRelation::AdvancementCriterion,
+            RefRelation::RegistryRef,
+        ] {
+            assert!(r.implies_dependency(), "{r:?} must imply a dependency");
+        }
+    }
 }

@@ -25,8 +25,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{classify, parse_resource, parser_version, RESOURCE_AST_CACHE_SCHEMA};
-use crate::model::{CachedResourceAst, ResourceLevel};
+use crate::domain::{RESOURCE_AST_CACHE_SCHEMA, classify, parse_resource, parser_version};
+use crate::model::{CachedResourceAst, DomainParseExt, ResourceLevel};
 use crate::semantic::namespace::path_namespace;
 
 /// Per-jar scan limits. Jars are untrusted: bound entry count and total parsed
@@ -152,7 +152,9 @@ pub fn scan_jar(jar: &Path, level: ResourceLevel, max_json_bytes: u64) -> JarAst
             continue;
         }
         if bytes.len() as u64 > max_json_bytes {
-            truncations.push(format!("{path}: decompressed past {max_json_bytes} byte cap, skipped"));
+            truncations.push(format!(
+                "{path}: decompressed past {max_json_bytes} byte cap, skipped"
+            ));
             continue;
         }
         total_parsed = total_parsed.saturating_add(bytes.len() as u64);
@@ -202,23 +204,20 @@ fn detect_writer_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Stri
         })
         .or_else(|| {
             read_zip_text(archive, "quilt.mod.json").and_then(|text| {
-                serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| {
-                    v.get("quilt_loader")
-                        .and_then(|q| q.get("id"))
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                })
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("quilt_loader")
+                            .and_then(|q| q.get("id"))
+                            .and_then(|x| x.as_str())
+                            .map(str::to_string)
+                    })
             })
         })
         .or_else(|| {
             read_zip_text(archive, "META-INF/mods.toml")
                 .or_else(|| read_zip_text(archive, "META-INF/neoforge.mods.toml"))
-                .and_then(|text| {
-                    text.lines()
-                        .find_map(|line| line.trim().strip_prefix("modId"))
-                        .and_then(|rest| rest.split_once('='))
-                        .map(|(_, value)| value.trim().trim_matches('"').to_string())
-                })
+                .and_then(|text| intermed_resource_identity::mod_id_from_mods_toml(&text))
         })
 }
 

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use intermed_doctor_core::facts::Fact;
-use intermed_doctor_core::{write_atomic, DiagnosticProfile, DiagnosticRun};
+use intermed_doctor_core::{DiagnosticProfile, DiagnosticRun, write_atomic};
 
 /// Persist the run to DuckDB. Returns `Err` with a message when the requested
 /// write could not be completed, so the caller can fail the command — a `--db`

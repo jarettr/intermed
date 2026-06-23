@@ -3,11 +3,11 @@
 //! Emits composite risk findings, per-injection [`mixin_effect_summary`] notes, and
 //! attaches safer-mixin recommendations to `--explain` via `fix_candidates`.
 
+use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
     Category, EvidenceEdge, Finding, FixCandidate, Relation, Severity,
 };
-use intermed_doctor_core::facts::{kind, FactId};
-use intermed_doctor_core::RuleCtx;
+use intermed_doctor_core::facts::{FactId, kind};
 
 use crate::model::{
     EffectiveEffectKind, HandlerEffect, HandlerSideEffect, MixinOperation, Recommendation,
@@ -36,12 +36,8 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
             let hot_path = f.attr_bool("hot_path").unwrap_or(false);
             let reasons = f.attr("reasons").unwrap_or("").to_string();
             let (named, inter) = target_aliases(ctx, &f.subject);
-            let (spark_boost, spark_quality) = spark_overlap_boost(
-                &hot_methods,
-                &f.subject,
-                named.as_deref(),
-                inter.as_deref(),
-            );
+            let (spark_boost, spark_quality) =
+                spark_overlap_boost(&hot_methods, &f.subject, named.as_deref(), inter.as_deref());
             let adjusted = score.saturating_add(spark_boost).min(100);
             let severity = risk_severity(adjusted);
 
@@ -71,10 +67,10 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
                     named.as_deref(),
                     inter.as_deref(),
                 )
-                    .iter()
-                    .filter(|hm| hm.percent >= 5.0)
-                    .map(|hm| hm.method.as_str())
-                    .collect();
+                .iter()
+                .filter(|hm| hm.percent >= 5.0)
+                .map(|hm| hm.method.as_str())
+                .collect();
                 let qualifier = if weak_spark {
                     " (matched by class name only — possible, not confirmed)"
                 } else {
@@ -136,7 +132,8 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
 
             for target in ctx.store.by_kind(kind::MIXIN_TARGET) {
                 if target.attr("target") == Some(f.subject.as_str()) {
-                    builder = builder.evidence(EvidenceEdge::new(target.id, Relation::Supports, 0.8));
+                    builder =
+                        builder.evidence(EvidenceEdge::new(target.id, Relation::Supports, 0.8));
                 }
             }
             for edge in ctx.store.by_kind(kind::MIXIN_CONFLICT_EDGE) {
@@ -146,12 +143,9 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
                 }
             }
             let (named, inter) = target_aliases(ctx, &f.subject);
-            for hm in hot_methods_for_class(
-                &hot_methods,
-                &f.subject,
-                named.as_deref(),
-                inter.as_deref(),
-            ) {
+            for hm in
+                hot_methods_for_class(&hot_methods, &f.subject, named.as_deref(), inter.as_deref())
+            {
                 builder = builder
                     .evidence(EvidenceEdge::new(hm.fact_id, Relation::CorrelatesWith, 0.9))
                     .tag("hot-path");
@@ -182,6 +176,11 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
         out.extend(mixin_bloat_findings(ctx));
         out.extend(mixin_plugin_findings(ctx));
         out.extend(apply_failure_findings(ctx));
+        out.extend(risk_cluster_findings(ctx));
+        out.extend(cross_layer_resource_findings(ctx));
+        out.extend(cross_layer_capability_resource_findings(ctx));
+        out.extend(cross_layer_security_findings(ctx));
+        out.extend(runtime_log_confirmation_findings(ctx));
 
         for f in ctx.store.by_kind(kind::MIXIN_INTERACTION) {
             let strength = f.attr_int("strength").unwrap_or(50) as u8;
@@ -533,17 +532,18 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     RULE_ID,
                     format!("mixin-apply:{kind}:{}:{target}:{member}", f.subject),
                 )
-                .severity(if confirmed { Severity::Error } else { Severity::Warn })
+                .severity(if confirmed {
+                    Severity::Error
+                } else {
+                    Severity::Warn
+                })
                 .category(Category::Mixin)
                 .title(if confirmed {
                     format!("Mixin will not apply: `{mixin}` -> {target}")
                 } else {
                     format!("Mixin may not apply: `{mixin}` -> {target}")
                 })
-                .explanation(format!(
-                    "`{}` ({mixin}): {detail}.",
-                    f.subject
-                ))
+                .explanation(format!("`{}` ({mixin}): {detail}.", f.subject))
                 .evidence(EvidenceEdge::subject(f.id))
                 .affects(f.subject.clone())
                 .fix(FixCandidate::advice(
@@ -559,6 +559,753 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         }
     }
     out
+}
+
+/// Runtime-log confirmation (plan Phase 11). Parses `MixinApplyError` log lines into
+/// structured failures and joins them to the static application-site facts, so a
+/// static "probable failure" the log also shows becomes a *confirmed* `Error`.
+fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    use crate::runtime_log::parse_runtime_failures;
+
+    // Mixin-apply log lines, with the originating fact id for citation.
+    let log_lines: Vec<(FactId, String)> = ctx
+        .store
+        .by_kind(kind::LOG_SIGNAL)
+        .filter(|f| f.subject == "MixinApplyError")
+        .filter_map(|f| f.attr("excerpt").map(|e| (f.id, e.to_string())))
+        .collect();
+    if log_lines.is_empty() {
+        return Vec::new();
+    }
+
+    // Index application-site facts by simple mixin name for the join.
+    let sites: Vec<&intermed_doctor_core::facts::Fact> =
+        ctx.store.by_kind(kind::MIXIN_APPLICATION_SITE).collect();
+
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for (log_id, line) in &log_lines {
+        for failure in parse_runtime_failures(line) {
+            let simple = failure
+                .mixin_class
+                .rsplit(['.', '$'])
+                .next()
+                .unwrap_or(&failure.mixin_class);
+            for site in &sites {
+                let site_mixin = site.attr("mixin").unwrap_or("");
+                let site_simple = site_mixin.rsplit(['.', '$']).next().unwrap_or(site_mixin);
+                if site_simple != simple || simple.is_empty() {
+                    continue;
+                }
+                // If the log names an injection point, only confirm matching sites.
+                if !failure.injection_point.is_empty() {
+                    let tm = site.attr("target_method").unwrap_or("");
+                    let sk = site.attr("site_key").unwrap_or("");
+                    if !tm.contains(&failure.injection_point)
+                        && !sk.contains(&failure.injection_point)
+                    {
+                        continue;
+                    }
+                }
+                if !seen.insert((site.id, *log_id)) {
+                    continue;
+                }
+                let mixin = site.attr("mixin").unwrap_or(site_mixin);
+                out.push(
+                    Finding::builder(
+                        RULE_ID,
+                        format!("mixin-runtime-confirmed:{}:{}", site.id, log_id),
+                    )
+                    .severity(Severity::Error)
+                    .category(Category::Mixin)
+                    .title(format!("Mixin failure confirmed by runtime log: `{mixin}`"))
+                    .explanation(format!(
+                        "The game log shows this mixin failing to apply ({}): {}",
+                        failure.reason.as_str(),
+                        failure.excerpt
+                    ))
+                    .evidence(EvidenceEdge::new(site.id, Relation::Supports, 0.9))
+                    .evidence(EvidenceEdge::new(*log_id, Relation::Supports, 0.95))
+                    .affects(mixin.to_string())
+                    .fix(FixCandidate::advice(
+                        "This is a confirmed load-time failure — update or remove the mod, or report \
+                         the broken mixin upstream.",
+                    ))
+                    .tag("mixin")
+                    .tag("runtime-confirmed")
+                    .confidence(0.95)
+                    .build(),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Cross-layer findings joining mixin runtime resource mutation (Layer F) with the
+/// static datapack analysis (Layer M) and script-driven mutation (Dynamics).
+///
+/// The insight: a mixin hooking `RecipeManager`/`LootManager`/… rewrites the very
+/// data Layer M reads as static JSON. So a static datapack conflict may be masked or
+/// caused by a runtime mixin, and a domain mutated by *both* a mixin and a script is
+/// a compounded override surface. Neither was visible to the other layer before.
+fn cross_layer_resource_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    use std::collections::BTreeMap;
+
+    // Mixin runtime mutations, indexed by resource domain.
+    let mut mixin_by_domain: BTreeMap<String, Vec<(FactId, String, String, String)>> =
+        BTreeMap::new();
+    for f in ctx.store.by_kind(kind::MIXIN_RUNTIME_RESOURCE_MUTATION) {
+        let domain = f.attr("domain").unwrap_or("").to_string();
+        let mod_id = f.attr("mod").unwrap_or("").to_string();
+        let effect = f.attr("effect").unwrap_or("hooks-loader").to_string();
+        let mixin = f.attr("mixin").unwrap_or("").to_string();
+        mixin_by_domain
+            .entry(domain)
+            .or_default()
+            .push((f.id, mod_id, effect, mixin));
+    }
+    if mixin_by_domain.is_empty() {
+        return Vec::new();
+    }
+
+    // Layer-M static diffs/conflicts, indexed by domain (derived from kind/path).
+    let mut static_by_domain: BTreeMap<String, Vec<FactId>> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::RESOURCE_SEMANTIC_DIFF) {
+        if let Some(d) = resource_domain_of(f.attr("diff_kind"), &f.subject) {
+            static_by_domain.entry(d).or_default().push(f.id);
+        }
+    }
+    // Dynamics script mutations, indexed by domain (derived from fact kind).
+    let mut script_by_domain: BTreeMap<String, Vec<(FactId, String)>> = BTreeMap::new();
+    for (k, domain) in [
+        (kind::RUNTIME_REMOVED_RECIPE, "recipe"),
+        (kind::RUNTIME_SCRIPT_MODIFIES_RECIPE, "recipe"),
+        (kind::RUNTIME_REMOVED_LOOT_TABLE, "loot-table"),
+        (kind::RUNTIME_REMOVED_TAG, "tag"),
+        (kind::RUNTIME_REMOVED_ITEM, "registry"),
+    ] {
+        for f in ctx.store.by_kind(k) {
+            let engine = f.attr("engine").unwrap_or("script").to_string();
+            script_by_domain
+                .entry(domain.to_string())
+                .or_default()
+                .push((f.id, engine));
+        }
+    }
+
+    let mut out = Vec::new();
+    for (domain, mixins) in &mixin_by_domain {
+        let mods: Vec<&str> = {
+            let mut m: Vec<&str> = mixins.iter().map(|(_, m, _, _)| m.as_str()).collect();
+            m.sort_unstable();
+            m.dedup();
+            m
+        };
+        let mod_list = mods.join(", ");
+        let strong = mixins.iter().any(|(_, _, e, _)| {
+            matches!(
+                e.as_str(),
+                "replaces-loader" | "rewrites-load-call" | "rewrites-loaded-value"
+            )
+        });
+
+        // (A) Mixin overrides a domain Layer M found a static conflict in — AMPLIFIED:
+        // The mixin rewrites the very data that produced the static conflict. This is
+        // a cross-layer compound finding: the static verdict is uncertain AND the mixin
+        // introduces a runtime override surface. Confidence is boosted for strong mutations.
+        if let Some(static_ids) = static_by_domain.get(domain) {
+            let conflict_count = static_ids.len();
+            let mut b = Finding::builder(RULE_ID, format!("mixin-resource-override:{domain}"))
+                .severity(if strong { Severity::Warn } else { Severity::Note })
+                .category(Category::Mixin)
+                .title(format!(
+                    "Static {domain} conflict may be overridden at runtime by a mixin"
+                ))
+                .explanation(format!(
+                    "Layer M found {conflict_count} static {domain} conflict(s), but {mod_list} \
+                     also hook(s) the {domain} loader via mixin — the runtime data may differ from \
+                     the datapack files, so the static verdict for this domain is uncertain. \
+                     {}\
+                     Check whether the mixin intentionally overrides or causes the static conflict.",
+                    if strong {
+                        format!("The mixin uses a strong loader rewrite ({}) that replaces or wraps \
+                                 the apply call — it controls which {domain} entries survive at runtime. ",
+                                mixins.iter().map(|(_, _, e, _)| e.as_str()).next().unwrap_or("hook"))
+                    } else {
+                        String::new()
+                    }
+                ))
+                .affects(domain.clone())
+                .fix(FixCandidate::advice(
+                    "Confirm the actual loaded data at runtime (e.g. /datapack or in-game lookup) \
+                     before trusting the static conflict; the mixin may resolve or cause it.",
+                ))
+                .tag("mixin")
+                .tag("cross-layer")
+                .tag("resource-runtime-override")
+                .tag("layer-m-correlated")
+                .confidence(if strong { 0.88 } else { 0.68 });
+            for (id, _, _, _) in mixins {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::ConflictsWith, 0.8));
+            }
+            for id in static_ids {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.7));
+            }
+            out.push(b.build());
+        }
+
+        // (B) A mixin AND a script both mutate the same domain at runtime.
+        if let Some(scripts) = script_by_domain.get(domain) {
+            let engines: Vec<&str> = {
+                let mut e: Vec<&str> = scripts.iter().map(|(_, e)| e.as_str()).collect();
+                e.sort_unstable();
+                e.dedup();
+                e
+            };
+            let mut b = Finding::builder(RULE_ID, format!("mixin-script-resource:{domain}"))
+                .severity(Severity::Note)
+                .category(Category::Mixin)
+                .title(format!(
+                    "Both a mixin and a script mutate {domain} at runtime"
+                ))
+                .explanation(format!(
+                    "{mod_list} mutate(s) {domain} via mixin and {} mutate(s) it via script — a \
+                     compounded runtime override surface; load order and coexistence determine the \
+                     final {domain} state.",
+                    engines.join(", ")
+                ))
+                .affects(domain.clone())
+                .fix(FixCandidate::advice(
+                    "Check that the mixin and the script do not fight over the same entries; \
+                     disable one and compare to isolate the effective result.",
+                ))
+                .tag("mixin")
+                .tag("cross-layer")
+                .tag("resource-runtime-override")
+                .confidence(0.6);
+            for (id, _, _, _) in mixins {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::CorrelatesWith, 0.7));
+            }
+            for (id, _) in scripts {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::CorrelatesWith, 0.7));
+            }
+            out.push(b.build());
+        }
+
+        // (C) A strong loader rewrite with no static/script counterpart — a blind
+        // spot Layer M should be told about (informational).
+        if strong
+            && !static_by_domain.contains_key(domain)
+            && !script_by_domain.contains_key(domain)
+        {
+            let mut b = Finding::builder(RULE_ID, format!("mixin-resource-blindspot:{domain}"))
+                .severity(Severity::Note)
+                .category(Category::Mixin)
+                .title(format!("Runtime {domain} mutation via mixin (static-analysis blind spot)"))
+                .explanation(format!(
+                    "{mod_list} rewrite(s) the {domain} loader via mixin, so the effective {domain} \
+                     data is produced in bytecode, not datapack JSON — static resource analysis \
+                     cannot see it."
+                ))
+                .affects(domain.clone())
+                .fix(FixCandidate::advice(
+                    "Treat this mod's runtime data as authoritative over datapack files for this \
+                     domain; verify in-game if a conflict is suspected.",
+                ))
+                .tag("mixin")
+                .tag("cross-layer")
+                .confidence(0.55);
+            for (id, _, _, _) in mixins {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.6));
+            }
+            out.push(b.build());
+        }
+    }
+    out
+}
+
+/// The four resource categories cluster-D correlates with a mixin capability. The
+/// category is read from the `resource_writer` path the VFS layer recorded.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceCategory {
+    WorldGen,
+    Render,
+    Atlas,
+}
+
+/// Classify a `resource_writer` path into the cluster-D category it belongs to, if
+/// any. Mirrors the `data/<ns>/...` and `assets/<ns>/...` layout the VFS layer scans.
+///
+/// Datapack *data* domains (recipe/loot/tag/advancement) are intentionally absent:
+/// the mixin↔data-loader correlation for those is owned by `resource_bridge` +
+/// `cross_layer_resource_findings`. Cluster D only covers subsystems that bridge
+/// does not model.
+fn resource_category(path: &str) -> Option<ResourceCategory> {
+    // `assets/<ns>/atlases/*.json` — checked before the generic render bucket.
+    if path.contains("/atlases/") {
+        return Some(ResourceCategory::Atlas);
+    }
+    if path.starts_with("assets/")
+        && (path.contains("/models/")
+            || path.contains("/blockstates/")
+            || path.contains("/textures/"))
+    {
+        return Some(ResourceCategory::Render);
+    }
+    if path.contains("/worldgen/") {
+        return Some(ResourceCategory::WorldGen);
+    }
+    None
+}
+
+/// Cross-layer Layer-M (resource writers) ↔ Layer-F (mixin capabilities) — "cluster D".
+///
+/// A mod that *ships* resources of some category AND also *modifies the runtime
+/// subsystem* that consumes that category via a mixin is a compound override
+/// surface: the effective data is produced partly in datapack JSON (which static
+/// analysis sees) and partly in bytecode (which it does not), so its own shipped
+/// files can be silently overridden at runtime. Each finding joins, per mod:
+///   * worldgen writers × `modifies_worldgen` capability
+///   * model/blockstate/texture writers × `modifies_rendering` capability
+///   * atlas writers × `modifies_rendering` capability (render-pipeline specific)
+///
+/// Datapack *data*-loader hooks (recipe/loot/tag/advancement) are out of scope here:
+/// the `resource_bridge` produces that signal and `cross_layer_resource_findings`
+/// owns its correlation, so cluster D would otherwise be a second consumer of it.
+fn cross_layer_capability_resource_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Resource writers per (mod, category), with the writer fact ids for evidence.
+    let mut writers: BTreeMap<(String, u8), (usize, Vec<FactId>)> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::RESOURCE_WRITER) {
+        let Some(cat) = f.attr("path").and_then(resource_category) else {
+            continue;
+        };
+        let entry = writers.entry((f.subject.clone(), cat as u8)).or_default();
+        entry.0 += 1;
+        // Keep a few evidence fact ids per (mod, category) — enough to cite, not all.
+        if entry.1.len() < 8 {
+            entry.1.push(f.id);
+        }
+    }
+    if writers.is_empty() {
+        return Vec::new();
+    }
+
+    // Capability → one evidence fact id per mod (first seen).
+    let mut caps: BTreeMap<(String, String), FactId> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::MOD_CAPABILITY) {
+        if let Some(cap) = f.attr("capability") {
+            caps.entry((f.subject.clone(), cap.to_string()))
+                .or_insert(f.id);
+        }
+    }
+    // Mods that ship any cluster-D resource, in stable order.
+    let mods: BTreeSet<&str> = writers.keys().map(|(m, _)| m.as_str()).collect();
+
+    let mut out = Vec::new();
+    for mod_id in mods {
+        let count = |cat: ResourceCategory| {
+            writers
+                .get(&(mod_id.to_string(), cat as u8))
+                .map(|(n, ids)| (*n, ids.clone()))
+        };
+
+        // worldgen JSON × modifies_worldgen
+        if let (Some((n, ids)), Some(cap_id)) = (
+            count(ResourceCategory::WorldGen),
+            caps.get(&(mod_id.to_string(), "modifies_worldgen".to_string())),
+        ) {
+            out.push(
+                capability_resource_finding(
+                    "worldgen-resource-plus-worldgen-mixin-risk",
+                    mod_id,
+                    format!(
+                        "`{mod_id}` ships {n} worldgen file(s) and also modifies worldgen via mixin"
+                    ),
+                    format!(
+                        "`{mod_id}` writes {n} `worldgen/` datapack file(s) and its mixin modifies the \
+                         worldgen subsystem (`modifies_worldgen`). The effective generator may be \
+                         produced in bytecode, so the static worldgen JSON is not authoritative — a \
+                         feature/biome change can come from either source, or they can disagree.",
+                    ),
+                    "Verify the actual generated structures in-game; the mixin can override the \
+                     shipped worldgen JSON.",
+                    *cap_id,
+                    &ids,
+                )
+                .tag("worldgen")
+                .build(),
+            );
+        }
+
+        // models/blockstates/textures × modifies_rendering
+        if let (Some((n, ids)), Some(cap_id)) = (
+            count(ResourceCategory::Render),
+            caps.get(&(mod_id.to_string(), "modifies_rendering".to_string())),
+        ) {
+            out.push(
+                capability_resource_finding(
+                    "render-resource-plus-render-mixin-risk",
+                    mod_id,
+                    format!(
+                        "`{mod_id}` ships {n} render asset(s) and also modifies rendering via mixin"
+                    ),
+                    format!(
+                        "`{mod_id}` writes {n} model/blockstate/texture asset(s) and its mixin modifies \
+                         the rendering subsystem (`modifies_rendering`). What is drawn may diverge from \
+                         the shipped assets — the mixin can rebind models or swap textures at runtime.",
+                    ),
+                    "If a visual looks wrong, suspect the render mixin overriding the shipped assets, \
+                     not just the asset files.",
+                    *cap_id,
+                    &ids,
+                )
+                .tag("rendering")
+                .build(),
+            );
+        }
+
+        // atlas JSON × modifies_rendering (render-pipeline specific)
+        if let (Some((n, ids)), Some(cap_id)) = (
+            count(ResourceCategory::Atlas),
+            caps.get(&(mod_id.to_string(), "modifies_rendering".to_string())),
+        ) {
+            out.push(
+                capability_resource_finding(
+                    "atlas-resource-plus-render-pipeline-risk",
+                    mod_id,
+                    format!("`{mod_id}` ships {n} atlas source(s) and also modifies the render pipeline"),
+                    format!(
+                        "`{mod_id}` writes {n} `atlases/` source(s) and its mixin modifies rendering \
+                         (`modifies_rendering`). Atlas stitching feeds the texture pipeline the mixin \
+                         touches — a runtime sprite rebind can desync from the stitched atlas and show \
+                         missing/incorrect sprites.",
+                    ),
+                    "Check sprite/atlas correctness in-game; the render mixin may stitch or bind sprites \
+                     differently from the shipped atlas sources.",
+                    *cap_id,
+                    &ids,
+                )
+                .tag("rendering")
+                .tag("atlas")
+                .build(),
+            );
+        }
+
+        // NOTE: the "ships reloadable data + hooks its loader" case is deliberately
+        // NOT emitted here. The `recipe`/`loot`/`tag`/`advancement` loader-hook signal
+        // is produced by the dedicated `resource_bridge` (Layer F→M) and already
+        // correlated — with the domain key the bridge owns — by
+        // `cross_layer_resource_findings`. Re-deriving that domain from writer paths
+        // here would be a second consumption path of the same bridge signal. Cluster D
+        // covers only the subsystems the bridge does *not* model (worldgen/render/atlas).
+    }
+    out
+}
+
+/// Build one cluster-D compound finding. `cap_id` is the capability/loader-hook
+/// evidence (Layer F) and `writer_ids` are the resource writers (Layer M).
+#[allow(clippy::too_many_arguments)]
+fn capability_resource_finding(
+    id: &str,
+    mod_id: &str,
+    title: String,
+    explanation: String,
+    advice: &str,
+    cap_id: FactId,
+    writer_ids: &[FactId],
+) -> intermed_doctor_core::evidence::FindingBuilder {
+    let mut b = Finding::builder(RULE_ID, format!("{id}:{mod_id}"))
+        .severity(Severity::Note)
+        .category(Category::Mixin)
+        .title(title)
+        .explanation(explanation)
+        .affects(mod_id.to_string())
+        .fix(FixCandidate::advice(advice))
+        .tag("mixin")
+        .tag("cross-layer")
+        .tag("layer-m-correlated")
+        .confidence(0.6)
+        .evidence(EvidenceEdge::new(cap_id, Relation::CorrelatesWith, 0.7));
+    for wid in writer_ids {
+        b = b.evidence(EvidenceEdge::new(*wid, Relation::Supports, 0.6));
+    }
+    b
+}
+
+/// Cross-layer security findings (Layer F ↔ Layer G). A mixin that weaves into a
+/// security-sensitive subsystem (networking / class-loading / serialization / save
+/// IO) is already worth a note; when the *same mod* also trips a Layer-G `uses_*`
+/// capability (reflection, Unsafe, process spawn, sockets, dynamic class definition),
+/// the woven code and the dangerous capability compound into an elevated audit
+/// surface that neither layer flagged on its own.
+/// Security-surface facts grouped for one (mod, subsystem) pair.
+#[derive(Default)]
+struct SurfaceGroup {
+    reason: String,
+    fact_ids: Vec<FactId>,
+}
+
+fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    use std::collections::BTreeMap;
+
+    // Genuinely unusual Layer-G capabilities, indexed by mod. Deliberately excludes
+    // `MethodHandles` / deserialization / reflective-invocation — those are common in
+    // modern mods and would dilute the elevation; only capabilities that are rare and
+    // audit-worthy on their own escalate a woven-subsystem surface to a warning.
+    const DANGEROUS: &[(&str, &str)] = &[
+        (kind::USES_PROCESS_SPAWN, "spawns processes"),
+        (kind::USES_SOCKET, "opens sockets"),
+        (
+            kind::USES_REFLECTION_SET_ACCESSIBLE,
+            "uses reflection (setAccessible)",
+        ),
+        (kind::USES_UNSAFE, "uses sun.misc.Unsafe"),
+        (
+            kind::USES_DYNAMIC_CLASS_DEFINITION,
+            "defines classes dynamically",
+        ),
+        (kind::USES_NATIVE_LIBRARY, "loads native libraries"),
+    ];
+    let mut g_by_mod: BTreeMap<String, Vec<(FactId, &str)>> = BTreeMap::new();
+    for (k, label) in DANGEROUS {
+        for f in ctx.store.by_kind(k) {
+            g_by_mod
+                .entry(f.subject.clone())
+                .or_default()
+                .push((f.id, label));
+        }
+    }
+    // Mixin handlers that use reflection (woven into vanilla), indexed by mod, with
+    // the reflective-dispatch targets the handler names (e.g. `java.lang.Runtime`)
+    // when known — the handler-granular evidence the security layer is otherwise
+    // blind to. Prefer a handler that actually names targets over a bare one.
+    let mut reflective_handler: BTreeMap<String, (FactId, String)> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::MIXIN_HANDLER_BODY) {
+        if f.attr_bool("uses_reflection") == Some(true) {
+            let targets = f.attr("reflective_targets").unwrap_or("").to_string();
+            let entry = reflective_handler
+                .entry(f.subject.clone())
+                .or_insert((f.id, String::new()));
+            if entry.1.is_empty() && !targets.is_empty() {
+                *entry = (f.id, targets);
+            }
+        }
+    }
+
+    // Group security-surface facts by (mod, subsystem) so we emit one finding each.
+    let mut by_mod_sub: BTreeMap<(String, String), SurfaceGroup> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::MIXIN_SECURITY_SURFACE) {
+        let sub = f.attr("subsystem").unwrap_or("").to_string();
+        let reason = f.attr("reason").unwrap_or("").to_string();
+        let g = by_mod_sub.entry((f.subject.clone(), sub)).or_default();
+        g.fact_ids.push(f.id);
+        if g.reason.is_empty() {
+            g.reason = reason;
+        }
+    }
+
+    let mut out = Vec::new();
+    for ((mod_id, subsystem), group) in &by_mod_sub {
+        let reason = group.reason.clone();
+        let g_hits = g_by_mod.get(mod_id);
+        let reflective = reflective_handler.get(mod_id);
+
+        // Elevated when the mod also has a dangerous Layer-G capability.
+        let (severity, mut explanation, confidence) = if let Some(hits) = g_hits {
+            let caps = hits.iter().map(|(_, l)| *l).collect::<Vec<_>>().join(", ");
+            (
+                Severity::Warn,
+                format!(
+                    "`{mod_id}` {reason} AND also {caps} (Layer G). Dangerous capability \
+                     combined with code woven into the {subsystem} subsystem is an elevated audit \
+                     surface — review what the woven handler does."
+                ),
+                0.7,
+            )
+        } else {
+            (
+                Severity::Note,
+                format!(
+                    "`{mod_id}` {reason}. Code woven into the {subsystem} subsystem is worth a \
+                     security glance, especially for an untrusted mod."
+                ),
+                0.5,
+            )
+        };
+        if let Some((_, targets)) = reflective {
+            if targets.is_empty() {
+                explanation.push_str(
+                    " A mixin handler in this mod uses reflection, which then runs inside woven \
+                     vanilla code.",
+                );
+            } else {
+                explanation.push_str(&format!(
+                    " A mixin handler in this mod uses reflection referencing {targets}, which then \
+                     runs inside woven vanilla code — a runtime dispatch static target analysis \
+                     cannot see.",
+                ));
+            }
+        }
+
+        let mut b = Finding::builder(RULE_ID, format!("mixin-security:{mod_id}:{subsystem}"))
+            .severity(severity)
+            .category(Category::Mixin)
+            .title(format!("Mixin weaves into the {subsystem} subsystem"))
+            .explanation(explanation)
+            .affects(mod_id.clone())
+            .fix(FixCandidate::advice(
+                "Confirm the mod is trusted; inspect the woven handler for network/file/reflection \
+                 behaviour before deploying on a server.",
+            ))
+            .tag("mixin")
+            .tag("cross-layer")
+            .tag("security")
+            .confidence(confidence);
+        for id in &group.fact_ids {
+            b = b.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.7));
+        }
+        if let Some(hits) = g_hits {
+            for (id, _) in hits {
+                b = b.evidence(EvidenceEdge::new(*id, Relation::CorrelatesWith, 0.7));
+                b = b.tag("elevated");
+            }
+        }
+        if let Some((id, _)) = reflective {
+            b = b.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.6));
+        }
+        out.push(b.build());
+    }
+    out
+}
+
+/// Map a Layer-M `RESOURCE_SEMANTIC_DIFF` (its `diff_kind` and/or subject path) to a
+/// resource domain string matching the mixin/dynamics bridge.
+fn resource_domain_of(diff_kind: Option<&str>, path: &str) -> Option<String> {
+    if let Some(k) = diff_kind {
+        if k.starts_with("recipe") {
+            return Some("recipe".into());
+        } else if k.starts_with("loot") {
+            return Some("loot-table".into());
+        } else if k.starts_with("tag") {
+            return Some("tag".into());
+        } else if k.starts_with("advancement") {
+            return Some("advancement".into());
+        }
+    }
+    // Fallback: infer from the datapack path segment.
+    let p = path.to_ascii_lowercase();
+    if p.contains("/recipe") {
+        Some("recipe".into())
+    } else if p.contains("/loot_table") {
+        Some("loot-table".into())
+    } else if p.contains("/tags/") {
+        Some("tag".into())
+    } else if p.contains("/advancement") {
+        Some("advancement".into())
+    } else if p.contains("/predicate") {
+        Some("predicate".into())
+    } else if p.contains("/item_modifier") {
+        Some("item-modifier".into())
+    } else if p.contains("/structure") {
+        Some("structure".into())
+    } else {
+        None
+    }
+}
+
+/// Findings from the site-level risk clusters (plan Phases 13/14). One actionable
+/// diagnosis per target, graded by the cluster's own unified severity, citing the
+/// participating application-site facts so the deep evidence survives compaction and
+/// shows up under `--explain`.
+fn risk_cluster_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    // Prebuild a target-class → failing application-site fact ids index once.
+    let mut sites_by_target: std::collections::BTreeMap<String, Vec<FactId>> =
+        std::collections::BTreeMap::new();
+    for s in ctx.store.by_kind(kind::MIXIN_APPLICATION_SITE) {
+        if !application_site_is_failing(s) {
+            continue;
+        }
+        if let Some(tc) = s.attr("target_class") {
+            sites_by_target
+                .entry(tc.to_string())
+                .or_default()
+                .push(s.id);
+        }
+    }
+
+    let mut out = Vec::new();
+    for f in ctx.store.by_kind(kind::MIXIN_RISK_CLUSTER) {
+        let cluster_kind = f.attr("kind").unwrap_or("");
+        // Only the actionable cluster kinds become findings; `crowded` stays a fact.
+        if !matches!(
+            cluster_kind,
+            "apply-failure" | "composition" | "order-sensitive"
+        ) {
+            continue;
+        }
+        let severity = parse_severity(f.attr("severity"));
+        let target = f.attr("target_class").unwrap_or(&f.subject);
+        let headline = f.attr("headline").unwrap_or("mixin risk cluster");
+        let action = f
+            .attr("recommended_action")
+            .unwrap_or("Review the participating mixins.");
+        let confirmation = f.attr("confirmation_level").unwrap_or("");
+        let confidence = match confirmation {
+            "runtime-confirmed" | "static-exact" => 0.9,
+            "static-descriptor-aware" => 0.75,
+            "static-name-only" => 0.6,
+            _ => 0.5,
+        };
+
+        let mut builder = Finding::builder(RULE_ID, format!("mixin-cluster:{}", f.subject))
+            .severity(severity)
+            .category(Category::Mixin)
+            .title(format!("Mixin risk cluster on `{target}`"))
+            .explanation(format!("{headline} (confirmation: {confirmation})."))
+            .evidence(EvidenceEdge::subject(f.id))
+            .affects(target.to_string())
+            .fix(FixCandidate::advice(action))
+            .tag("mixin")
+            .tag("risk-cluster")
+            .tag(cluster_kind)
+            .confidence(confidence);
+        if let Some(ids) = sites_by_target.get(target) {
+            for id in ids {
+                builder = builder.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.85));
+            }
+        }
+        out.push(builder.build());
+    }
+    out
+}
+
+/// A site fact represents a (likely) failure when any of its verification layers
+/// reports a conclusive failure status.
+fn application_site_is_failing(s: &intermed_doctor_core::facts::Fact) -> bool {
+    matches!(
+        s.attr("target_resolution"),
+        Some("missing-method" | "missing-class" | "descriptor-mismatch")
+    ) || matches!(
+        s.attr("selector_verification"),
+        Some("no-match" | "ordinal-out-of-range" | "target-method-missing")
+    ) || matches!(
+        s.attr("signature_check"),
+        Some("missing-callback-info" | "wrong-return-type" | "missing-operation-param")
+    ) || s.attr("local_capture_status") == Some("local-missing")
+}
+
+/// Parse a severity string from a fact attribute back to [`Severity`].
+fn parse_severity(s: Option<&str>) -> Severity {
+    match s {
+        Some("fatal") => Severity::Fatal,
+        Some("error") => Severity::Error,
+        Some("warn") => Severity::Warn,
+        Some("info") => Severity::Info,
+        _ => Severity::Note,
+    }
 }
 
 /// Confidence that the risk finding's *site resolution* is correct — an
@@ -592,7 +1339,8 @@ fn risk_advice(score: u8, hot_path: bool) -> String {
             "High-risk mixin overlap: check compatibility matrices and consider removing one conflicting mod.".to_string()
         }
     } else if score >= 50 {
-        "Moderate mixin risk: verify mod versions and watch logs for Mixin apply errors.".to_string()
+        "Moderate mixin risk: verify mod versions and watch logs for Mixin apply errors."
+            .to_string()
     } else {
         "Low mixin risk: informational overlap — monitor after mod updates.".to_string()
     }
@@ -607,33 +1355,25 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let writes_target = f.attr_bool("writes_target_state").unwrap_or(false);
         let complexity = f.attr_int("complexity_score").unwrap_or(0);
         let conditional = f.attr_bool("conditional_control").unwrap_or(false);
-        if !cancels
-            && !sets_return
-            && !writes_target
-            && complexity < 55
-        {
+        if !cancels && !sets_return && !writes_target && complexity < 55 {
             continue;
         }
         let mixin = f.attr("mixin").unwrap_or("?");
         let handler = f.attr("handler_method").unwrap_or("?");
         let mut parts: Vec<String> = Vec::new();
         if cancels {
-            parts.push(
-                if conditional {
-                    "may cancel via CallbackInfo".to_string()
-                } else {
-                    "unconditionally cancels via CallbackInfo".to_string()
-                },
-            );
+            parts.push(if conditional {
+                "may cancel via CallbackInfo".to_string()
+            } else {
+                "unconditionally cancels via CallbackInfo".to_string()
+            });
         }
         if sets_return {
-            parts.push(
-                if conditional {
-                    "may set return value".to_string()
-                } else {
-                    "unconditionally sets return value".to_string()
-                },
-            );
+            parts.push(if conditional {
+                "may set return value".to_string()
+            } else {
+                "unconditionally sets return value".to_string()
+            });
         }
         if writes_target {
             parts.push("writes target state".to_string());
@@ -710,6 +1450,18 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .to_vec();
 
         let mut explanation = description.to_string();
+        // Subsystem context: tell the reader *where* in the engine this mixin lives.
+        if let Some(sub) = crate::subsystem::classify_subsystem(target) {
+            explanation.push_str(&format!(" Target subsystem: `{}`.", sub.as_str()));
+        }
+        // Resource-loader context: if this effect targets a data-loader, note it.
+        if let Some(rsub) = crate::resource_bridge::classify_resource_loader(target) {
+            explanation.push_str(&format!(
+                " This mixin hooks the `{}` data loader — Layer M static analysis of \
+                 that domain may be incomplete (runtime data could differ).",
+                rsub.domain()
+            ));
+        }
         if let Some(handler) = &effect.handler_effect {
             if handler.complexity_score >= 55 {
                 explanation.push_str(&format!(
@@ -754,7 +1506,8 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 confidence,
             });
             if let Some(fid) = recommendation_fact_id(ctx, site_key, &rec.id) {
-                builder = builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
+                builder =
+                    builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
             }
         }
         out.push(builder.build());
@@ -778,7 +1531,9 @@ fn enhanced_overwrite_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .attr("site_key")
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| overwrite_recommendation_site_key(ctx, f.subject.as_str(), mixin, target, method));
+            .unwrap_or_else(|| {
+                overwrite_recommendation_site_key(ctx, f.subject.as_str(), mixin, target, method)
+            });
         let recs: Vec<Recommendation> = recs_by_site
             .get(site_key.as_str())
             .map(|v| v.as_slice())
@@ -791,20 +1546,18 @@ fn enhanced_overwrite_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             explanation.push('\n');
             explanation.push_str(&rec_text);
         }
-        let mut builder = Finding::builder(
-            RULE_ID,
-            format!("mixin-overwrite-effect:{mixin}->{target}"),
-        )
-        .severity(Severity::Warn)
-        .category(Category::Mixin)
-        .title(format!("@Overwrite effect: {target}"))
-        .explanation(explanation)
-        .evidence(EvidenceEdge::subject(f.id))
-        .affects(target)
-        .tag("mixin")
-        .tag("overwrite")
-        .tag("mixin-effect")
-        .confidence(if hot_path { 0.78 } else { 0.72 });
+        let mut builder =
+            Finding::builder(RULE_ID, format!("mixin-overwrite-effect:{mixin}->{target}"))
+                .severity(Severity::Warn)
+                .category(Category::Mixin)
+                .title(format!("@Overwrite effect: {target}"))
+                .explanation(explanation)
+                .evidence(EvidenceEdge::subject(f.id))
+                .affects(target)
+                .tag("mixin")
+                .tag("overwrite")
+                .tag("mixin-effect")
+                .confidence(if hot_path { 0.78 } else { 0.72 });
         for rec in &recs {
             let (text, confidence) = recommendation_as_fix(rec);
             builder = builder.fix(FixCandidate {
@@ -813,7 +1566,8 @@ fn enhanced_overwrite_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 confidence,
             });
             if let Some(fid) = recommendation_fact_id(ctx, site_key.as_str(), &rec.id) {
-                builder = builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
+                builder =
+                    builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
             }
         }
         out.push(builder.build());
@@ -1096,7 +1850,7 @@ fn split_attr(value: Option<&str>) -> Vec<String> {
 }
 #[cfg(test)]
 mod match_quality_tests {
-    use super::{class_match_quality, spark_overlap_boost, HotMethodRef, MatchQuality};
+    use super::{HotMethodRef, MatchQuality, class_match_quality, spark_overlap_boost};
     use intermed_doctor_core::facts::FactId;
 
     fn hm(class: &str, percent: f64) -> HotMethodRef {
@@ -1124,11 +1878,21 @@ mod match_quality_tests {
 
     #[test]
     fn simple_name_match_earns_less_boost() {
-        let fqn = spark_overlap_boost(&[hm("net.minecraft.Foo", 30.0)], "net.minecraft.Foo", None, None);
+        let fqn = spark_overlap_boost(
+            &[hm("net.minecraft.Foo", 30.0)],
+            "net.minecraft.Foo",
+            None,
+            None,
+        );
         let simple = spark_overlap_boost(&[hm("a.Foo", 30.0)], "b.Foo", None, None);
         assert_eq!(fqn.1, Some(MatchQuality::Fqn));
         assert_eq!(simple.1, Some(MatchQuality::SimpleName));
-        assert!(simple.0 < fqn.0, "simple-name boost {} should be < fqn {}", simple.0, fqn.0);
+        assert!(
+            simple.0 < fqn.0,
+            "simple-name boost {} should be < fqn {}",
+            simple.0,
+            fqn.0
+        );
     }
 }
 

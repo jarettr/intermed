@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::io_util::write_atomic;
 
-use super::util::{jar_path_digest, now_unix_secs, sha256_file, shard_index, WRITE_SHARDS};
+use super::util::{WRITE_SHARDS, jar_path_digest, now_unix_secs, sha256_file, shard_index};
 
 pub(crate) const FINGERPRINT_SCHEMA: &str = "intermed-jar-fp-v1";
 

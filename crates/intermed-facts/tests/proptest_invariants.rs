@@ -1,6 +1,6 @@
 //! Property tests for [`FactStore`] invariants.
 
-use intermed_facts::{kind, AttrValue, FactStore, SourceRef};
+use intermed_facts::{AttrValue, FactStore, SourceRef, kind};
 use proptest::prelude::*;
 
 fn kind_strategy() -> impl Strategy<Value = &'static str> {

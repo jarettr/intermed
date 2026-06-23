@@ -15,3 +15,5 @@ zip.workspace = true
 thiserror.workspace = true
 intermed-facts.workspace = true
 intermed-evidence.workspace = true
+intermed-resource-identity.workspace = true
+tempfile = "3"

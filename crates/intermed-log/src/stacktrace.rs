@@ -215,18 +215,37 @@ Caused by: java.lang.NullPointerException: tried to call x on null
         assert_eq!(traces.len(), 1);
         let t = &traces[0];
         assert_eq!(t.exception.class, "java.lang.RuntimeException");
-        assert!(t.exception.message.as_deref().unwrap().contains("Mixin apply failed"));
-        assert_eq!(t.exception.frames.len(), 2, "frames: {:?}", t.exception.frames);
+        assert!(
+            t.exception
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("Mixin apply failed")
+        );
+        assert_eq!(
+            t.exception.frames.len(),
+            2,
+            "frames: {:?}",
+            t.exception.frames
+        );
         assert!(t.exception.frames[0].contains("MixinProcessor.applyMixins"));
         assert_eq!(t.caused_by.len(), 1);
         assert_eq!(t.caused_by[0].class, "java.lang.NullPointerException");
-        assert_eq!(t.caused_by[0].frames.len(), 1, "caused-by frames routed correctly");
+        assert_eq!(
+            t.caused_by[0].frames.len(),
+            1,
+            "caused-by frames routed correctly"
+        );
     }
 
     #[test]
     fn extracts_mod_from_mixin_config() {
         let traces = parse_stacktraces(CRASH);
-        let ids: Vec<&str> = traces[0].mod_refs.iter().map(|r| r.mod_id.as_str()).collect();
+        let ids: Vec<&str> = traces[0]
+            .mod_refs
+            .iter()
+            .map(|r| r.mod_id.as_str())
+            .collect();
         assert!(ids.contains(&"somemod"), "mod_refs: {ids:?}");
         assert_eq!(traces[0].mod_refs[0].via, "mixin-config");
     }
@@ -235,7 +254,11 @@ Caused by: java.lang.NullPointerException: tried to call x on null
     fn extracts_mod_from_explicit_phrase() {
         let text = "[ERROR]: net.fabricmc.loader.ModResolutionException: Could not execute entrypoint for mod examplemod\n\tat foo.Bar.baz(Bar.java:1)\n";
         let traces = parse_stacktraces(text);
-        let ids: Vec<&str> = traces[0].mod_refs.iter().map(|r| r.mod_id.as_str()).collect();
+        let ids: Vec<&str> = traces[0]
+            .mod_refs
+            .iter()
+            .map(|r| r.mod_id.as_str())
+            .collect();
         assert!(ids.contains(&"examplemod"), "mod_refs: {ids:?}");
     }
 

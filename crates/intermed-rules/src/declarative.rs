@@ -3,11 +3,11 @@
 use intermed_doctor_core::evidence::Finding;
 use intermed_doctor_core::{Rule, RuleCtx};
 
+use crate::RulePackError;
 use crate::interpreter::{dedupe_by_subject, evaluate_pack};
 use crate::model::RulePack;
 use crate::pack::{default_core_pack_v2, default_core_pack_without_mixin};
 use crate::validate::validate_rule_pack;
-use crate::RulePackError;
 
 /// Interpreter-backed rule pack — single runtime for imperative and Datalog modes.
 pub struct DeclarativeRulePack {

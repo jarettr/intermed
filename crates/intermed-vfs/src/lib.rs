@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::Finding;
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
 };
@@ -22,7 +22,11 @@ const EXTRACTOR: &str = "vfs-scanner";
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r3");
+// `-r4`: per-jar cache no longer stores resource blobs (two-pass scan re-reads
+// only collision paths), so old `-r3` entries with blobs are invalidated.
+// `-r5`: mods.toml writer-id parse scoped to `[[mods]]` + comment/quote-safe, so
+// cached writer names from the old parse (e.g. `x" # mandatory`) are invalidated.
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r5");
 
 /// Implementation status for help text.
 pub const STATUS: &str = "active: Phase 3";
@@ -67,6 +71,28 @@ pub enum ConflictClass {
     LangPropertiesMerge,
     /// The same locale is provided as both JSON and `.lang` (incompatible formats).
     LangFormatMismatch,
+    /// A JSON *object* whose writers' top-level keys are disjoint (or agree on
+    /// shared keys): a deterministic, order-independent key union — e.g. a
+    /// `sounds.json` where each mod registers its own sound events. Safe to merge.
+    SafeJsonObjectMerge,
+    /// A root pack descriptor (`pack.mcmeta`, root `pack.png`): every resource
+    /// pack ships one. The override is expected, not a conflict — an overlay
+    /// carries its own. Surfaced only for explain/overlay, not as a problem.
+    RootMetadata,
+    /// `assets/<ns>/atlases/*.json` written by multiple jars. Atlas sources are a
+    /// list the game reads from one file by load order — dropping another writer's
+    /// sources. Not a plain merge; order-dependent.
+    OrderDependentAtlas,
+    /// `sounds.json` where writers define the *same* sound event differently. The
+    /// object merges, but the conflicting event is resolved by load order.
+    OrderDependentSoundDef,
+    /// A shader program/include (`assets/<ns>/shaders/**`) overridden by multiple
+    /// jars. Shader pipelines are load-order sensitive and loader-specific.
+    OrderDependentShader,
+    /// A binary asset (texture / font / sound file / …) provided with differing
+    /// bytes by multiple jars: a load-order override. Severity depends on the
+    /// asset domain (a texture override is cosmetic; a font/shader override is not).
+    BinaryOverride,
     /// Later writer replaces earlier content; order matters.
     UnsafeReplace,
 }
@@ -84,6 +110,12 @@ impl ConflictClass {
             ConflictClass::LangJsonMerge => "lang-json-merge",
             ConflictClass::LangPropertiesMerge => "lang-properties-merge",
             ConflictClass::LangFormatMismatch => "lang-format-mismatch",
+            ConflictClass::SafeJsonObjectMerge => "safe-json-object-merge",
+            ConflictClass::RootMetadata => "root-metadata",
+            ConflictClass::OrderDependentAtlas => "order-dependent-atlas",
+            ConflictClass::OrderDependentSoundDef => "order-dependent-sound-def",
+            ConflictClass::OrderDependentShader => "order-dependent-shader",
+            ConflictClass::BinaryOverride => "binary-override",
             ConflictClass::UnsafeReplace => "unsafe-replace",
         }
     }
@@ -96,9 +128,85 @@ impl ConflictClass {
             self,
             ConflictClass::Identical
                 | ConflictClass::SafeCrdtMerge
+                | ConflictClass::SafeJsonObjectMerge
                 | ConflictClass::LangJsonMerge
                 | ConflictClass::LangPropertiesMerge
         )
+    }
+
+    /// Whether the resolved outcome depends on loader/resource-pack load order
+    /// (an override, not a union). These need a chosen winner, not a merge.
+    pub fn is_order_dependent(self) -> bool {
+        matches!(
+            self,
+            ConflictClass::JsonOverride
+                | ConflictClass::TagReplaceOrderDependent
+                | ConflictClass::OrderDependentAtlas
+                | ConflictClass::OrderDependentSoundDef
+                | ConflictClass::OrderDependentShader
+                | ConflictClass::BinaryOverride
+                | ConflictClass::UnsafeReplace
+        )
+    }
+
+    /// What an overlay generator would do to resolve this collision, as the
+    /// stable `action` term of a [`kind::RESOURCE_OVERLAY_ACTION`] fact.
+    pub fn overlay_action(self) -> &'static str {
+        match self {
+            ConflictClass::Identical => "keep-any",
+            ConflictClass::SafeCrdtMerge
+            | ConflictClass::SafeJsonObjectMerge
+            | ConflictClass::LangJsonMerge
+            | ConflictClass::LangPropertiesMerge => "merge",
+            // pack.mcmeta: an overlay must generate its *own*, not copy a writer's.
+            ConflictClass::RootMetadata => "generate-own",
+            // Everything order-dependent needs an explicit winner picked.
+            _ => "pick-winner",
+        }
+    }
+}
+
+/// How confidently InterMed can predict the *resolved* outcome of a collision.
+///
+/// For a safe union the outcome is independent of order, so confidence is `High`.
+/// For an order-dependent override the winner is whichever jar the loader places
+/// last — and a static mods-dir scan does not know the loader's final order
+/// (it depends on dependency sorting, file names, and loader version), so we are
+/// honest: `Low`. This is reported as `load_order_confidence`, never as a claim
+/// that the outcome is "nondeterministic".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadOrderConfidence {
+    /// Outcome is order-independent (a union / identical content).
+    High,
+    /// Outcome depends on order, but a deterministic tiebreak is documented.
+    Medium,
+    /// Outcome depends on a loader load order this scan cannot observe.
+    Low,
+}
+
+impl LoadOrderConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LoadOrderConfidence::High => "high",
+            LoadOrderConfidence::Medium => "medium",
+            LoadOrderConfidence::Low => "low",
+        }
+    }
+
+    /// The confidence implied by a collision class.
+    fn for_class(class: ConflictClass) -> Self {
+        if class.is_safe_merge() {
+            LoadOrderConfidence::High
+        } else if matches!(
+            class,
+            ConflictClass::RootMetadata | ConflictClass::TagMixedRequired
+        ) {
+            // Resolvable without knowing loader order (own metadata / union + flag review).
+            LoadOrderConfidence::Medium
+        } else {
+            LoadOrderConfidence::Low
+        }
     }
 }
 
@@ -116,6 +224,9 @@ pub enum JsonDomain {
     Model,
     Atlas,
     Sounds,
+    Shader,
+    Font,
+    Particle,
     Lang,
     PackMcmeta,
     GenericJson,
@@ -133,6 +244,9 @@ impl JsonDomain {
             JsonDomain::Model => "model",
             JsonDomain::Atlas => "atlas",
             JsonDomain::Sounds => "sounds",
+            JsonDomain::Shader => "shader",
+            JsonDomain::Font => "font",
+            JsonDomain::Particle => "particle",
             JsonDomain::Lang => "lang",
             JsonDomain::PackMcmeta => "pack-mcmeta",
             JsonDomain::GenericJson => "generic-json",
@@ -141,7 +255,8 @@ impl JsonDomain {
     }
 
     /// A single-document JSON file: two writers at the same path is an override
-    /// decided by load order, never a mergeable union.
+    /// decided by load order, never a mergeable union. (Atlas / sounds / shader /
+    /// pack.mcmeta have *dedicated* classes and are dispatched before this check.)
     fn is_single_document(self) -> bool {
         matches!(
             self,
@@ -150,8 +265,6 @@ impl JsonDomain {
                 | JsonDomain::Advancement
                 | JsonDomain::Blockstate
                 | JsonDomain::Model
-                | JsonDomain::Atlas
-                | JsonDomain::PackMcmeta
         )
     }
 }
@@ -196,8 +309,38 @@ pub fn json_domain(path: &str) -> JsonDomain {
         if path.contains("/atlases/") {
             return JsonDomain::Atlas;
         }
+        if path.contains("/shaders/") {
+            return JsonDomain::Shader;
+        }
+        if path.contains("/font/") {
+            return JsonDomain::Font;
+        }
+        if path.contains("/particles/") {
+            return JsonDomain::Particle;
+        }
     }
     JsonDomain::GenericJson
+}
+
+/// Classify *any* resource path (JSON or binary) into its asset domain. For JSON
+/// this is [`json_domain`]; for binary files it recognizes the subtypes whose
+/// override severity differs (a texture override is cosmetic, a font/shader
+/// override is not). This is what the `domain` term of a collision fact carries.
+pub fn asset_domain(path: &str) -> JsonDomain {
+    if is_json_path(path) {
+        return json_domain(path);
+    }
+    if path.contains("/shaders/") {
+        return JsonDomain::Shader;
+    }
+    // `font/` providers, and bitmap font sheets under `textures/font/`.
+    if path.contains("/font/") {
+        return JsonDomain::Font;
+    }
+    if path.ends_with(".ogg") || path.contains("/sounds/") {
+        return JsonDomain::Sounds;
+    }
+    JsonDomain::BinaryAsset
 }
 
 /// A single resource writer.
@@ -357,21 +500,51 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
     }
 
     for c in &scan.collisions {
+        let confidence = LoadOrderConfidence::for_class(c.class);
         ctx.store
             .fact(EXTRACTOR, kind::RESOURCE_COLLISION)
             .subject(c.path.clone())
             .attr("writers", c.writers.join(","))
             .attr("archives", c.archives.join(","))
             .attr("class", c.class.as_str())
-            .attr("domain", json_domain(&c.path).as_str())
+            .attr("domain", asset_domain(&c.path).as_str())
             .attr("safe_merge", c.class.is_safe_merge())
+            .attr("order_dependent", c.class.is_order_dependent())
+            .attr("load_order_confidence", confidence.as_str())
+            .attr("writer_count", c.writers.len() as i64)
             .attr("reason", c.reason.clone())
             .source(SourceRef::file(c.path.clone()))
             .emit();
         emitted += 1;
 
+        // Overlay/PackOps intent: what an overlay generator *would* do. Read-only
+        // — Layer E never writes files, but downstream PackOps and the report
+        // consume this stable action model (roadmap §4.6).
+        ctx.store
+            .fact(EXTRACTOR, kind::RESOURCE_OVERLAY_ACTION)
+            .subject(c.path.clone())
+            .attr("action", c.class.overlay_action())
+            .attr(
+                "safety",
+                if c.class.is_safe_merge() {
+                    "safe"
+                } else {
+                    "manual"
+                },
+            )
+            .attr("class", c.class.as_str())
+            .attr("domain", asset_domain(&c.path).as_str())
+            .attr("writers", c.writers.join(","))
+            .attr("requires_manual_review", !c.class.is_safe_merge())
+            .attr("reason", c.reason.clone())
+            .source(SourceRef::file(c.path.clone()))
+            .emit();
+        emitted += 1;
+
+        // Legacy per-class predicate facts retained for the classes that had them
+        // (no consumer reads the newer classes' predicates, so none are emitted —
+        // avoids a dead fact stream; rules read `resource_collision.class`).
         let kind = match c.class {
-            ConflictClass::Identical => None,
             ConflictClass::JsonMergeCandidate => Some(kind::JSON_MERGE_CANDIDATE),
             ConflictClass::JsonOverride => Some(kind::JSON_OVERRIDE_CONFLICT),
             ConflictClass::SafeCrdtMerge => Some(kind::SAFE_CRDT_MERGE),
@@ -382,6 +555,8 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
             ConflictClass::LangPropertiesMerge => Some(kind::LANG_PROPERTIES_MERGE),
             ConflictClass::LangFormatMismatch => Some(kind::LANG_FORMAT_CONFLICT),
             ConflictClass::UnsafeReplace => Some(kind::UNSAFE_REPLACE_CONFLICT),
+            // Identical and the Phase-2 classes have no separate predicate.
+            _ => None,
         };
         if let Some(predicate) = kind {
             ctx.store
@@ -473,9 +648,8 @@ pub fn scan_mods_dir_filtered(
         )));
     }
 
-    let jars = intermed_doctor_core::list_jar_archives(dir, scan).map_err(|e| {
-        ScanError::new(format!("read {}: {e}", dir.display()))
-    })?;
+    let jars = intermed_doctor_core::list_jar_archives(dir, scan)
+        .map_err(|e| ScanError::new(format!("read {}: {e}", dir.display())))?;
 
     // Independent per-jar resource enumeration; fan out across cores.
     // `par_iter().map()` preserves order for deterministic aggregation.
@@ -491,22 +665,14 @@ pub fn scan_mods_dir_filtered(
         })
         .collect();
 
+    // Pass 1: aggregate the lightweight write records only (no resource bytes).
     let mut writes = Vec::new();
-    let mut blobs = Vec::new();
     let mut failures = Vec::new();
     let mut truncations = Vec::new();
     for (archive, cached) in scanned {
         match cached {
             CachedVfsJar::Ok(partial) => {
                 writes.extend(partial.writes);
-                for blob in partial.blobs {
-                    blobs.push(ResourceBlob {
-                        path: blob.path,
-                        writer: blob.writer,
-                        archive: blob.archive,
-                        bytes: blob.bytes,
-                    });
-                }
                 for reason in partial.truncations {
                     truncations.push((archive.clone(), reason));
                 }
@@ -514,6 +680,24 @@ pub fn scan_mods_dir_filtered(
             CachedVfsJar::Err(reason) => failures.push(ResourceScanFailure { archive, reason }),
         }
     }
+
+    // A path written by ≥2 archives is the only kind that can collide (and the only
+    // kind any consumer — `classify_collisions` and the overlay `winning_blob` /
+    // `blobs_for_path` — ever asks bytes for). Pass 2 re-reads bytes for just those.
+    let mut path_writes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in &writes {
+        *path_writes.entry(w.path.as_str()).or_default() += 1;
+    }
+    let collision_paths: BTreeSet<String> = path_writes
+        .into_iter()
+        .filter(|&(_, n)| n >= 2)
+        .map(|(p, _)| p.to_string())
+        .collect();
+
+    // Pass 2: re-read resource bytes for collision paths only. This is the sole
+    // retained byte buffer, bounded by the colliding-resource volume rather than
+    // every resource in every jar.
+    let blobs = reread_collision_blobs(&jars, &collision_paths);
 
     let mut collisions = classify_collisions(&blobs);
     collisions.extend(detect_cross_format_lang_collisions(&writes));
@@ -529,17 +713,8 @@ pub fn scan_mods_dir_filtered(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedBlob {
-    path: String,
-    writer: String,
-    archive: String,
-    bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 struct JarVfsPartial {
     writes: Vec<ResourceWrite>,
-    blobs: Vec<CachedBlob>,
     #[serde(default)]
     truncations: Vec<String>,
 }
@@ -559,24 +734,76 @@ fn file_name_of(path: &Path) -> String {
 
 fn scan_jar_cached(jar: &Path) -> CachedVfsJar {
     let mut writes = Vec::new();
-    let mut blobs = Vec::new();
     let mut truncations = Vec::new();
-    match scan_jar(jar, &mut writes, &mut blobs, &mut truncations) {
+    match scan_jar(jar, &mut writes, &mut truncations) {
         Ok(()) => CachedVfsJar::Ok(JarVfsPartial {
             writes,
-            blobs: blobs
-                .into_iter()
-                .map(|b| CachedBlob {
-                    path: b.path,
-                    writer: b.writer,
-                    archive: b.archive,
-                    bytes: b.bytes,
-                })
-                .collect(),
             truncations,
         }),
         Err(e) => CachedVfsJar::Err(e.to_string()),
     }
+}
+
+/// Pass 2 of the two-pass scan: re-read resource bytes for `collision_paths` only.
+/// Mirrors `scan_jar`'s path normalization, writer detection, and per-entry cap so
+/// the produced blobs line up with the pass-1 [`ResourceWrite`] records. Not cached
+/// (collision membership depends on the whole jar set, not one jar), but cheap: it
+/// touches only the small subset of entries whose path collides. Runs per jar in
+/// parallel; `classify_collisions` re-sorts each group, so blob order is irrelevant.
+fn reread_collision_blobs(
+    jars: &[PathBuf],
+    collision_paths: &BTreeSet<String>,
+) -> Vec<ResourceBlob> {
+    if collision_paths.is_empty() {
+        return Vec::new();
+    }
+    jars.par_iter()
+        .flat_map_iter(|jar| reread_collision_blobs_one(jar, collision_paths))
+        .collect()
+}
+
+fn reread_collision_blobs_one(jar: &Path, collision_paths: &BTreeSet<String>) -> Vec<ResourceBlob> {
+    let mut out = Vec::new();
+    let Ok(file) = std::fs::File::open(jar) else {
+        return out;
+    };
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return out;
+    };
+    let archive_name = file_name_of(jar);
+    let writer = detect_writer_id(&mut archive).unwrap_or_else(|| archive_stem(&archive_name));
+    for i in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(i) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let path = normalize_resource_path(entry.name());
+        if !collision_paths.contains(&path)
+            || !is_resource_path(&path)
+            || !is_safe_resource_path(&path)
+            || entry.size() > MAX_RESOURCE_ENTRY_BYTES
+        {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        let read_cap = MAX_RESOURCE_ENTRY_BYTES.saturating_add(1);
+        if std::io::Read::take(&mut entry, read_cap)
+            .read_to_end(&mut bytes)
+            .is_err()
+            || bytes.len() as u64 > MAX_RESOURCE_ENTRY_BYTES
+        {
+            continue;
+        }
+        out.push(ResourceBlob {
+            path,
+            writer: writer.clone(),
+            archive: archive_name.clone(),
+            bytes,
+        });
+    }
+    out
 }
 
 /// Per-jar resource scan limits. Minecraft jars are untrusted input: a malicious
@@ -590,7 +817,6 @@ const MAX_RESOURCE_ENTRIES: usize = 50_000;
 fn scan_jar(
     jar: &Path,
     writes: &mut Vec<ResourceWrite>,
-    blobs: &mut Vec<ResourceBlob>,
     truncations: &mut Vec<String>,
 ) -> Result<(), ScanError> {
     let file = std::fs::File::open(jar)
@@ -659,18 +885,15 @@ fn scan_jar(
             is_json_path(&path) && serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
 
         writes.push(ResourceWrite {
-            path: path.clone(),
+            path,
             writer: writer.clone(),
             archive: archive_name.clone(),
             size: bytes.len() as u64,
             json,
         });
-        blobs.push(ResourceBlob {
-            path,
-            writer: writer.clone(),
-            archive: archive_name.clone(),
-            bytes,
-        });
+        // Pass 1 intentionally drops `bytes`: only `size`/`json` are needed for the
+        // write record. Resource bytes are re-read in pass 2 (`reread_collision_blobs`)
+        // for the few paths that actually collide — see `scan_mods_dir_filtered`.
     }
     Ok(())
 }
@@ -726,14 +949,36 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
         return classify_tag_group(group);
     }
 
-    if is_lang_json_path(path) && group.iter().all(|b| lang_json_keys(&b.bytes).is_some()) {
-        return (
-            ConflictClass::LangJsonMerge,
-            "JSON language files can be merged as a deterministic key union".to_string(),
-        );
+    if is_lang_json_path(path) {
+        if let Some(per_writer) = group
+            .iter()
+            .map(|b| lang_json_keys(&b.bytes))
+            .collect::<Option<Vec<_>>>()
+        {
+            // Key-level diff: a JSON lang file is always mechanically mergeable as
+            // a key union, but report *how many* shared keys map to different text
+            // (the last writer wins per key). The semantic "which tooltip shows"
+            // finding is Layer M's `lang-key-conflict`; Layer E only records the
+            // structural count so the overlay/report can show it without a
+            // duplicate finding.
+            let conflicts = count_conflicting_keys(&per_writer);
+            let reason = if conflicts == 0 {
+                "JSON language files merge as a deterministic key union (no shared key differs)"
+                    .to_string()
+            } else {
+                format!(
+                    "JSON language files merge as a key union; {conflicts} shared key(s) map to \
+                     different text and are resolved by load order"
+                )
+            };
+            return (ConflictClass::LangJsonMerge, reason);
+        }
     }
 
-    if is_lang_properties_path(path) && group.iter().all(|b| lang_properties_keys(&b.bytes).is_some())
+    if is_lang_properties_path(path)
+        && group
+            .iter()
+            .all(|b| lang_properties_keys(&b.bytes).is_some())
     {
         return (
             ConflictClass::LangPropertiesMerge,
@@ -741,31 +986,88 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
         );
     }
 
-    // Domain-aware handling of every other JSON: recipes, loot tables,
-    // advancements, blockstates, models, atlases, sounds, pack.mcmeta. These are
-    // not all "merge candidates" — single-document files (one recipe per file,
-    // one model per file, …) are load-order overrides, which we must not present
-    // as mergeable.
+    let domain = asset_domain(path);
+
+    // Root pack descriptor: every pack ships one; the override is expected.
+    if domain == JsonDomain::PackMcmeta {
+        return (
+            ConflictClass::RootMetadata,
+            "pack.mcmeta is root pack metadata present in every resource pack; an overlay carries \
+             its own rather than copying a writer's"
+                .to_string(),
+        );
+    }
+
+    // Domain-aware handling of JSON whose writers all parse.
     if is_json_path(path)
         && group
             .iter()
             .all(|b| serde_json::from_slice::<serde_json::Value>(&b.bytes).is_ok())
     {
-        let domain = json_domain(path);
-        if domain.is_single_document() {
-            return (
-                ConflictClass::JsonOverride,
-                format!(
-                    "{} is a single-document file written by multiple jars; the runtime keeps one \
-                     by load order — this is an override, not a merge",
-                    domain.as_str()
-                ),
-            );
+        match domain {
+            // Atlas sources are a list one file owns; a second writer drops the
+            // first's sources — order-dependent, not a plain merge.
+            JsonDomain::Atlas => {
+                return (
+                    ConflictClass::OrderDependentAtlas,
+                    "atlas definitions list texture sources read from one file by load order; \
+                     merging is not a plain union — sources can be dropped"
+                        .to_string(),
+                );
+            }
+            JsonDomain::Shader => {
+                return (
+                    ConflictClass::OrderDependentShader,
+                    "shader definition overridden by multiple jars; shader pipelines are \
+                     load-order sensitive and loader-specific"
+                        .to_string(),
+                );
+            }
+            // sounds.json is an object keyed by sound event: disjoint events merge
+            // safely; the same event defined differently is an order-dependent pick.
+            JsonDomain::Sounds => {
+                return classify_object_merge_group(
+                    group,
+                    ConflictClass::OrderDependentSoundDef,
+                    "sound event(s)",
+                );
+            }
+            // Single-document data files: the runtime keeps one by load order.
+            d if d.is_single_document() => {
+                return (
+                    ConflictClass::JsonOverride,
+                    format!(
+                        "{} is a single-document file written by multiple jars; the runtime keeps \
+                         one by load order — this is an override, not a merge",
+                        d.as_str()
+                    ),
+                );
+            }
+            // Font providers / generic JSON objects: disjoint keys union safely.
+            JsonDomain::Font => {
+                return (
+                    ConflictClass::JsonOverride,
+                    "font provider definition kept as one document by load order".to_string(),
+                );
+            }
+            _ => {
+                return classify_object_merge_group(
+                    group,
+                    ConflictClass::JsonMergeCandidate,
+                    "key(s)",
+                );
+            }
         }
+    }
+
+    // Non-JSON content that differs: a binary override. Severity is decided by the
+    // asset domain downstream (texture cosmetic vs font/shader functional).
+    if !is_json_path(path) {
         return (
-            ConflictClass::JsonMergeCandidate,
+            ConflictClass::BinaryOverride,
             format!(
-                "all writers provide valid {} JSON, but a commutative merge rule is not proven safe",
+                "{} binary asset provided with differing bytes by multiple jars; the runtime keeps \
+                 one by load order",
                 domain.as_str()
             ),
         );
@@ -775,6 +1077,67 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
         ConflictClass::UnsafeReplace,
         "content differs and no safe merge rule is known".to_string(),
     )
+}
+
+/// Classify a collision of JSON *objects* by their top-level key sets. Writers
+/// whose keys are disjoint (or agree on shared keys) form a deterministic union
+/// ([`ConflictClass::SafeJsonObjectMerge`]); a shared key bound to *different*
+/// values is resolved by load order (`conflicting_class`).
+fn classify_object_merge_group(
+    group: &[&ResourceBlob],
+    conflicting_class: ConflictClass,
+    unit: &str,
+) -> (ConflictClass, String) {
+    let mut merged: BTreeMap<String, String> = BTreeMap::new();
+    let mut conflicts: BTreeSet<String> = BTreeSet::new();
+    for blob in group {
+        let Some(obj) = serde_json::from_slice::<serde_json::Value>(&blob.bytes)
+            .ok()
+            .and_then(|v| v.as_object().cloned())
+        else {
+            // Not a flat object on every writer — fall back to "needs review".
+            return (
+                ConflictClass::JsonMergeCandidate,
+                "writers provide valid JSON but not all are objects; a commutative merge is not \
+                 proven safe"
+                    .to_string(),
+            );
+        };
+        for (k, v) in obj {
+            let canonical = v.to_string();
+            match merged.get(&k) {
+                Some(prev) if prev != &canonical => {
+                    conflicts.insert(k);
+                }
+                _ => {
+                    merged.insert(k, canonical);
+                }
+            }
+        }
+    }
+    if conflicts.is_empty() {
+        (
+            ConflictClass::SafeJsonObjectMerge,
+            "writers define disjoint (or identical) top-level keys — a deterministic, \
+             order-independent object union"
+                .to_string(),
+        )
+    } else {
+        (
+            conflicting_class,
+            format!(
+                "writers disagree on {} {}: {} — resolved by load order",
+                conflicts.len(),
+                unit,
+                conflicts
+                    .iter()
+                    .take(6)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    }
 }
 
 /// Classify a Minecraft tag-path collision. Vanilla tag merge is a set union of
@@ -859,10 +1222,7 @@ pub fn merge_lang_properties(blobs: &[&[u8]]) -> Option<Vec<u8>> {
             keys.insert(k, v);
         }
     }
-    let mut lines: Vec<String> = keys
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let mut lines: Vec<String> = keys.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
     lines.sort();
     Some(lines.join("\n").into_bytes())
 }
@@ -992,7 +1352,9 @@ fn detect_cross_format_lang_collisions(writes: &[ResourceWrite]) -> Vec<Resource
             writers.extend(mods.iter().cloned());
         }
         format_list.sort_unstable();
-        for w in writes.iter().filter(|w| lang_locale_key(&w.path).is_some_and(|(k, _)| k == locale_key))
+        for w in writes
+            .iter()
+            .filter(|w| lang_locale_key(&w.path).is_some_and(|(k, _)| k == locale_key))
         {
             archives.push(w.archive.clone());
         }
@@ -1028,6 +1390,26 @@ fn lang_locale_key(path: &str) -> Option<(String, &'static str)> {
         return Some((base.to_string(), "lang"));
     }
     None
+}
+
+/// Count shared keys whose mapped value differs across writers (the keys whose
+/// resolved text depends on load order). Used for the Layer-E lang key-level diff.
+fn count_conflicting_keys(per_writer: &[BTreeMap<String, String>]) -> usize {
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut conflicting: BTreeSet<&str> = BTreeSet::new();
+    for map in per_writer {
+        for (k, v) in map {
+            match seen.get(k.as_str()) {
+                Some(prev) if *prev != v.as_str() => {
+                    conflicting.insert(k.as_str());
+                }
+                _ => {
+                    seen.insert(k.as_str(), v.as_str());
+                }
+            }
+        }
+    }
+    conflicting.len()
 }
 
 fn lang_json_keys(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
@@ -1092,12 +1474,7 @@ fn detect_writer_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Stri
         .or_else(|| {
             read_zip_text(archive, "META-INF/mods.toml")
                 .or_else(|| read_zip_text(archive, "META-INF/neoforge.mods.toml"))
-                .and_then(|text| {
-                    text.lines()
-                        .find_map(|line| line.trim().strip_prefix("modId"))
-                        .and_then(|rest| rest.split_once('='))
-                        .map(|(_, value)| value.trim().trim_matches('"').to_string())
-                })
+                .and_then(|text| intermed_resource_identity::mod_id_from_mods_toml(&text))
         })
         .or_else(|| {
             read_zip_text(archive, "plugin.yml")
@@ -1234,13 +1611,211 @@ mod tests {
     }
 
     #[test]
-    fn generic_json_is_merge_candidate() {
+    fn sounds_with_disjoint_events_is_safe_object_merge() {
+        // Each mod registers its own sound event → deterministic object union.
         let blobs = vec![
-            blob("assets/c/sounds.json", "a", br#"{"a":{"sounds":["x"]}}"#),
-            blob("assets/c/sounds.json", "b", br#"{"b":{"sounds":["y"]}}"#),
+            blob(
+                "assets/c/sounds.json",
+                "a",
+                br#"{"a.event":{"sounds":["x"]}}"#,
+            ),
+            blob(
+                "assets/c/sounds.json",
+                "b",
+                br#"{"b.event":{"sounds":["y"]}}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::SafeJsonObjectMerge);
+        assert!(collisions[0].class.is_safe_merge());
+        assert_eq!(json_domain("assets/c/sounds.json"), JsonDomain::Sounds);
+    }
+
+    #[test]
+    fn sounds_with_conflicting_event_is_order_dependent() {
+        // Same event, different definition → resolved by load order.
+        let blobs = vec![
+            blob(
+                "assets/c/sounds.json",
+                "a",
+                br#"{"shared":{"sounds":["x"]}}"#,
+            ),
+            blob(
+                "assets/c/sounds.json",
+                "b",
+                br#"{"shared":{"sounds":["y"]}}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::OrderDependentSoundDef);
+        assert!(collisions[0].class.is_order_dependent());
+    }
+
+    #[test]
+    fn pack_mcmeta_is_root_metadata() {
+        let blobs = vec![
+            blob("pack.mcmeta", "a", br#"{"pack":{"pack_format":15}}"#),
+            blob("pack.mcmeta", "b", br#"{"pack":{"pack_format":18}}"#),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::RootMetadata);
+        assert_eq!(collisions[0].class.overlay_action(), "generate-own");
+    }
+
+    #[test]
+    fn atlas_collision_is_order_dependent_atlas() {
+        let blobs = vec![
+            blob(
+                "assets/minecraft/atlases/blocks.json",
+                "a",
+                br#"{"sources":[{"type":"directory","source":"a"}]}"#,
+            ),
+            blob(
+                "assets/minecraft/atlases/blocks.json",
+                "b",
+                br#"{"sources":[{"type":"directory","source":"b"}]}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::OrderDependentAtlas);
+        assert_eq!(
+            json_domain("assets/minecraft/atlases/blocks.json"),
+            JsonDomain::Atlas
+        );
+    }
+
+    #[test]
+    fn shader_json_is_order_dependent_shader() {
+        let blobs = vec![
+            blob(
+                "assets/minecraft/shaders/core/x.json",
+                "a",
+                br#"{"vertex":"a"}"#,
+            ),
+            blob(
+                "assets/minecraft/shaders/core/x.json",
+                "b",
+                br#"{"vertex":"b"}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::OrderDependentShader);
+    }
+
+    #[test]
+    fn differing_texture_is_binary_override_with_texture_domain() {
+        let blobs = vec![
+            blob(
+                "assets/c/textures/item/x.png",
+                "a",
+                &[0x89, 0x50, 0x4e, 0x47, 1],
+            ),
+            blob(
+                "assets/c/textures/item/x.png",
+                "b",
+                &[0x89, 0x50, 0x4e, 0x47, 2],
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::BinaryOverride);
+        // Cosmetic texture domain (drives note-severity rule).
+        assert_eq!(
+            asset_domain("assets/c/textures/item/x.png"),
+            JsonDomain::BinaryAsset
+        );
+    }
+
+    #[test]
+    fn differing_shader_binary_is_functional_domain() {
+        let blobs = vec![
+            blob(
+                "assets/minecraft/shaders/core/x.fsh",
+                "a",
+                b"void main(){a;}",
+            ),
+            blob(
+                "assets/minecraft/shaders/core/x.fsh",
+                "b",
+                b"void main(){b;}",
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::BinaryOverride);
+        // Functional shader domain (drives warn-severity rule).
+        assert_eq!(
+            asset_domain("assets/minecraft/shaders/core/x.fsh"),
+            JsonDomain::Shader
+        );
+    }
+
+    #[test]
+    fn generic_object_disjoint_keys_is_safe_merge() {
+        let blobs = vec![
+            blob("assets/c/custom.json", "a", br#"{"a":1}"#),
+            blob("assets/c/custom.json", "b", br#"{"b":2}"#),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::SafeJsonObjectMerge);
+    }
+
+    #[test]
+    fn generic_object_conflicting_keys_is_merge_candidate() {
+        let blobs = vec![
+            blob("assets/c/custom.json", "a", br#"{"k":1}"#),
+            blob("assets/c/custom.json", "b", br#"{"k":2}"#),
         ];
         let collisions = classify_collisions(&blobs);
         assert_eq!(collisions[0].class, ConflictClass::JsonMergeCandidate);
-        assert_eq!(json_domain("assets/c/sounds.json"), JsonDomain::Sounds);
+    }
+
+    #[test]
+    fn lang_json_reports_conflicting_key_count() {
+        // Shared key `item.x` maps to different text; `item.a`/`item.b` are disjoint.
+        let blobs = vec![
+            blob(
+                "assets/c/lang/en_us.json",
+                "a",
+                br#"{"item.a":"A","item.x":"X1"}"#,
+            ),
+            blob(
+                "assets/c/lang/en_us.json",
+                "b",
+                br#"{"item.b":"B","item.x":"X2"}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::LangJsonMerge);
+        assert!(
+            collisions[0].reason.contains("1 shared key"),
+            "reason carries key-level diff count: {}",
+            collisions[0].reason
+        );
+    }
+
+    #[test]
+    fn lang_json_disjoint_keys_reports_no_conflict() {
+        let blobs = vec![
+            blob("assets/c/lang/en_us.json", "a", br#"{"item.a":"A"}"#),
+            blob("assets/c/lang/en_us.json", "b", br#"{"item.b":"B"}"#),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::LangJsonMerge);
+        assert!(collisions[0].reason.contains("no shared key differs"));
+    }
+
+    #[test]
+    fn load_order_confidence_tracks_class() {
+        assert_eq!(
+            LoadOrderConfidence::for_class(ConflictClass::SafeCrdtMerge),
+            LoadOrderConfidence::High
+        );
+        assert_eq!(
+            LoadOrderConfidence::for_class(ConflictClass::JsonOverride),
+            LoadOrderConfidence::Low
+        );
+        assert_eq!(
+            LoadOrderConfidence::for_class(ConflictClass::RootMetadata),
+            LoadOrderConfidence::Medium
+        );
     }
 }

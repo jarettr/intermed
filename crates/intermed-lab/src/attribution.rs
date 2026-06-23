@@ -15,7 +15,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::classify::{classify_log, FailureCategory};
+use crate::classify::{FailureCategory, classify_log};
 
 /// Minimum number of flagged predictions before [`super::eval::suggest_severity`]
 /// may recommend above [`intermed_doctor_core::evidence::Severity::Note`].
@@ -98,11 +98,7 @@ fn compiled() -> &'static [(FailureCategory, Regex, usize)] {
     TABLE.get_or_init(|| {
         patterns()
             .iter()
-            .filter_map(|p| {
-                Regex::new(p.regex)
-                    .ok()
-                    .map(|re| (p.category, re, p.group))
-            })
+            .filter_map(|p| Regex::new(p.regex).ok().map(|re| (p.category, re, p.group)))
             .collect()
     })
 }
@@ -114,7 +110,12 @@ pub fn normalize_subject(raw: &str) -> String {
     if trimmed.contains('/') {
         return trimmed.replace('/', ".");
     }
-    if trimmed.contains('.') && trimmed.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+    if trimmed.contains('.')
+        && trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+    {
         return trimmed.to_string();
     }
     trimmed.to_ascii_lowercase()

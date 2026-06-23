@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use intermed_lab::{
-    discover_lock, write_report, CompatibilityMatrix, FailureCategory, FileCandidateProvider,
-    SmokeStatus,
+    CompatibilityMatrix, FailureCategory, FileCandidateProvider, SmokeStatus, discover_lock,
+    write_report,
 };
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -126,7 +126,8 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
             "fabric-1.20.1-oom",
             false,
             "[Server thread/ERROR]: Encountered an unexpected exception\n\
-             java.lang.OutOfMemoryError: Java heap space".to_string(),
+             java.lang.OutOfMemoryError: Java heap space"
+                .to_string(),
         ),
         // Two independent failures in one log + non-ASCII mod name and emoji.
         (
@@ -143,7 +144,8 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
             "fabric-1.20.1-port",
             false,
             "[Server thread/WARN]: **** FAILED TO BIND TO PORT!\n\
-             java.net.BindException: Address already in use".to_string(),
+             java.net.BindException: Address already in use"
+                .to_string(),
         ),
     ];
     for (env, ok, log) in &cases {
@@ -177,14 +179,18 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
         vec![FailureCategory::MissingDependency]
     );
     assert!(!double.attributions.is_empty());
-    assert!(double
-        .attributions
-        .iter()
-        .any(|a| a.category == FailureCategory::MixinApplyError));
-    assert!(double
-        .attributions
-        .iter()
-        .any(|a| a.category == FailureCategory::MissingDependency));
+    assert!(
+        double
+            .attributions
+            .iter()
+            .any(|a| a.category == FailureCategory::MixinApplyError)
+    );
+    assert!(
+        double
+            .attributions
+            .iter()
+            .any(|a| a.category == FailureCategory::MissingDependency)
+    );
     assert!(double.detail.contains("+1 other failure"));
     // Excerpt was produced without panicking on the multibyte boundary.
     assert!(double.log_excerpt.is_some());

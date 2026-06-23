@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::validate::validate_rule_pack;
-use crate::{RulePack, RulePackError, RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA};
+use crate::{RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA, RulePack, RulePackError};
 
 /// Maximum registry index download size (1 MiB).
 const MAX_REGISTRY_BYTES: usize = 1024 * 1024;
@@ -360,11 +360,7 @@ fn decode_signature(encoded: &str) -> Result<Signature, SigningError> {
 /// Minimal hex encoder (avoids pulling `hex` crate for one call site).
 mod hex {
     pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        bytes
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        bytes.as_ref().iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
@@ -419,7 +415,10 @@ pub fn default_registry() -> RuleRegistry {
             version: pack.version.clone(),
             url: "embedded://intermed-core-datalog".to_string(),
             sha256: canonical_digest(&pack),
-            publisher: pack.publisher.clone().unwrap_or_else(|| "intermed".to_string()),
+            publisher: pack
+                .publisher
+                .clone()
+                .unwrap_or_else(|| "intermed".to_string()),
             changelog: Some("Embedded InterMed core declarative pack".to_string()),
             depends_on: Vec::new(),
         }],
@@ -449,11 +448,8 @@ pub fn default_rule_pack_install_dir() -> Result<std::path::PathBuf, SigningErro
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {
-            std::env::var_os("HOME").map(|home| {
-                std::path::PathBuf::from(home)
-                    .join(".local")
-                    .join("share")
-            })
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".local").join("share"))
         })
         .ok_or_else(|| SigningError::Message("could not resolve XDG data home".into()))?;
     Ok(base.join("intermed").join("rule-packs"))
@@ -522,9 +518,7 @@ pub fn fetch_url_limited(url: &str, max_bytes: usize) -> Result<Vec<u8>, Signing
         .map_err(|e| SigningError::Message(format!("fetch {url}: {e}")))?;
     let status = response.status();
     if !(200..300).contains(&status) {
-        return Err(SigningError::Message(format!(
-            "fetch {url}: HTTP {status}"
-        )));
+        return Err(SigningError::Message(format!("fetch {url}: HTTP {status}")));
     }
     let mut body = Vec::new();
     let mut reader = response.into_reader();
@@ -609,6 +603,11 @@ pub fn install_pack_from_registry(
     trusted_keys: &[VerifyingKey],
     policy: &TrustPolicy,
 ) -> Result<std::path::PathBuf, SigningError> {
+    if !is_safe_pack_id(pack_id) {
+        return Err(SigningError::Message(format!(
+            "invalid or unsafe pack id: {pack_id}"
+        )));
+    }
     let entry = registry
         .find_pack(pack_id)
         .ok_or_else(|| SigningError::Message(format!("pack not found in registry: {pack_id}")))?;
@@ -620,9 +619,8 @@ pub fn install_pack_from_registry(
     // are the weaker publisher-declared set. The policy decides what's acceptable.
     let registry_declared = trusted_keys_for_publisher(registry, &entry.publisher)?;
     verify_rule_pack_trust(&pack, origin, trusted_keys, &registry_declared, policy)?;
-    std::fs::create_dir_all(install_dir).map_err(|e| {
-        SigningError::Message(format!("create {}: {e}", install_dir.display()))
-    })?;
+    std::fs::create_dir_all(install_dir)
+        .map_err(|e| SigningError::Message(format!("create {}: {e}", install_dir.display())))?;
     let out = install_dir.join(format!("{}.rules.json", pack.id));
     let json = serde_json::to_string_pretty(&pack)
         .map_err(|e| SigningError::Message(format!("serialize pack: {e}")))?;
@@ -656,7 +654,17 @@ pub fn trusted_keys_for_publisher(
     let Some(encoded) = table.get(publisher_id) else {
         return Ok(Vec::new());
     };
-    encoded.iter().map(|enc| decode_verifying_key(enc)).collect()
+    encoded
+        .iter()
+        .map(|enc| decode_verifying_key(enc))
+        .collect()
+}
+
+fn is_safe_pack_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 #[cfg(test)]

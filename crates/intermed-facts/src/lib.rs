@@ -14,7 +14,7 @@
 //! * Phase 1 imperative rules can match on `kind` + read terms by name.
 //! * Phase 5 can lower the same facts into a Datalog IR / SQL rows (DuckDB)
 //!   with **no model change** — `kind` becomes the relation, terms become
-//!   columns. See `docs/SCHEMA.md`.
+//!   columns. See `docs/reference/facts.md`.
 //!
 //! Keep facts as plain data: no behaviour, no references to findings.
 
@@ -53,6 +53,11 @@ pub mod kind {
     pub const ENTRYPOINT: &str = "entrypoint";
     pub const MOD_METADATA: &str = "mod_metadata";
     pub const ENTRYPOINT_DETAIL: &str = "entrypoint_detail";
+    /// A class-package root a mod jar owns (`subject` = mod id, `package` = dotted
+    /// root like `com.foo.mymod`, `class_count` = classes under it). The
+    /// frame-to-jar ownership index: a crash stack frame whose class falls under an
+    /// *exclusively*-owned root is attributed to that mod with high confidence.
+    pub const PACKAGE_OWNER: &str = "package_owner";
     pub const MOD_RELATIONSHIP: &str = "mod_relationship";
     pub const MOD_CAPABILITY: &str = "mod_capability";
     pub const NESTED_JAR: &str = "nested_jar";
@@ -104,6 +109,10 @@ pub mod kind {
     /// single-document files: the runtime keeps one by load order, so this is an
     /// override, not a mergeable union.
     pub const JSON_OVERRIDE_CONFLICT: &str = "json_override_conflict";
+    /// A proposed overlay/PackOps action for a resource collision: what an overlay
+    /// generator *would* do to resolve it (`action`, `safety`, `writers`,
+    /// `requires_manual_review`). Read-only intent — Layer E never writes files.
+    pub const RESOURCE_OVERLAY_ACTION: &str = "resource_overlay_action";
     // Layer M — resource / data semantics (typed resource AST). Compact facts
     // lowered from per-resource summaries; rules turn them into findings.
     /// One resource was parsed into its typed AST (`domain`, `parse_status`,
@@ -119,9 +128,28 @@ pub mod kind {
     /// A dependency implied by a resource reference (e.g. a recipe `type` whose
     /// namespace isn't a definition owner). Layer C decides satisfied/missing.
     pub const IMPLICIT_DEPENDENCY_CANDIDATE: &str = "implicit_dependency_candidate";
+    /// A *per-mod* implicit dependency edge: a consumer mod (`subject` = writer)
+    /// ships a resource that structurally references a foreign `provider_namespace`
+    /// (recipe serializer `type`, worldgen feature, loot function, registry ref…).
+    /// Carries `relation`/`via`, `required`, `ref_count`, `sample_path` and the
+    /// Layer-M `resolve_state`. Layer C joins these against the *declared* edges to
+    /// build the effective-dependency model and surface undisclosed/unused deps.
+    pub const IMPLICIT_DEPENDENCY_EDGE: &str = "implicit_dependency_edge";
+    /// The resolution of a referenced namespace against the installed world:
+    /// `namespace_class` (installed-mod / provided-alias / builtin / … / missing)
+    /// and `state` (present / required-missing / optional-missing / …). The
+    /// auditable record behind an implicit-dependency conclusion.
+    pub const RESOURCE_RESOLVE_RESULT: &str = "resource_resolve_result";
     /// Two writers semantically disagree on the same resource path (`diff_kind`,
     /// `writers`, `detail`) — recipe output override, lang key conflict, etc.
     pub const RESOURCE_SEMANTIC_DIFF: &str = "resource_semantic_diff";
+    /// A resource points to another resource that was deleted or overridden.
+    pub const RESOURCE_SEMANTIC_CONFLICT: &str = "resource_semantic_conflict";
+    /// A per-object parse/validation issue (malformed field, unparseable domain
+    /// JSON): the `validate` output of the §4 analyzer contract. Surfaced for
+    /// `vfs explain --ast` and a single grouped, explain-only finding — never a
+    /// per-file warning (anti-FP).
+    pub const RESOURCE_SEMANTIC_ISSUE: &str = "resource_semantic_issue";
     /// Reserved. A model reference with no defining file is *not* emitted as a fact:
     /// mods generate models at runtime (baked / custom loaders) or ship them in
     /// resource packs, so absence is not proof of breakage. Unresolved references
@@ -132,11 +160,47 @@ pub mod kind {
     // These record what data-pack scripts *removed* at load time, so the evidence
     // graph knows a recipe/item present in a jar is not actually obtainable.
     pub const RUNTIME_REMOVED_RECIPE: &str = "runtime_removed_recipe";
+    /// A data-pack script *modifies* (replaces input/output of) a recipe rather
+    /// than removing it. Distinct from removal because the recipe still exists but
+    /// its static definition is no longer authoritative — enough to caveat a
+    /// static recipe finding, not to call it deleted.
+    pub const RUNTIME_SCRIPT_MODIFIES_RECIPE: &str = "runtime_script_modifies_recipe";
     pub const RUNTIME_REMOVED_ITEM: &str = "runtime_removed_item";
     pub const RUNTIME_REMOVED_LOOT_TABLE: &str = "runtime_removed_loot_table";
     pub const RUNTIME_REMOVED_TAG: &str = "runtime_removed_tag";
     // Layer F — mixin intelligence
     pub const MIXIN_CONFIG: &str = "mixin_config";
+    /// Per-mixin-class activation status and application side (client/server/both),
+    /// derived from which config array the mixin came from, any object-form
+    /// `environment`, and config plugin gating (plan Phase 1). Lets downstream
+    /// analysis stop treating a client-only vs server-only pair as a conflict.
+    pub const MIXIN_ACTIVATION: &str = "mixin_activation";
+    /// One stable mixin *application site* — the central site-level entity (plan
+    /// Phase 2): a single handler→target-method→injection-point tuple with its
+    /// side, activation, priority, require/expect/allow and resolution confidence.
+    pub const MIXIN_APPLICATION_SITE: &str = "mixin_application_site";
+    /// Runtime classpath coverage for one scan (plan Phase 4): which scopes
+    /// (Minecraft / mods / libraries / loader) were indexed and at what level, so
+    /// absence-based "target class missing" verdicts never exceed their evidence.
+    pub const MIXIN_CLASSPATH_COVERAGE: &str = "mixin_classpath_coverage";
+    /// Composition of all handlers applied at one exact injection point (plan
+    /// Phases 9–10): their application order, roles, and how they compose
+    /// (high-conflict / order-sensitive-chain / safe / conditional / impossible).
+    pub const MIXIN_COMPOSITION: &str = "mixin_composition";
+    /// A grouped, actionable risk diagnosis for one target (plan Phase 13): rolls up
+    /// the per-site apply/selector/signature/local/composition evidence into one
+    /// verdict with a headline and recommended action.
+    pub const MIXIN_RISK_CLUSTER: &str = "mixin_risk_cluster";
+    /// A mixin that hooks a Minecraft data loader (`RecipeManager`, `LootManager`,
+    /// `TagManagerLoader`, …) and therefore mutates runtime resources — the Layer-F
+    /// → Layer-M / Dynamics bridge. Keyed to the same `domain` string Layer M and the
+    /// Dynamics layer use, so static datapack analysis can be told it has a runtime
+    /// blind spot, and script + mixin mutation of one domain can be correlated.
+    pub const MIXIN_RUNTIME_RESOURCE_MUTATION: &str = "mixin_runtime_resource_mutation";
+    /// A security-sensitive subsystem a mixin weaves into (Layer F → Layer G):
+    /// networking, class loading, (de)serialization, or save IO. Woven code there is
+    /// a real audit concern, and compounds with the mod's `uses_*` security facts.
+    pub const MIXIN_SECURITY_SURFACE: &str = "mixin_security_surface";
     /// A mixin config declares an `IMixinConfigPlugin`, which can toggle mixins at
     /// load time — static analysis of that config is necessarily incomplete.
     pub const MIXIN_CONFIG_PLUGIN: &str = "mixin_config_plugin";
@@ -170,6 +234,10 @@ pub mod kind {
     pub const MIXIN_MOD_COMPLEXITY: &str = "mixin_mod_complexity";
     /// Low-yield mixin footprint (inert handlers) for one mod.
     pub const MIXIN_BLOAT: &str = "mixin_bloat";
+    /// Aggregate dataflow-precision metrics for one scan: how many handlers
+    /// resolved precisely vs imprecise, and the breakdown of imprecision reasons.
+    /// Measurement signal (plan §0) — never a finding.
+    pub const MIXIN_DATAFLOW_METRICS: &str = "mixin_dataflow_metrics";
     // Layer G — security audit
     pub const USES_PROCESS_SPAWN: &str = "uses_process_spawn";
     pub const USES_SOCKET: &str = "uses_socket";
@@ -184,6 +252,8 @@ pub mod kind {
     pub const USES_METHOD_HANDLES: &str = "uses_method_handles";
     /// Reserved schema kind; Layer G no longer emits this predicate (too noisy for security).
     pub const WRITES_FILES: &str = "writes_files";
+    /// A potentially malicious data modification (e.g. wiping core game recipes or tags).
+    pub const SECURITY_SUSPECT_MODIFICATION: &str = "security_suspect_modification";
     // Layer H — SBOM / provenance
     pub const CHECKSUM: &str = "checksum";
     pub const ARTIFACT_IDENTITY: &str = "artifact_identity";
@@ -405,6 +475,11 @@ impl<'s> FactBuilder<'s> {
             .entry(self.store.facts[idx].kind.clone())
             .or_default()
             .push(idx);
+        self.store
+            .subject_index
+            .entry(self.store.facts[idx].subject.clone())
+            .or_default()
+            .push(idx);
         self.store.id_index.insert(id, idx);
         id
     }
@@ -439,11 +514,27 @@ impl Default for FactRetentionPolicy {
             kind::LOG_MENTIONS_MOD,
             kind::RESOURCE_COLLISION,
             kind::RESOURCE_WRITER,
+            kind::RESOURCE_OVERLAY_ACTION,
+            kind::RUNTIME_REMOVED_RECIPE,
+            kind::RUNTIME_REMOVED_ITEM,
+            kind::RUNTIME_REMOVED_LOOT_TABLE,
+            kind::RUNTIME_REMOVED_TAG,
+            kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
             kind::MODPACK_INCOMPLETE,
             kind::MODPACK_MANIFEST,
             kind::MIXIN_OVERLAP,
+            kind::MIXIN_DATAFLOW_METRICS,
             kind::MIXIN_EFFECT,
             kind::HIGH_RISK_OVERWRITE,
+            // Site-level overhaul (plan Phases 1–14): conclusion-bearing diagnoses.
+            // The verbose per-site `mixin_application_site` stays droppable (like
+            // `mixin_injection_point`) — preserved only when a finding cites it.
+            kind::MIXIN_ACTIVATION,
+            kind::MIXIN_CLASSPATH_COVERAGE,
+            kind::MIXIN_COMPOSITION,
+            kind::MIXIN_RISK_CLUSTER,
+            kind::MIXIN_RUNTIME_RESOURCE_MUTATION,
+            kind::MIXIN_SECURITY_SURFACE,
             kind::SBOM,
             kind::UNKNOWN_SOURCE,
             kind::SIGNATURE_STATUS,
@@ -458,13 +549,17 @@ impl Default for FactRetentionPolicy {
             kind::USES_DESERIALIZATION,
             kind::USES_SYSTEM_EXIT,
             kind::USES_METHOD_HANDLES,
+            kind::SECURITY_SUSPECT_MODIFICATION,
             kind::DEFERRED_LAYER,
             // Layer M — keep the *compact* conclusion-bearing facts; the verbose
             // per-edge `resource_reference` / `resource_definition` are evidence
             // only and remain droppable (preserved when a finding cites them).
             kind::RESOURCE_AST_PARSED,
             kind::RESOURCE_SEMANTIC_DIFF,
+            kind::RESOURCE_SEMANTIC_CONFLICT,
+            kind::RESOURCE_SEMANTIC_ISSUE,
             kind::IMPLICIT_DEPENDENCY_CANDIDATE,
+            kind::RESOURCE_RESOLVE_RESULT,
             kind::NAMESPACE_OWNER,
         ] {
             keep.insert(k.to_string());
@@ -483,6 +578,10 @@ pub struct FactStore {
     next_id: u64,
     /// Per-predicate index into `facts` for O(1) kind lookup.
     kind_index: BTreeMap<String, Vec<usize>>,
+    /// Per-subject index into `facts`. Lets cross-fact passes (suppression /
+    /// finding merge, Layer-M ↔ Layer-E correlation) join on the shared subject
+    /// (usually a resource path or mod id) without an O(n·m) scan.
+    subject_index: BTreeMap<String, Vec<usize>>,
     /// FactId → position in `facts`. Required because ids are monotonic and
     /// stable across [`FactStore::compact`], so `id.0` is *not* the slot index
     /// once any fact has been dropped. See `get_still_works_after_compaction`.
@@ -531,6 +630,49 @@ impl FactStore {
             .map(move |i| &facts[i])
     }
 
+    /// All facts with the given subject (indexed; O(k) not O(n)). Used by passes
+    /// that correlate facts sharing a subject — e.g. a Layer-M semantic diff and
+    /// a Layer-E byte collision on the same resource path.
+    pub fn by_subject<'a>(&'a self, subject: &'a str) -> impl Iterator<Item = &'a Fact> + 'a {
+        let facts = &self.facts;
+        self.subject_index
+            .get(subject)
+            .into_iter()
+            .flatten()
+            .copied()
+            .map(move |i| &facts[i])
+    }
+
+    /// All facts with the given predicate **and** subject. Intersects the kind
+    /// and subject indexes, scanning the smaller postings list.
+    pub fn by_kind_subject<'a>(
+        &'a self,
+        kind: &'a str,
+        subject: &'a str,
+    ) -> impl Iterator<Item = &'a Fact> + 'a {
+        let facts = &self.facts;
+        let by_kind = self.kind_index.get(kind);
+        let by_subject = self.subject_index.get(subject);
+        // Walk whichever postings list is shorter, filtering by the other axis.
+        let (drive, want_subject) = match (by_kind, by_subject) {
+            (Some(k), Some(s)) if k.len() <= s.len() => (Some(k), true),
+            (Some(_), Some(s)) => (Some(s), false),
+            _ => (None, false),
+        };
+        drive
+            .into_iter()
+            .flatten()
+            .copied()
+            .map(move |i| &facts[i])
+            .filter(move |f| {
+                if want_subject {
+                    f.subject == subject
+                } else {
+                    f.kind == kind
+                }
+            })
+    }
+
     /// Drop verbose facts not listed in `policy.keep_kinds` when over `max_facts`.
     ///
     /// Rebuilds ids and the kind index. Returns how many facts were removed.
@@ -568,10 +710,15 @@ impl FactStore {
 
     fn rebuild_index(&mut self) {
         self.kind_index.clear();
+        self.subject_index.clear();
         self.id_index.clear();
         for (idx, fact) in self.facts.iter().enumerate() {
             self.kind_index
                 .entry(fact.kind.clone())
+                .or_default()
+                .push(idx);
+            self.subject_index
+                .entry(fact.subject.clone())
                 .or_default()
                 .push(idx);
             self.id_index.insert(fact.id, idx);
@@ -579,7 +726,13 @@ impl FactStore {
         // Ids are *not* renumbered: existing FactIds (e.g. held by findings'
         // evidence edges) must stay valid after compaction. next_id continues
         // monotonically past the largest surviving id.
-        self.next_id = self.facts.iter().map(|f| f.id.0).max().map(|m| m + 1).unwrap_or(0);
+        self.next_id = self
+            .facts
+            .iter()
+            .map(|f| f.id.0)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
     }
 
     /// Per-predicate counts, for report fact-stats.
@@ -601,11 +754,17 @@ impl FactStore {
 
     /// Rehydrate a store from a prior diagnosis snapshot (`--dump-facts` round-trip).
     pub fn from_snapshot(facts: Vec<Fact>) -> Self {
-        let next_id = facts.iter().map(|f| f.id.0).max().map(|m| m + 1).unwrap_or(0);
+        let next_id = facts
+            .iter()
+            .map(|f| f.id.0)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         let mut store = Self {
             facts,
             next_id,
             kind_index: BTreeMap::new(),
+            subject_index: BTreeMap::new(),
             id_index: BTreeMap::new(),
         };
         store.rebuild_index();
@@ -650,8 +809,70 @@ mod tests {
         store.fact("t", kind::MOD).subject("a").emit();
         store.fact("t", kind::MOD).subject("b").emit();
         store.fact("t", kind::PLUGIN).subject("c").emit();
-        let indexed: Vec<_> = store.by_kind(kind::MOD).map(|f| f.subject.as_str()).collect();
+        let indexed: Vec<_> = store
+            .by_kind(kind::MOD)
+            .map(|f| f.subject.as_str())
+            .collect();
         assert_eq!(indexed, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn subject_and_kind_subject_indexes_match_linear_scan() {
+        let mut store = FactStore::new();
+        store
+            .fact("t", kind::RESOURCE_COLLISION)
+            .subject("p.json")
+            .emit();
+        store
+            .fact("t", kind::RESOURCE_SEMANTIC_DIFF)
+            .subject("p.json")
+            .emit();
+        store
+            .fact("t", kind::RESOURCE_COLLISION)
+            .subject("other.json")
+            .emit();
+
+        // by_subject returns every fact on that subject regardless of kind.
+        let on_path: Vec<_> = store
+            .by_subject("p.json")
+            .map(|f| f.kind.as_str())
+            .collect();
+        assert_eq!(on_path.len(), 2);
+        assert!(on_path.contains(&kind::RESOURCE_COLLISION));
+        assert!(on_path.contains(&kind::RESOURCE_SEMANTIC_DIFF));
+
+        // by_kind_subject intersects both axes.
+        let coll: Vec<_> = store
+            .by_kind_subject(kind::RESOURCE_COLLISION, "p.json")
+            .map(|f| f.subject.as_str())
+            .collect();
+        assert_eq!(coll, vec!["p.json"]);
+        assert_eq!(
+            store
+                .by_kind_subject(kind::RESOURCE_COLLISION, "missing")
+                .count(),
+            0
+        );
+        assert_eq!(store.by_subject("missing").count(), 0);
+    }
+
+    #[test]
+    fn subject_index_survives_compaction() {
+        let mut store = FactStore::new();
+        for i in 0..100 {
+            store
+                .fact("mixin", kind::MIXIN_HANDLER_BODY)
+                .subject(format!("m{i}"))
+                .emit();
+        }
+        store.fact("meta", kind::MOD).subject("alpha").emit();
+        let policy = FactRetentionPolicy {
+            max_facts: 10,
+            ..FactRetentionPolicy::default()
+        };
+        store.compact(&policy);
+        // Subject index was rebuilt: the surviving fact is still reachable.
+        assert_eq!(store.by_subject("alpha").count(), 1);
     }
 
     #[test]
@@ -720,7 +941,9 @@ mod tests {
 
         // The kept fact has a high FactId but now lives at a low slot index.
         // The slot-index bug returned None here; id_index resolves it.
-        let f = store.get(kept).expect("kept fact resolvable after compaction");
+        let f = store
+            .get(kept)
+            .expect("kept fact resolvable after compaction");
         assert_eq!(f.subject, "alpha");
         assert_eq!(f.id, kept);
 

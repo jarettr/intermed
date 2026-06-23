@@ -1,4 +1,4 @@
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 use intermed_security_audit::rule;
 
@@ -7,9 +7,9 @@ fn dummy_target() -> Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     }
 }
@@ -111,8 +111,10 @@ fn corroborated_process_spawn_surfaces_as_warn_and_is_marked_inferred() {
     );
     // …but it is transparently labelled as inferred, not asserted as fact.
     assert!(finding.explanation.contains("low confidence"));
-    assert!(finding
-        .machine_tags
-        .iter()
-        .any(|t| t == "reflection-corroborated"));
+    assert!(
+        finding
+            .machine_tags
+            .iter()
+            .any(|t| t == "reflection-corroborated")
+    );
 }

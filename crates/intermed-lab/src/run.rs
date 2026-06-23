@@ -14,11 +14,11 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::attribution::extract_attributions;
-use crate::classify::{classify_log, classify_log_all, FailureCategory};
 use crate::FailureAttribution;
-use crate::corpus::{read_lock, CorpusEnvironment, CorpusLock};
-use crate::{read_json, write_json_atomic, LabError};
+use crate::attribution::extract_attributions;
+use crate::classify::{FailureCategory, classify_log, classify_log_all};
+use crate::corpus::{CorpusEnvironment, CorpusLock, read_lock};
+use crate::{LabError, read_json, write_json_atomic};
 
 /// Schema tag for a single raw captured smoke output.
 pub const SMOKE_OUTPUT_SCHEMA: &str = "intermed-smoke-output-v1";

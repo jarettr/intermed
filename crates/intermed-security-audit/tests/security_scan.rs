@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use intermed_security_audit::fixtures;
-use intermed_security_audit::{scan_mods_dir, SecuritySignal, SignalProvenance};
+use intermed_security_audit::{SecuritySignal, SignalProvenance, scan_mods_dir};
 use zip::write::SimpleFileOptions;
 
 #[test]

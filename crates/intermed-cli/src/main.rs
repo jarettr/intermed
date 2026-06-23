@@ -10,52 +10,79 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use anyhow::{Context as _, Result as AnyhowResult};
 use clap::Parser;
 
 use intermed_cli::command::{
-    CacheArgs, CacheCommand, Command, DbArgs, DemoArgs, DemoCommand, DoctorArgs, DoctorTuningArgs,
-    GraphExportFormat, HistoryArgs, LabArgs, LabCommand, LabEvalArgs, DepsArgs, DepsCommand,
-    LogicMode, MixinMapArgs, RulesArgs, RulesCommand, SbomArgs, SbomCommand, SbomExportFormatCli,
-    SparkMapArgs, TrendsArgs, VfsArgs, VfsCommand,
+    CacheArgs, CacheCommand, Command, DbArgs, DemoArgs, DemoCommand, DepsArgs, DepsCommand,
+    DepsIdArgs, DepsImplicitArgs, DepsPathArgs, DoctorArgs, DoctorCacheArgs, DoctorTuningArgs,
+    GraphExportFormat, HistoryArgs, ImpactArgs, ImpactCommand, ImpactRemoveArgs, ImpactUpdateArgs,
+    LabArgs, LabCommand, LabEvalArgs, LogicMode, MixinMapArgs, RulesArgs, RulesCommand, SbomArgs,
+    SbomCommand, SbomExportFormatCli, SparkMapArgs, TrendsArgs, VfsArgs, VfsCommand,
 };
 // Subcommand enums are only matched on the duckdb-backed analytics path.
 #[cfg(feature = "duckdb")]
-use intermed_cli::command::{HistoryCommand, TrendsCommand};
-#[cfg(feature = "duckdb")]
 use intermed_cli::command::DbCommand;
-use intermed_duckdb::{duckdb_available, DuckdbRulePack};
-use intermed_config::{ConfigError, IntermedConfig};
+#[cfg(feature = "duckdb")]
+use intermed_cli::command::{HistoryCommand, TrendsCommand};
 use intermed_cli::{detail, info};
+use intermed_config::{ConfigError, IntermedConfig};
 use intermed_doctor_core::evidence::Finding;
 use intermed_doctor_core::facts::Fact;
 use intermed_doctor_core::{
-    detect_target, materialize_modpack_archive, parse_changed_since, write_atomic,
     DiagnosisSettings, DiagnosticEngine, DiagnosticRun, JarCache, Target, TargetKind,
+    detect_target, materialize_modpack_archive, parse_changed_since, write_atomic,
 };
-use intermed_report::{write_demo_artifacts, Format};
+use intermed_duckdb::{DuckdbRulePack, duckdb_available};
+use intermed_report::{Format, write_demo_artifacts};
 use intermed_spark_bridge::PerformanceThresholds;
 
-use intermed_deps::{build_graph, resolve_store, DependencyRule, ResolutionOutcome};
+use intermed_deps::{DependencyRule, ResolutionOutcome, build_graph, resolve_store};
 use intermed_log::{LogCollector, LogSignalRule};
 use intermed_minecraft_scan::{EnvironmentCollector, MetadataCollector};
 use intermed_rules::{
-    MixedLoaderPackRule,
-    check_rule_packs, default_rule_pack_install_dir, format_trace, install_pack_from_registry,
-    install_pack_with_dependencies, load_rule_pack, load_registry_from_source, load_signing_key,
+    ColumnarRulePack, GenerateBackend, MixedLoaderPackRule, RULE_PACK_SCHEMA_V2,
+    RULE_REGISTRY_SCHEMA, RulePackSelection, SouffleRulePack, check_rule_packs,
+    default_rule_pack_install_dir, format_trace, generate_rules, install_pack_from_registry,
+    install_pack_with_dependencies, load_registry_from_source, load_rule_pack, load_signing_key,
     load_trusted_keys, merged_default_registry, registry_to_json, resolve_doctor_packs,
-    souffle_available, generate_rules, trace_pack, validate_rule_pack, verify_rule_pack_signature,
-    DeclarativeRulePack, GenerateBackend, RulePackSelection, SouffleRulePack, RULE_PACK_SCHEMA_V2,
-    RULE_REGISTRY_SCHEMA,
+    souffle_available, trace_pack, validate_rule_pack, verify_rule_pack_signature,
 };
-use intermed_sbom::{export_scan, scan_mods_dir, SbomExportFormat};
+use intermed_sbom::{SbomExportFormat, export_scan, scan_mods_dir};
 
 use intermed_cli::Cli;
 
 mod persistence;
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
+// mimalloc keeps RSS close to the live heap on this allocation-heavy workload (the
+// fact graph is millions of small allocations that fragment glibc malloc badly).
+// The dhat profiler installs its own allocator, so only swap in mimalloc otherwise.
+#[cfg(not(feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
     let cli = Cli::parse();
     intermed_cli::verbosity::configure(cli.quiet, cli.verbose);
+
+    // Bug fix: configure_thread_pool must run for ALL subcommands that use Rayon
+    // (not just `doctor`), otherwise vfs/sbom/lab/deps scans ignore the jobs limit.
+    // We read from INTERMED_JOBS env var as a lightweight fallback when no config
+    // is loaded yet. configure_thread_pool errors are non-fatal — warn and continue.
+    let early_jobs: Option<usize> = std::env::var("INTERMED_JOBS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n: &usize| n > 0);
+    if let Err(e) = configure_thread_pool(early_jobs) {
+        eprintln!("warning: {e} (continuing with Rayon default)");
+    }
+
     if cli.dump_config {
         match IntermedConfig::defaults().to_toml() {
             Ok(text) => {
@@ -72,6 +99,7 @@ fn main() -> ExitCode {
             Command::Doctor(args) => run_doctor(args, cli.config.as_deref()),
             Command::Vfs(args) => run_vfs(args),
             Command::Deps(args) => run_deps(args),
+            Command::Impact(args) => run_impact(args),
             Command::MixinMap(args) => run_mixin_map(args),
             Command::SparkMap(args) => run_spark_map(args),
             Command::Lab(args) => run_lab(args, cli.config.as_deref()),
@@ -114,7 +142,10 @@ fn configure_thread_pool(jobs: Option<usize>) -> Result<(), String> {
 /// 1 warnings, 2 errors). When `--exit-zero` is set, findings no longer affect
 /// the exit code — only genuine operational failures (handled by earlier
 /// `ExitCode::from(2)` returns) produce a non-zero status.
-fn findings_exit_code(report: &intermed_doctor_core::report::DoctorReport, exit_zero: bool) -> ExitCode {
+fn findings_exit_code(
+    report: &intermed_doctor_core::report::DoctorReport,
+    exit_zero: bool,
+) -> ExitCode {
     if exit_zero {
         ExitCode::SUCCESS
     } else {
@@ -123,94 +154,77 @@ fn findings_exit_code(report: &intermed_doctor_core::report::DoctorReport, exit_
 }
 
 fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
+    // Bug fix (Баг 10): delegate to run_doctor_inner which returns anyhow::Result
+    // so error chains are preserved and displayed with full context instead of
+    // a bare eprintln!("{e}") that discards intermediate causes.
+    match run_doctor_inner(args, config_path) {
+        Ok(code) => code,
+        Err(e) => {
+            // anyhow's Display already includes the chain ("context: cause: root").
+            eprintln!("error: {e:?}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> AnyhowResult<ExitCode> {
     if !args.target.exists() {
-        eprintln!("error: target does not exist: {}", args.target.display());
-        return ExitCode::from(2);
+        anyhow::bail!("target does not exist: {}", args.target.display());
     }
 
-    let mut cfg = match IntermedConfig::load(config_path) {
-        Ok(cfg) => cfg,
-        Err(ConfigError::Read { path, source }) => {
-            eprintln!("error: could not read config {}: {source}", path.display());
-            return ExitCode::from(2);
+    // Bug fix (Баг 9): fail-fast on unavailable engines before any I/O.
+    if args.logic == LogicMode::Souffle && !souffle_available() {
+        anyhow::bail!("--logic=souffle requires the 'souffle' binary in PATH");
+    }
+    if args.logic == LogicMode::Duckdb && !duckdb_available() {
+        anyhow::bail!("--logic=duckdb requires building with --features duckdb");
+    }
+    if args.db.is_some() && !duckdb_available() {
+        anyhow::bail!("--db requires building with --features duckdb");
+    }
+
+    let mut cfg = IntermedConfig::load(config_path).map_err(|e| match e {
+        ConfigError::Read { path, source } => {
+            anyhow::anyhow!("could not read config {}: {source}", path.display())
         }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::from(2);
-        }
-    };
+        other => anyhow::anyhow!("{other}"),
+    })?;
     apply_doctor_cli_overrides(&mut cfg, &args);
 
+    // Bug fix (Баг 6): configure_thread_pool is hoisted to main() for all commands.
+    // Here we refine it with the doctor-specific jobs setting if it was not yet set
+    // via INTERMED_JOBS env var. build_global silently no-ops if already initialized.
     let jobs = args
         .jobs
         .or_else(|| (cfg.runtime.jobs > 0).then_some(cfg.runtime.jobs));
     if let Err(e) = configure_thread_pool(jobs) {
-        eprintln!("error: {e}");
-        return ExitCode::from(2);
+        // A second call after build_global is already done is a no-op error; ignore it.
+        let _ = e;
     }
 
     let mut target: Target = detect_target(&args.target);
-    let modpack_mount = match materialize_modpack_archive(&target) {
-        Ok((updated, mount)) => {
+    let modpack_mount = materialize_modpack_archive(&target)
+        .map(|(updated, mount)| {
             target = updated;
             mount
-        }
-        Err(e) => {
-            eprintln!("error: modpack extraction failed: {e}");
-            return ExitCode::from(2);
-        }
-    };
+        })
+        .context("modpack extraction failed")?;
     if let Some(md) = args.mods_dir.clone() {
         target.mods_dir = Some(md);
         if target.kind == TargetKind::Unknown {
             target.kind = TargetKind::ModsDir;
         }
     }
+    // IMPORTANT: _keep_modpack must remain in scope until the engine run completes.
+    // The drop guard unmounts a temporary directory; dropping it early would
+    // invalidate paths the engine is still reading. Intentional binding, not dead code.
     let _keep_modpack = modpack_mount;
     if let Some(ref report) = args.performance.spark_report {
         target.spark_report = Some(report.clone());
     }
 
-    if args.logic == LogicMode::Souffle && !souffle_available() {
-        eprintln!("error: --logic=souffle requires the 'souffle' binary in PATH");
-        return ExitCode::from(2);
-    }
-    if args.logic == LogicMode::Duckdb && !duckdb_available() {
-        eprintln!("error: --logic=duckdb requires building with --features duckdb");
-        return ExitCode::from(2);
-    }
-    if args.db.is_some() && !duckdb_available() {
-        eprintln!("error: --db requires building with --features duckdb");
-        return ExitCode::from(2);
-    }
-
     let cache_enabled = !args.cache.no_cache;
-    let jar_cache = if cache_enabled {
-        let mut cache_config = cfg.jar_cache_config();
-        if let Some(mib) = args.cache.cache_max_mib {
-            cache_config = cache_config.with_max_bytes(mib.saturating_mul(1024 * 1024));
-        }
-        if let Some(days) = args.cache.cache_max_age_days {
-            cache_config = cache_config.with_max_age_days(days);
-        }
-        match JarCache::new_with_config(true, args.cache.cache_dir.clone(), cache_config) {
-            Ok(cache) => {
-                let cache = match &args.cache.cache_remote_dir {
-                    Some(dir) => cache.with_remote(std::sync::Arc::new(
-                        intermed_doctor_core::LocalDirRemoteTier::new(dir.clone()),
-                    )),
-                    None => cache,
-                };
-                Some(cache)
-            }
-            Err(e) => {
-                eprintln!("error: could not initialize jar cache: {e}");
-                return ExitCode::from(2);
-            }
-        }
-    } else {
-        Some(JarCache::disabled())
-    };
+    let jar_cache = init_jar_cache(&cfg, &args.cache, cache_enabled).map_err(anyhow::Error::msg)?;
 
     let performance = args.performance.performance || cfg.performance.enabled;
     if performance && target.spark_report.is_none() {
@@ -223,35 +237,19 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
     }
     let perf_thresholds = performance_thresholds_from_config(&cfg, &args.performance);
     let changed_since = if let Some(ref since) = args.cache.changed_since {
-        match parse_changed_since(since) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                eprintln!("error: invalid --changed-since: {e}");
-                return ExitCode::from(2);
-            }
-        }
+        Some(
+            parse_changed_since(since)
+                .map_err(|e| anyhow::anyhow!("invalid --changed-since value: {e}"))?,
+        )
     } else {
         None
     };
     let settings = diagnosis_settings_from_config(&cfg, &args.tuning, changed_since);
     let rule_pack_selection = rule_pack_selection_from(&cfg, &args);
-    let resolved_rules = match resolve_doctor_packs(
-        args.mixin_risk && args.logic == LogicMode::Imperative,
-        &rule_pack_selection,
-    ) {
-        Ok(resolved) => resolved,
-        Err(e) => {
-            eprintln!("error: rule pack resolution failed: {e}");
-            return ExitCode::from(2);
-        }
-    };
-    let declarative_pack = match DeclarativeRulePack::new(resolved_rules.pack) {
-        Ok(pack) => pack,
-        Err(e) => {
-            eprintln!("error: invalid rule pack: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    // `without_mixin`: when Layer-F mixin-risk runs (any logic mode), drop the
+    // lighter declarative mixin rules from the pack so the two don't double-report.
+    let resolved_rules = resolve_doctor_packs(args.mixin_risk, &rule_pack_selection)
+        .context("rule pack resolution failed")?;
     if !resolved_rules.overlay_ids.is_empty() {
         info!(
             "rule-packs: merged overlays [{}]",
@@ -261,7 +259,7 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
             info!("rule-pack `{}`: {}", t.id, t.trust.describe());
         }
     }
-    print_rule_provenance(args.logic, args.mixin_risk);
+    print_rule_provenance(args.logic);
     let engine = build_engine(
         args.logic,
         args.mixin_risk,
@@ -269,7 +267,7 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
         perf_thresholds,
         settings,
         jar_cache,
-        declarative_pack,
+        resolved_rules.pack,
     );
     let run = engine.diagnose_with_facts(&target);
     detail!(
@@ -280,51 +278,38 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
     );
 
     if let Some(path) = &args.output.profile {
-        if let Err(e) = persistence::write_profile(path, &run.profile) {
-            eprintln!("error: could not write profile to {}: {e}", path.display());
-            return ExitCode::from(2);
-        }
+        persistence::write_profile(path, &run.profile)
+            .map_err(|e| anyhow::anyhow!("could not write profile to {}: {e}", path.display()))?;
     }
 
     if let Some(path) = &args.provenance.dump_facts {
-        if let Err(e) = persistence::write_facts(path, &run.facts) {
-            eprintln!("error: could not write facts to {}: {e}", path.display());
-            return ExitCode::from(2);
-        }
+        persistence::write_facts(path, &run.facts)
+            .map_err(|e| anyhow::anyhow!("could not write facts to {}: {e}", path.display()))?;
     }
 
     if let Some(path) = &args.db {
         if let Err(e) = persistence::persist_duckdb_run(path, &run) {
-            eprintln!("error: {e}");
+            eprintln!("error: {e:#}");
             if !args.db_best_effort {
-                // The user asked to persist; a silent failure would let
-                // automation believe the result was saved when it was not.
-                return ExitCode::from(2);
+                return Ok(ExitCode::from(2));
             }
         }
     }
 
     if let Some(finding_id) = &args.provenance.explain {
-        return explain_finding(
+        return Ok(explain_finding(
             &run,
             finding_id,
             !args.output.no_color && std::io::stdout().is_terminal(),
             args.output.exit_zero,
-        );
+        ));
     }
 
     if let Some(path) = &args.output.html {
-        // The facts-aware renderer populates provenance, the mixin heatmap, the
-        // fact explorer, and the performance tab from the run's fact corpus.
         let html = intermed_report::render_html_with_facts(&run.report, &run.facts);
-        if let Err(e) = write_atomic(path, html.as_bytes()) {
-            eprintln!(
-                "error: could not write HTML report to {}: {e}",
-                path.display()
-            );
-            return ExitCode::from(2);
-        }
-        return findings_exit_code(&run.report, args.output.exit_zero);
+        write_atomic(path, html.as_bytes())
+            .with_context(|| format!("could not write HTML report to {}", path.display()))?;
+        return Ok(findings_exit_code(&run.report, args.output.exit_zero));
     }
 
     let format = if args.output.sarif {
@@ -340,19 +325,19 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
         "{}",
         intermed_report::render_with_facts(&run.report, &run.facts, format)
     );
-    findings_exit_code(&run.report, args.output.exit_zero)
+    Ok(findings_exit_code(&run.report, args.output.exit_zero))
 }
 
 fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &DoctorArgs) {
-    if args.performance.performance {
-        cfg.performance.enabled = true;
-    }
-    if let Some(mib) = args.cache.cache_max_mib {
-        cfg.cache.max_size_mib = mib;
-    }
-    if let Some(days) = args.cache.cache_max_age_days {
-        cfg.cache.max_age_days = days;
-    }
+    // Note: cfg.cache.* are NOT mutated here. init_jar_cache() reads the cache
+    // override args (cache_max_mib, cache_max_age_days) directly from `args`, so
+    // mutating cfg would create a double-apply and confuse debugging. The config
+    // file value remains the baseline; CLI args are overlaid non-destructively.
+    //
+    // cfg.performance.enabled is NOT mutated here either: run_doctor reads
+    // `args.performance.performance || cfg.performance.enabled` directly on the
+    // line that computes the `performance` bool, so a mutation here would be
+    // redundant and would pollute the config value seen elsewhere.
     if let Some(ms) = args.performance.tick_spike_ms {
         cfg.performance.tick_spike_ms = ms;
     }
@@ -411,6 +396,36 @@ fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &DoctorArgs) {
     } else if args.mixin.mixin_recommendations {
         cfg.mixin.recommendations = Some(true);
     }
+}
+
+/// Initialize the [`JarCache`] for a `doctor` run (Bug fix 8: extracted from `run_doctor`).
+///
+/// Keeps the ~20-line initialization block out of the top-level function, giving
+/// it a single clear purpose and a testable surface.
+fn init_jar_cache(
+    cfg: &IntermedConfig,
+    cache_args: &DoctorCacheArgs,
+    enabled: bool,
+) -> Result<Option<JarCache>, String> {
+    if !enabled {
+        return Ok(Some(JarCache::disabled()));
+    }
+    let mut cache_config = cfg.jar_cache_config();
+    if let Some(mib) = cache_args.cache_max_mib {
+        cache_config = cache_config.with_max_bytes(mib.saturating_mul(1024 * 1024));
+    }
+    if let Some(days) = cache_args.cache_max_age_days {
+        cache_config = cache_config.with_max_age_days(days);
+    }
+    let cache = JarCache::new_with_config(true, cache_args.cache_dir.clone(), cache_config)
+        .map_err(|e| format!("could not initialize jar cache: {e}"))?;
+    let cache = match &cache_args.cache_remote_dir {
+        Some(dir) => cache.with_remote(std::sync::Arc::new(
+            intermed_doctor_core::LocalDirRemoteTier::new(dir.clone()),
+        )),
+        None => cache,
+    };
+    Ok(Some(cache))
 }
 
 fn performance_thresholds_from_config(
@@ -504,26 +519,24 @@ struct RuleBackendPlan {
 
 fn rule_backend_plan(logic: LogicMode) -> RuleBackendPlan {
     RuleBackendPlan {
-        declarative_log: matches!(logic, LogicMode::Duckdb | LogicMode::Datalog),
+        declarative_log: logic == LogicMode::Duckdb,
         declarative_security: logic == LogicMode::Duckdb,
-        declarative_sbom_provenance: matches!(logic, LogicMode::Duckdb | LogicMode::Datalog),
+        declarative_sbom_provenance: logic == LogicMode::Duckdb,
         declarative_sbom_correlation: logic == LogicMode::Duckdb,
     }
 }
 
-/// Report which rules ran from the declarative backend vs. the imperative
-/// fallback. Only meaningful for non-imperative `--logic` modes; printed at
-/// `NORMAL` verbosity so `--logic souffle/datalog/duckdb` users can see exactly
-/// what the chosen backend covered and what fell back.
-fn print_rule_provenance(logic: LogicMode, mixin_risk: bool) {
-    if logic == LogicMode::Imperative {
+/// Report which rules ran from the chosen Layer-J backend vs. the residual interpreter
+/// path. The default columnar engine runs silently; provenance is only reported for an
+/// explicitly-selected external backend (Soufflé / DuckDB), at `NORMAL` verbosity.
+fn print_rule_provenance(logic: LogicMode) {
+    if logic == LogicMode::Columnar {
         return;
     }
     let backend = match logic {
-        LogicMode::Datalog => "declarative pack (in-process interpreter)",
         LogicMode::Souffle => "Soufflé Datalog",
         LogicMode::Duckdb => "DuckDB SQL",
-        LogicMode::Imperative => unreachable!(),
+        LogicMode::Columnar => unreachable!(),
     };
     let plan = rule_backend_plan(logic);
 
@@ -539,22 +552,17 @@ fn print_rule_provenance(logic: LogicMode, mixin_risk: bool) {
     place(plan.declarative_log, "Layer D log signals");
     place(plan.declarative_security, "Layer G security");
     place(plan.declarative_sbom_provenance, "Layer H SBOM provenance");
-    place(plan.declarative_sbom_correlation, "Layer H×G SBOM-security correlation");
+    place(
+        plan.declarative_sbom_correlation,
+        "Layer H×G SBOM-security correlation",
+    );
     // These rules are always imperative regardless of backend.
     fallback.push("Layer C dependencies".into());
     fallback.push("Layer A×B mixed-loader".into());
     fallback.push("Layer E dynamics".into());
 
     info!("logic[{logic}]: declarative → {}", declarative.join(", "));
-    info!("logic[{logic}]: imperative fallback → {}", fallback.join(", "));
-    // The imperative mixin-risk rule (composite risk, complexity, bloat) only runs
-    // under --logic imperative; say so plainly rather than silently dropping it.
-    if mixin_risk {
-        info!(
-            "logic[{logic}]: note — Layer F mixin-risk findings are only produced under \
-             `--logic imperative`; this backend emits mixin facts but not the risk rule."
-        );
-    }
+    info!("logic[{logic}]: imperative rules → {}", fallback.join(", "));
 }
 
 fn build_engine(
@@ -564,7 +572,7 @@ fn build_engine(
     perf_thresholds: PerformanceThresholds,
     settings: DiagnosisSettings,
     jar_cache: Option<JarCache>,
-    declarative_pack: DeclarativeRulePack,
+    pack: intermed_rules::RulePack,
 ) -> DiagnosticEngine {
     let mut builder = DiagnosticEngine::builder()
         .tool_version(env!("CARGO_PKG_VERSION"))
@@ -577,11 +585,10 @@ fn build_engine(
         .collector(LogCollector) // Layer D
         .collector(intermed_vfs::collector()) // Layer E
         .collector(intermed_resource_ast::collector()) // Layer M — resource/data semantics (AST)
-        .collector(intermed_dynamics::collector()) // Layer E — script-engine dynamics
+        .collector(intermed_dynamics::collector()) // Layer E — script-engine dynamics (logs)
+        .collector(intermed_dynamics::static_script_collector()) // Layer E — static script scan
         .collector(intermed_security_audit::collector()) // Layer G
         .collector(intermed_sbom::collector()) // Layer H
-        // ── Deferred collectors (later phases) ──
-        .collector(intermed_runtime_preflight::collector()) // Layer L — Phase 9
         // ── Working rules ──
         // Dynamics is an independent evidence stream (not part of the swappable
         // Layer-J core pack), so it runs the same in every logic backend.
@@ -615,15 +622,19 @@ fn build_engine(
             .rule(intermed_spark_bridge::rule_with_thresholds(perf_thresholds));
     }
 
+    // Every Layer-J backend evaluates the *resolved* pack (honoring --mixin-risk's
+    // without-mixin selection + installed overlays); only one arm runs, so the move is
+    // fine. The columnar engine is the default in-process backend.
     match logic {
-        LogicMode::Imperative | LogicMode::Datalog => {
-            builder = builder.rule(declarative_pack);
-        }
-        LogicMode::Souffle => builder = builder.rule(SouffleRulePack::new()), // Layer J — Soufflé
-        LogicMode::Duckdb => builder = builder.rule(DuckdbRulePack::new()), // Layer J — DuckDB SQL
+        LogicMode::Souffle => builder = builder.rule(SouffleRulePack::new(pack)), // Layer J — Soufflé
+        LogicMode::Duckdb => builder = builder.rule(DuckdbRulePack::new(pack)), // Layer J — DuckDB SQL
+        LogicMode::Columnar => builder = builder.rule(ColumnarRulePack::new(pack)),
     }
 
-    if mixin_risk && logic == LogicMode::Imperative {
+    // Layer-F mixin-risk is an independent imperative Rust rule (full bytecode
+    // analysis); it runs under *any* `--logic` backend, not only imperative — the
+    // backend choice only routes the declarative Layer-J pack.
+    if mixin_risk {
         builder = builder.rule(intermed_mixin_intel::rule()); // Layer F — Phase 4
     }
 
@@ -692,7 +703,12 @@ fn rank_by_similarity<'a>(
 ) -> Vec<&'a Finding> {
     let mut scored: Vec<(f64, &Finding)> = findings
         .iter()
-        .map(|f| (strsim::jaro_winkler(query_lc, &f.id.to_ascii_lowercase()), f))
+        .map(|f| {
+            (
+                strsim::jaro_winkler(query_lc, &f.id.to_ascii_lowercase()),
+                f,
+            )
+        })
         .filter(|(score, _)| *score >= min_score)
         .collect();
     scored.sort_by(|a, b| {
@@ -765,9 +781,7 @@ fn explain_finding(run: &DiagnosticRun, query: &str, color: bool, exit_zero: boo
             if listing.is_empty() {
                 eprintln!("error: no finding matches '{query}'; this report has no findings");
             } else {
-                eprintln!(
-                    "error: no finding matches '{query}'. Top findings in this report:"
-                );
+                eprintln!("error: no finding matches '{query}'. Top findings in this report:");
                 print_finding_list(&listing);
             }
             return ExitCode::from(2);
@@ -909,6 +923,260 @@ fn run_deps(args: DepsArgs) -> ExitCode {
                 }
             }
         }
+        DepsCommand::Why(args) => run_deps_why(args, false),
+        DepsCommand::WhyMissing(args) => run_deps_why(args, true),
+        DepsCommand::Implicit(args) => run_deps_implicit(args),
+        DepsCommand::Path(args) => run_deps_path(args),
+    }
+}
+
+/// Resolve a target from an id-bearing deps arg, collecting Layer-C facts.
+fn collect_for_id(
+    target_path: &std::path::Path,
+    mods_dir: Option<&std::path::Path>,
+) -> Result<intermed_doctor_core::facts::FactStore, ExitCode> {
+    let target = detect_target_or_exit(target_path)?;
+    let target = match mods_dir {
+        Some(md) => Target {
+            mods_dir: Some(md.to_path_buf()),
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            ..target
+        },
+        None => target,
+    };
+    collect_layer_c_facts(&target)
+}
+
+fn run_deps_why(args: DepsIdArgs, missing: bool) -> ExitCode {
+    let store = match collect_for_id(&args.target, args.mods_dir.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let report = if missing {
+        intermed_deps::why_missing(&store, &args.id)
+    } else {
+        intermed_deps::why(&store, &args.id)
+    };
+    if args.json {
+        emit_json("intermed-deps-why-v1", "report", &report)
+    } else {
+        println!("{}", report.render());
+        // why-missing of an absent, required dependency is an actionable state.
+        if missing && !report.present && !report.reasons.is_empty() {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn run_deps_implicit(args: DepsImplicitArgs) -> ExitCode {
+    let store = match collect_for_id(&args.target, args.mods_dir.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let refs = intermed_deps::implicit_for_namespace(&store, &args.namespace);
+    if args.json {
+        let payload = serde_json::json!({
+            "schema": "intermed-deps-implicit-v1",
+            "namespace": args.namespace,
+            "references": refs,
+        });
+        print_json_payload(&payload)
+    } else {
+        if refs.is_empty() {
+            println!("No implicit references to namespace `{}`.", args.namespace);
+            return ExitCode::SUCCESS;
+        }
+        println!(
+            "{} mod(s) implicitly reference namespace `{}`:",
+            refs.len(),
+            args.namespace
+        );
+        for r in &refs {
+            let req = if r.required {
+                "required"
+            } else {
+                "conditional"
+            };
+            println!(
+                "  {} -> {} -> namespace {} ({}, {} ref(s), e.g. {}) [{}]",
+                r.consumer, r.via, args.namespace, req, r.ref_count, r.sample_path, r.resolve_state
+            );
+        }
+        ExitCode::SUCCESS
+    }
+}
+
+fn run_deps_path(args: DepsPathArgs) -> ExitCode {
+    let store = match collect_for_id(&args.target, args.mods_dir.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let chain = intermed_deps::dependency_path(&store, &args.from, &args.to);
+    if args.json {
+        let payload = serde_json::json!({
+            "schema": "intermed-deps-path-v1",
+            "from": args.from,
+            "to": args.to,
+            "path": chain,
+        });
+        print_json_payload(&payload)
+    } else {
+        match chain {
+            Some(edges) => {
+                println!("Dependency path {} -> {}:", args.from, args.to);
+                for e in &edges {
+                    println!("  {}", e.render());
+                }
+                ExitCode::SUCCESS
+            }
+            None => {
+                println!("No dependency path from {} to {}.", args.from, args.to);
+                ExitCode::SUCCESS
+            }
+        }
+    }
+}
+
+fn run_impact(args: ImpactArgs) -> ExitCode {
+    match args.command {
+        ImpactCommand::Remove(args) => run_impact_remove(args),
+        ImpactCommand::Update(args) => run_impact_update(args),
+    }
+}
+
+fn run_impact_remove(args: ImpactRemoveArgs) -> ExitCode {
+    let store = match collect_for_id(&args.target, args.mods_dir.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let impact = intermed_deps::remove_impact(&store, &args.id);
+    if args.json {
+        return emit_json("intermed-impact-remove-v1", "impact", &impact);
+    }
+    println!(
+        "Removing {} ({}):",
+        impact.target,
+        if impact.installed {
+            "installed"
+        } else {
+            "not an installed mod id"
+        }
+    );
+    if impact.is_empty() {
+        println!("  nothing in the pack references it.");
+        return ExitCode::SUCCESS;
+    }
+    for (domain, count) in &impact.resources.by_domain {
+        println!(
+            "  - {count} {domain}(s) reference the {} namespace",
+            impact.target
+        );
+    }
+    if !impact.implicit_dependents.is_empty() {
+        println!(
+            "  - {} mod(s) have an implicit static dependency on {}",
+            impact.implicit_dependents.len(),
+            impact.target
+        );
+        for d in &impact.implicit_dependents {
+            println!("      {} (via {})", d.mod_id, d.via);
+        }
+    }
+    if !impact.declared_dependents.is_empty() {
+        println!(
+            "  - {} declared dependency/ies require {}",
+            impact.declared_dependents.len(),
+            impact.target
+        );
+        for d in &impact.declared_dependents {
+            println!("      {d}");
+        }
+    }
+    if !impact.provides.is_empty() {
+        println!(
+            "  - also provides (lost on removal): {}",
+            impact.provides.join(", ")
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+fn run_impact_update(args: ImpactUpdateArgs) -> ExitCode {
+    let store = match collect_for_id(&args.target, args.mods_dir.as_deref()) {
+        Ok(s) => s,
+        Err(code) => return code,
+    };
+    let from = if args.from == "-" {
+        None
+    } else {
+        Some(args.from.as_str())
+    };
+    let impact = intermed_deps::update_impact(&store, &args.id, from, &args.to);
+    if args.json {
+        return emit_json("intermed-impact-update-v1", "impact", &impact);
+    }
+    match &impact.from {
+        Some(f) => println!("Updating {} {} -> {}:", impact.target, f, impact.to),
+        None => println!("Updating {} to {}:", impact.target, impact.to),
+    }
+    if impact.breaks.is_empty() && impact.now_satisfied.is_empty() && impact.undecidable.is_empty()
+    {
+        println!(
+            "  no declared dependency ranges constrain {}.",
+            impact.target
+        );
+        return ExitCode::SUCCESS;
+    }
+    for b in &impact.breaks {
+        let kind = if b.mandatory {
+            "requires"
+        } else {
+            "optionally uses"
+        };
+        println!(
+            "  BREAKS: {} {} {} {} — rejects {}",
+            b.mod_id, kind, impact.target, b.range, impact.to
+        );
+    }
+    for s in &impact.now_satisfied {
+        println!(
+            "  FIXED:  {} {} {} — now satisfied by {}",
+            s.mod_id, impact.target, s.range, impact.to
+        );
+    }
+    for u in &impact.undecidable {
+        println!(
+            "  CHECK:  {} {} {} — range could not be parsed",
+            u.mod_id, impact.target, u.range
+        );
+    }
+    if impact.breaks.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// Serialize `value` under a `{schema, <key>: value}` envelope and print it.
+fn emit_json<T: serde::Serialize>(schema: &str, key: &str, value: &T) -> ExitCode {
+    let payload = serde_json::json!({ "schema": schema, key: value });
+    print_json_payload(&payload)
+}
+
+fn print_json_payload(payload: &serde_json::Value) -> ExitCode {
+    match serde_json::to_string_pretty(payload) {
+        Ok(text) => {
+            println!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: serialize: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -927,13 +1195,29 @@ fn deps_target(args: &intermed_cli::command::DepsTargetArgs) -> Result<Target, E
     }
 }
 
-fn collect_layer_c_facts(target: &Target) -> Result<intermed_doctor_core::facts::FactStore, ExitCode> {
+fn collect_layer_c_facts(
+    target: &Target,
+) -> Result<intermed_doctor_core::facts::FactStore, ExitCode> {
+    // The resource AST is off by default; the implicit + effective dependency
+    // levels (and the reverse resource graph behind `impact`) need it parsed, so
+    // raise the level to Full for these dependency-intelligence commands. We also
+    // disable fact compaction (no rules run here to cite the resource facts, so the
+    // default retention policy would strip `resource_reference` / implicit edges).
+    let mut settings = DiagnosisSettings::default();
+    settings.resource.level = intermed_doctor_core::ResourceAstLevel::Full;
+    settings.facts.retention.max_facts = usize::MAX;
     let engine = DiagnosticEngine::builder()
+        .settings(settings)
         .collector(EnvironmentCollector)
         .collector(MetadataCollector)
+        // Layer M — resource/data semantics: needed for the implicit + effective
+        // dependency levels (`implicit_dependency_edge` / `resource_reference`).
+        .collector(intermed_resource_ast::collector())
         .build();
     let run = engine.diagnose_with_facts(target);
-    Ok(intermed_doctor_core::facts::FactStore::from_snapshot(run.facts))
+    Ok(intermed_doctor_core::facts::FactStore::from_snapshot(
+        run.facts,
+    ))
 }
 
 fn run_vfs(args: VfsArgs) -> ExitCode {
@@ -987,9 +1271,8 @@ fn run_vfs(args: VfsArgs) -> ExitCode {
                     Ok(plan) => {
                         println!(
                             "{}",
-                            serde_json::to_string_pretty(&plan).unwrap_or_else(|e| format!(
-                                "{{\"error\":\"{e}\"}}"
-                            ))
+                            serde_json::to_string_pretty(&plan)
+                                .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
                         );
                         return ExitCode::SUCCESS;
                     }
@@ -1072,7 +1355,9 @@ fn run_vfs_explain_ast(
         .filter(|r| r.ast.resource_path == path)
         .collect();
     if records.is_empty() {
-        println!("No parsed resource at `{path}` (not present, binary, or not parsed at this level).");
+        println!(
+            "No parsed resource at `{path}` (not present, binary, or not parsed at this level)."
+        );
         return ExitCode::SUCCESS;
     }
 
@@ -1095,8 +1380,10 @@ fn run_vfs_explain_ast(
         println!("  kind:   {}", d.kind.as_str());
         println!("  detail: {}", d.detail);
     } else if writers.len() > 1 {
-        let hashes: std::collections::BTreeSet<&str> =
-            records.iter().map(|r| r.ast.semantic_hash.as_str()).collect();
+        let hashes: std::collections::BTreeSet<&str> = records
+            .iter()
+            .map(|r| r.ast.semantic_hash.as_str())
+            .collect();
         if hashes.len() == 1 {
             println!("Semantic diff: none (all writers semantically identical — safe)");
         } else {
@@ -1112,7 +1399,7 @@ fn run_vfs_explain_ast(
     if !refs.is_empty() {
         println!("References:");
         for r in refs {
-            let opt = if r.conditioned {
+            let opt = if !r.conditions.is_empty() {
                 " (conditioned)"
             } else if !r.required {
                 " (optional)"
@@ -1332,7 +1619,9 @@ fn run_lab_eval(args: LabEvalArgs) -> ExitCode {
                     }
                 }
             } else {
-                println!("Finding-level: no lab attributions in dataset (category co-occurrence only)");
+                println!(
+                    "Finding-level: no lab attributions in dataset (category co-occurrence only)"
+                );
             }
             println!("Written: {}", args.out.display());
             ExitCode::SUCCESS
@@ -1410,9 +1699,7 @@ fn print_history_diff_human(report: &intermed_duckdb::HistoryDiffReport) {
         println!("No finding changes between runs.");
         return;
     }
-    println!(
-        "change\tcategory\tseverity\trule_id\tfinding_id\ttitle\taffected(a→b)"
-    );
+    println!("change\tcategory\tseverity\trule_id\tfinding_id\ttitle\taffected(a→b)");
     for row in &report.deltas {
         let kind = match row.change {
             intermed_duckdb::RunDeltaKind::Added => "added",
@@ -1447,54 +1734,47 @@ fn run_history(args: HistoryArgs) -> ExitCode {
     #[cfg(feature = "duckdb")]
     {
         match args.command {
-            HistoryCommand::Diff(diff) => {
-                match intermed_duckdb::AnalyticsStore::open(&diff.db) {
-                    Ok(store) => {
-                        match store.history_diff_report(&diff.run_a, &diff.run_b) {
-                            Ok(report) => {
-                                if diff.json {
-                                    #[derive(serde::Serialize)]
-                                    struct HistoryDiffJson<'a> {
-                                        schema: &'static str,
-                                        #[serde(flatten)]
-                                        report: &'a intermed_duckdb::HistoryDiffReport,
-                                    }
-                                    let payload = HistoryDiffJson {
-                                        schema: "intermed-history-diff-v1",
-                                        report: &report,
-                                    };
-                                    match serde_json::to_string_pretty(&payload) {
-                                        Ok(text) => println!("{text}"),
-                                        Err(e) => {
-                                            eprintln!("error: history diff json failed: {e}");
-                                            return ExitCode::from(2);
-                                        }
-                                    }
-                                } else {
-                                    print_history_diff_human(&report);
+            HistoryCommand::Diff(diff) => match intermed_duckdb::AnalyticsStore::open(&diff.db) {
+                Ok(store) => match store.history_diff_report(&diff.run_a, &diff.run_b) {
+                    Ok(report) => {
+                        if diff.json {
+                            #[derive(serde::Serialize)]
+                            struct HistoryDiffJson<'a> {
+                                schema: &'static str,
+                                #[serde(flatten)]
+                                report: &'a intermed_duckdb::HistoryDiffReport,
+                            }
+                            let payload = HistoryDiffJson {
+                                schema: "intermed-history-diff-v1",
+                                report: &report,
+                            };
+                            match serde_json::to_string_pretty(&payload) {
+                                Ok(text) => println!("{text}"),
+                                Err(e) => {
+                                    eprintln!("error: history diff json failed: {e}");
+                                    return ExitCode::from(2);
                                 }
-                                ExitCode::SUCCESS
                             }
-                            Err(e) => {
-                                eprintln!("error: history diff failed: {e}");
-                                ExitCode::from(2)
-                            }
+                        } else {
+                            print_history_diff_human(&report);
                         }
+                        ExitCode::SUCCESS
                     }
                     Err(e) => {
-                        eprintln!("error: could not open {}: {e}", diff.db.display());
+                        eprintln!("error: history diff failed: {e}");
                         ExitCode::from(2)
                     }
+                },
+                Err(e) => {
+                    eprintln!("error: could not open {}: {e}", diff.db.display());
+                    ExitCode::from(2)
                 }
-            }
+            },
             HistoryCommand::Prune(prune) => {
                 match intermed_duckdb::AnalyticsStore::open(&prune.db) {
                     Ok(store) => match store.history_prune(&prune.keep) {
                         Ok(removed) => {
-                            println!(
-                                "pruned {removed} run(s) older than keep={}",
-                                prune.keep
-                            );
+                            println!("pruned {removed} run(s) older than keep={}", prune.keep);
                             ExitCode::SUCCESS
                         }
                         Err(e) => {
@@ -1512,7 +1792,10 @@ fn run_history(args: HistoryArgs) -> ExitCode {
                 match intermed_duckdb::AnalyticsStore::open(&conflicts.db) {
                     Ok(store) => match store.history_conflicts(&conflicts.since) {
                         Ok(rows) => {
-                            println!("InterMed History — recurring conflicts (since {})", conflicts.since);
+                            println!(
+                                "InterMed History — recurring conflicts (since {})",
+                                conflicts.since
+                            );
                             println!("Database: {}", conflicts.db.display());
                             if rows.is_empty() {
                                 println!("No recurring conflicts in window.");
@@ -1672,6 +1955,7 @@ fn run_rules(args: RulesArgs) -> ExitCode {
         RulesCommand::Update(args) => run_rules_update(args),
         RulesCommand::Registry(args) => run_rules_registry(args),
         RulesCommand::Install(args) => run_rules_install(args),
+        RulesCommand::Explain(args) => run_rules_explain(args),
     }
 }
 
@@ -1699,6 +1983,7 @@ fn run_rules_generate(args: intermed_cli::command::RulesGenerateArgs) -> ExitCod
         RulesGenerateBackend::Sql => GenerateBackend::Sql,
         RulesGenerateBackend::Rust => GenerateBackend::Rust,
         RulesGenerateBackend::Datalog => GenerateBackend::Datalog,
+        RulesGenerateBackend::Explain => GenerateBackend::Explain,
     };
     let output = generate_rules(&pack, backend);
 
@@ -1711,6 +1996,54 @@ fn run_rules_generate(args: intermed_cli::command::RulesGenerateArgs) -> ExitCod
     } else {
         print!("{output}");
     }
+    ExitCode::SUCCESS
+}
+
+fn run_rules_explain(args: intermed_cli::command::RulesExplainArgs) -> ExitCode {
+    let pack = match if args.pack.as_os_str().is_empty() || !args.pack.exists() {
+        Ok(intermed_rules::default_core_pack_v2())
+    } else if args.pack.is_file() {
+        load_rule_pack(&args.pack)
+    } else {
+        Err(intermed_rules::RulePackError::new(format!(
+            "pack not found: {}",
+            args.pack.display()
+        )))
+    } {
+        Ok(pack) => pack,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Optional fact dump enables EXPLAIN ANALYZE on real facts.
+    let facts: Option<Vec<intermed_doctor_core::facts::Fact>> = match &args.facts {
+        Some(path) => match std::fs::read_to_string(path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+        {
+            Ok(f) => Some(f),
+            Err(e) => {
+                eprintln!("error: read facts {}: {e}", path.display());
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+
+    let output = intermed_rules::explain_plans(&pack, args.rule.as_deref(), facts.as_deref());
+    if output.trim().is_empty() {
+        eprintln!(
+            "no lowerable rule to explain{}",
+            args.rule
+                .as_deref()
+                .map(|r| format!(" matching `{r}`"))
+                .unwrap_or_default()
+        );
+        return ExitCode::from(1);
+    }
+    print!("{output}");
     ExitCode::SUCCESS
 }
 
@@ -1855,7 +2188,8 @@ fn run_rules_install(args: intermed_cli::command::RulesInstallArgs) -> ExitCode 
         },
         None => Vec::new(),
     };
-    match install_pack_with_dependencies(&registry, &args.pack_id, &install_dir, &trusted, &policy) {
+    match install_pack_with_dependencies(&registry, &args.pack_id, &install_dir, &trusted, &policy)
+    {
         Ok(paths) => {
             for path in paths {
                 println!("installed {}", path.display());
@@ -2107,9 +2441,11 @@ fn run_rules_update(args: intermed_cli::command::RulesUpdateArgs) -> ExitCode {
         eprintln!("error: unsupported registry schema: {}", registry.schema);
         return ExitCode::from(2);
     }
-    let install_dir = match args.install_dir.clone().or_else(|| {
-        default_rule_pack_install_dir().ok()
-    }) {
+    let install_dir = match args
+        .install_dir
+        .clone()
+        .or_else(|| default_rule_pack_install_dir().ok())
+    {
         Some(dir) => dir,
         None => {
             eprintln!("error: could not resolve rule-pack install directory");
@@ -2243,9 +2579,8 @@ fn mixin_cluster_actions(r: &intermed_mixin_intel::MixinRiskAssessment) -> Vec<S
         );
     }
     if r.hot_path {
-        actions.push(
-            "test with each conflicting mod disabled and compare Spark profiles".to_string(),
-        );
+        actions
+            .push("test with each conflicting mod disabled and compare Spark profiles".to_string());
     }
     if r.unresolved_points > 0 {
         actions.push("provide mappings/refmap so the injection points resolve".to_string());
@@ -2276,15 +2611,29 @@ fn print_mixin_scan(scan: &intermed_mixin_intel::MixinScan) {
     // effect summaries live below, in the Overlaps expansion.
     if !scan.risk_assessments.is_empty() {
         let mut clusters: Vec<_> = scan.risk_assessments.iter().collect();
-        clusters.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.subject.cmp(&b.subject)));
+        clusters.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.subject.cmp(&b.subject))
+        });
         println!();
         println!("Top Mixin Clusters:");
         for (i, r) in clusters.iter().enumerate() {
-            println!("{}. {} [{}]", i + 1, r.subject, if r.hot_path { "hot" } else { "normal" });
+            println!(
+                "{}. {} [{}]",
+                i + 1,
+                r.subject,
+                if r.hot_path { "hot" } else { "normal" }
+            );
             println!("   Mods: {}", r.mods.join(", "));
             println!(
                 "   Risk: {} (certainty {}, apply-failure {}, semantic {}, blast {}, fragility {})",
-                r.score, r.certainty, r.apply_failure, r.semantic_conflict, r.blast_radius, r.fragility
+                r.score,
+                r.certainty,
+                r.apply_failure,
+                r.semantic_conflict,
+                r.blast_radius,
+                r.fragility
             );
             if r.unresolved_points > 0 {
                 println!("   Unresolved points: {}", r.unresolved_points);
@@ -2410,10 +2759,7 @@ fn print_mixin_scan(scan: &intermed_mixin_intel::MixinScan) {
         println!();
         println!("Mixin effects:");
         for effect in &scan.mixin_effects {
-            println!(
-                "{} — {}#{}",
-                effect.mod_id, effect.target, effect.method
-            );
+            println!("{} — {}#{}", effect.mod_id, effect.target, effect.method);
             if !effect.site_key.is_empty() {
                 println!("  site_key: {}", effect.site_key);
             }
@@ -2467,7 +2813,10 @@ mod explain_tests {
     use intermed_doctor_core::evidence::{Finding, Severity};
 
     fn finding(id: &str, sev: Severity) -> Finding {
-        Finding::builder("rule", id).severity(sev).title("t").build()
+        Finding::builder("rule", id)
+            .severity(sev)
+            .title("t")
+            .build()
     }
 
     fn sample() -> Vec<Finding> {
@@ -2491,7 +2840,9 @@ mod explain_tests {
     fn case_insensitive_exact_auto_resolves() {
         let f = sample();
         match resolve_explain_target(&f, "DUPLICATE-ID:MINECRAFT:COPPER") {
-            ExplainResolution::Fuzzy(found) => assert_eq!(found.id, "duplicate-id:minecraft:copper"),
+            ExplainResolution::Fuzzy(found) => {
+                assert_eq!(found.id, "duplicate-id:minecraft:copper")
+            }
             _ => panic!("expected fuzzy auto-resolve"),
         }
     }
@@ -2500,7 +2851,9 @@ mod explain_tests {
     fn unique_substring_auto_resolves() {
         let f = sample();
         match resolve_explain_target(&f, "copper") {
-            ExplainResolution::Fuzzy(found) => assert_eq!(found.id, "duplicate-id:minecraft:copper"),
+            ExplainResolution::Fuzzy(found) => {
+                assert_eq!(found.id, "duplicate-id:minecraft:copper")
+            }
             _ => panic!("expected fuzzy auto-resolve from substring"),
         }
     }

@@ -16,15 +16,18 @@ pub mod analytics;
 #[cfg(feature = "duckdb")]
 pub mod store;
 
+/// DuckDB execution of the columnar query IR (the accelerated backend route).
+#[cfg(feature = "duckdb")]
+pub mod ir_engine;
+
 pub mod rules;
 
-pub use rules::{duckdb_available, DuckdbRulePack};
+pub use rules::{DuckdbRulePack, duckdb_available};
 
 #[cfg(feature = "duckdb")]
 pub use analytics::{
-    parse_since, AnalyticsError, AnalyticsStore, HistoryDiffReport, HistoryDiffSummary,
-    MixinOverlapRank, MixinRiskTrendPoint, RecurringConflict, RunDeltaKind, RunFindingDelta,
-    RunSummary,
+    AnalyticsError, AnalyticsStore, HistoryDiffReport, HistoryDiffSummary, MixinOverlapRank,
+    MixinRiskTrendPoint, RecurringConflict, RunDeltaKind, RunFindingDelta, RunSummary, parse_since,
 };
 
 #[cfg(feature = "duckdb")]
@@ -34,5 +37,4 @@ pub use store::{DuckError, DuckStore, QueryResult};
 pub const CORE_SQL_RULES: &[&str] = sql::CORE_RULES;
 
 /// Implementation status for help text.
-pub const STATUS: &str =
-    "active: SQL rule backend (11 core rules) + analytics store + history/trends (feature `duckdb`, off by default)";
+pub const STATUS: &str = "active: SQL rule backend (11 core rules) + analytics store + history/trends (feature `duckdb`, off by default)";

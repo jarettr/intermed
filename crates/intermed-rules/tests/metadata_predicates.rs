@@ -1,6 +1,6 @@
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
-use intermed_rules::{parse_rule_pack, DeclarativeRulePack};
+use intermed_rules::{DeclarativeRulePack, parse_rule_pack};
 
 #[test]
 fn rule_packs_can_consume_metadata_intelligence_predicates() {

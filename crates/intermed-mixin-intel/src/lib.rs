@@ -8,14 +8,18 @@
 //! Entry points: [`scan_mods_dir`], [`collector`], [`rule`], [`build_interaction_graph`].
 //! Cache revision: [`cache_version`] (bump when parse/analysis logic changes in a release).
 
+mod activation;
 mod analyzer;
 mod annotation;
 mod apply_failure;
 mod bloat;
 mod bytecode;
 mod class_parser;
+mod classpath;
+mod clusters;
 mod collect;
 mod complexity;
+mod composition;
 mod dataflow;
 mod effect;
 mod graph;
@@ -23,35 +27,74 @@ mod handler_effect;
 mod hierarchy;
 mod hot_path;
 mod injection_point;
+mod locals;
+mod metrics;
 mod model;
+mod naming;
+mod perf_match;
+mod profile;
 mod recommendation;
 mod refmap;
+mod resource_bridge;
 mod rule;
+mod runtime_log;
 mod scan;
+mod selector;
 mod semantics;
+mod severity;
+mod signature;
+mod site;
+mod subsystem;
+mod target_res;
+mod trace;
 
 #[doc(hidden)]
 pub mod fixtures;
 
 pub use analyzer::MixinInteractionEngine;
+pub use class_parser::{ClassParseResult, parse_mixin_class, parse_mixin_class_with_hierarchy};
+pub use classpath::{ClasspathCoverage, CoverageLevel};
+pub use clusters::{ClusterKind, RiskCluster, build_clusters};
+pub use composition::{CompositionClass, HandlerRole, SiteComposition, analyze_compositions};
 pub use graph::MixinInteractionGraph;
-pub use hot_path::{default_rules, HotPathRules};
+pub use hot_path::{HotPathRules, default_rules};
+pub use locals::LocalCaptureStatus;
+pub use metrics::DataflowMetrics;
 pub use model::{
-    CallKind, ComplexityComponent, ConflictEdgeType, EffectiveEffectKind, GraphEdge, GraphNode,
-    HandlerEffect, HandlerSideEffect, HighRiskOverwrite, InteractionType, MemberKind,
-    MixinAddedMember, MixinAnalysis, MixinBloatAssessment, MixinCall, MixinClassComplexity,
-    MixinClassModel, MixinClassRecord, MixinConfigRecord, MixinConflictEdgeRecord, MixinEffect,
-    MixinGraphExport, MixinInteractionRecord, MixinModComplexity, MixinOperation, MixinOverlap,
-    MixinPriorityConflictRecord, MixinRecommendationRecord, MixinRiskAssessment, MixinScan,
-    MixinScanFailure, MixinShadowMember, Recommendation, ResolvedInjectionPoint, STATUS,
+    ActivationStatus, CallKind, ComplexityComponent, ConflictEdgeType, EffectiveEffectKind,
+    GraphEdge, GraphNode, HandlerEffect, HandlerSideEffect, HighRiskOverwrite, ImpreciseReason,
+    InteractionType, MemberKind, MixinAddedMember, MixinAnalysis, MixinBloatAssessment, MixinCall,
+    MixinClassComplexity, MixinClassModel, MixinClassRecord, MixinConfigRecord,
+    MixinConflictEdgeRecord, MixinEffect, MixinGraphExport, MixinInteractionRecord,
+    MixinModComplexity, MixinOperation, MixinOverlap, MixinPriorityConflictRecord,
+    MixinRecommendationRecord, MixinRiskAssessment, MixinScan, MixinScanFailure, MixinShadowMember,
+    PrecisionLevel, Recommendation, ResolvedInjectionPoint, STATUS, Side,
 };
-pub use class_parser::{parse_mixin_class, parse_mixin_class_with_hierarchy, ClassParseResult};
+pub use naming::{NameSource, ResolvedName};
+pub use perf_match::{MatchQuality, allows_high_severity, grade_match, is_destructive_operation};
+pub use profile::{PrecisionProfile, effective_profile, escalation_reasons};
 pub use recommendation::{recommend_for_scan, redirect_counts_by_method};
-pub use refmap::{dotted_name, MappingContext, Refmap, TinyMappings};
-pub use scan::{
-    cache_version, extractor_id, scan_mods_dir, scan_mods_dir_with_cache, scan_target,
-    MixinScanError,
+pub use refmap::{MappingContext, Refmap, TinyMappings, dotted_name};
+pub use resource_bridge::{
+    ResourceSubsystem, RuntimeResourceMutation, classify_resource_loader, detect_resource_mutations,
 };
+pub use runtime_log::{
+    RuntimeFailureReason, RuntimeMixinFailure, SiteConfirmation, confirm_sites,
+    parse_runtime_failures,
+};
+pub use scan::{
+    MixinScanError, cache_version, extractor_id, scan_mods_dir, scan_mods_dir_with_cache,
+    scan_target,
+};
+pub use selector::SelectorVerification;
+pub use severity::{ConfirmationLevel, SeverityInputs, recommended_severity};
+pub use signature::SignatureCheck;
+pub use site::{ApplicationSite, build_application_sites};
+pub use subsystem::{
+    MixinCapability, MixinSecuritySurface, Subsystem, classify_subsystem, derive_subsystems,
+};
+pub use target_res::TargetResolution;
+pub use trace::{PrecisionTrace, site_trace};
 
 use intermed_doctor_core::{CollectCtx, Collector, CollectorOutcome, Layer, Rule, Target};
 
@@ -81,9 +124,7 @@ pub fn build_interaction_graph(scan: &MixinScan) -> MixinInteractionGraph {
 }
 
 fn graph_available(scan: &MixinScan) -> bool {
-    !scan.classes.is_empty()
-        || !scan.interactions.is_empty()
-        || !scan.conflict_edges.is_empty()
+    !scan.classes.is_empty() || !scan.interactions.is_empty() || !scan.conflict_edges.is_empty()
 }
 
 /// Export the interaction graph as Graphviz DOT.
@@ -171,9 +212,9 @@ mod tests {
     use super::*;
     use crate::class_parser::parse_mixin_class;
     use crate::fixtures;
+    use crate::hierarchy::HierarchyIndex;
     use crate::model::MixinConfigRecord;
     use crate::refmap::Refmap;
-    use crate::hierarchy::HierarchyIndex;
     use crate::scan::{analyze_class as scan_analyze, join_class_name};
 
     fn analyze_class(
@@ -203,6 +244,7 @@ mod tests {
             refmap: None,
             mixins: vec!["RenderMixin".into()],
             plugin: None,
+            mixin_sides: Default::default(),
         };
         let record = analyze_class(
             &class,
@@ -229,12 +271,16 @@ mod tests {
         );
         let parsed = parse_mixin_class(&bytes);
         assert_eq!(parsed.targets, vec!["net.minecraft.server.MinecraftServer"]);
-        assert_eq!(parsed.operations.into_iter().collect::<Vec<_>>(), vec![MixinOperation::Inject]);
+        assert_eq!(
+            parsed.operations.into_iter().collect::<Vec<_>>(),
+            vec![MixinOperation::Inject]
+        );
     }
 
     #[test]
     fn refmap_resolves_injection_points() {
-        let json = r#"{"mappings":{"net/minecraft/server/MinecraftServer":{"method_1574":"tick()V"}}}"#;
+        let json =
+            r#"{"mappings":{"net/minecraft/server/MinecraftServer":{"method_1574":"tick()V"}}}"#;
         let refmap = Refmap::parse(json).unwrap();
         let mut mapping = MappingContext::new().with_refmap(refmap);
         let bytes = fixtures::mixin_class_with_inject_method(
@@ -251,6 +297,7 @@ mod tests {
             refmap: Some("a.refmap.json".into()),
             mixins: vec!["TickMixin".into()],
             plugin: None,
+            mixin_sides: Default::default(),
         };
         let record = analyze_class(
             &class,
@@ -272,10 +319,7 @@ mod tests {
             "net/minecraft/client/render/WorldRenderer",
             &["injection/Inject"],
         );
-        let root = std::env::temp_dir().join(format!(
-            "intermed-graph-json-{}",
-            std::process::id()
-        ));
+        let root = std::env::temp_dir().join(format!("intermed-graph-json-{}", std::process::id()));
         let mods = root.join("mods");
         std::fs::create_dir_all(&mods).unwrap();
         let jar = mods.join("alpha.jar");
@@ -283,8 +327,8 @@ mod tests {
             use std::io::Write;
             let file = std::fs::File::create(&jar).unwrap();
             let mut zip = zip::ZipWriter::new(file);
-            let options =
-                zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
             zip.start_file("fabric.mod.json", options).unwrap();
             write!(
                 zip,
@@ -297,7 +341,8 @@ mod tests {
                 r#"{{"required":true,"package":"alpha.mixin","mixins":["RenderMixin"]}}"#
             )
             .unwrap();
-            zip.start_file("alpha/mixin/RenderMixin.class", options).unwrap();
+            zip.start_file("alpha/mixin/RenderMixin.class", options)
+                .unwrap();
             zip.write_all(&bytes).unwrap();
             zip.finish().unwrap();
         }
@@ -318,7 +363,10 @@ mod tests {
         // the dot is a sub-package separator and must still be prefixed with the
         // config package — never treated as an already-qualified name.
         assert_eq!(
-            join_class_name("com.simibubi.create.foundation.mixin", "accessor.FooAccessor"),
+            join_class_name(
+                "com.simibubi.create.foundation.mixin",
+                "accessor.FooAccessor"
+            ),
             "com.simibubi.create.foundation.mixin.accessor.FooAccessor"
         );
         // No package declared → the entry is used as-is.

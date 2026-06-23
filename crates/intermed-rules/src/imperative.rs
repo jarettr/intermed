@@ -97,10 +97,7 @@ impl Rule for MixedLoaderPackRule {
 }
 
 fn is_mod_loader(loader: &str) -> bool {
-    matches!(
-        loader,
-        "fabric" | "quilt" | "forge" | "neoforge"
-    )
+    matches!(loader, "fabric" | "quilt" | "forge" | "neoforge")
 }
 
 /// A client-only mod on a server (or vice versa).

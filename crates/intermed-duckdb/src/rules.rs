@@ -13,7 +13,8 @@ use intermed_doctor_core::facts::{Fact, FactId};
 use intermed_doctor_core::{Rule, RuleCtx};
 
 #[cfg(feature = "duckdb")]
-use intermed_rules::{default_core_pack_v2, evaluate_pack};
+use intermed_rules::evaluate_pack;
+use intermed_rules::{RulePack, default_core_pack_v2};
 
 /// Whether this build linked embedded DuckDB.
 #[must_use]
@@ -21,19 +22,23 @@ pub fn duckdb_available() -> bool {
     cfg!(feature = "duckdb")
 }
 
-/// Layer-J SQL rule pack (feature-gated implementation).
-pub struct DuckdbRulePack;
+/// Layer-J SQL rule pack (feature-gated implementation). Holds the **resolved** rule
+/// pack (honoring `--mixin-risk` + installed overlays), like the other backends.
+pub struct DuckdbRulePack {
+    #[cfg_attr(not(feature = "duckdb"), allow(dead_code))]
+    pack: RulePack,
+}
 
 impl DuckdbRulePack {
     #[must_use]
-    pub const fn new() -> Self {
-        Self
+    pub fn new(pack: RulePack) -> Self {
+        Self { pack }
     }
 }
 
 impl Default for DuckdbRulePack {
     fn default() -> Self {
-        Self::new()
+        Self::new(default_core_pack_v2())
     }
 }
 
@@ -46,7 +51,7 @@ impl Rule for DuckdbRulePack {
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
         #[cfg(feature = "duckdb")]
         {
-            match run_duckdb_rules(ctx) {
+            match run_duckdb_rules(&self.pack, ctx) {
                 Ok(findings) => findings,
                 Err(e) => vec![backend_failed_finding(e)],
             }
@@ -72,7 +77,10 @@ fn backend_failed_finding(message: String) -> Finding {
 }
 
 #[cfg(feature = "duckdb")]
-fn run_duckdb_rules(ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, String> {
+fn run_duckdb_rules(
+    pack: &intermed_rules::RulePack,
+    ctx: &RuleCtx<'_>,
+) -> Result<Vec<Finding>, String> {
     use crate::schema::EVAL_RUN_ID;
     use crate::store::DuckStore;
 
@@ -82,9 +90,9 @@ fn run_duckdb_rules(ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, String> {
         .materialize_facts(EVAL_RUN_ID, &facts)
         .map_err(|e| e.to_string())?;
 
-    // Materialize facts into DuckDB (enables SQL analytics); evaluate findings via SSOT pack.
-    let pack = default_core_pack_v2();
-    let mut findings = evaluate_pack(&pack, ctx);
+    // Materialize facts into DuckDB (enables SQL analytics); evaluate findings via the
+    // resolved pack.
+    let mut findings = evaluate_pack(pack, ctx);
     for finding in &mut findings {
         if !finding.machine_tags.iter().any(|t| t == "duckdb") {
             finding.machine_tags.push("duckdb".to_string());
@@ -105,7 +113,7 @@ fn read_security_signal_findings(
     use crate::schema::EVAL_RUN_ID;
     use crate::sql::{self, SECURITY_SIGNALS};
     use intermed_security_audit::{
-        security_findings_from_drafts, signal_for_fact_kind, SecurityModDraft,
+        SecurityModDraft, security_findings_from_drafts, signal_for_fact_kind,
     };
 
     let sql = sql::bind_run(SECURITY_SIGNALS, EVAL_RUN_ID);
@@ -168,5 +176,7 @@ fn read_security_signal_findings(
 
 #[cfg(feature = "duckdb")]
 fn fact_by_id<'a>(ctx: &'a RuleCtx<'_>, raw: &str) -> Option<&'a Fact> {
-    raw.parse::<u64>().ok().and_then(|n| ctx.store.get(FactId(n)))
+    raw.parse::<u64>()
+        .ok()
+        .and_then(|n| ctx.store.get(FactId(n)))
 }

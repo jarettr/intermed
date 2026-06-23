@@ -2,9 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, FactId};
 use intermed_doctor_core::RuleCtx;
+use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::facts::{FactId, kind};
 
 /// Detect contradictory or cyclic Forge/NeoForge / Paper load-order declarations.
 pub fn ordering_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
@@ -83,11 +83,7 @@ fn loadbefore_cycles(edges: &[(&str, &str, FactId)], rule_id: &str) -> Vec<Findi
         let chain = cycle.join(" → ");
         let first_fact = edges
             .iter()
-            .find(|(a, b, _)| {
-                cycle
-                    .windows(2)
-                    .any(|w| w[0] == *a && w[1] == *b)
-            })
+            .find(|(a, b, _)| cycle.windows(2).any(|w| w[0] == *a && w[1] == *b))
             .map(|(_, _, id)| id)
             .copied();
         let mut builder = Finding::builder(rule_id, format!("ordering-cycle:{}", cycle[0]))
@@ -190,7 +186,7 @@ fn before_after_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
+    use intermed_doctor_core::facts::{FactStore, kind};
     use intermed_doctor_core::{RuleCtx, Target, TargetKind};
 
     fn ctx(store: &FactStore) -> RuleCtx<'_> {
@@ -226,6 +222,10 @@ mod tests {
             .emit();
 
         let findings = ordering_findings(&ctx(&store), "dependency");
-        assert!(findings.iter().any(|f| f.id.starts_with("ordering-conflict:")));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id.starts_with("ordering-conflict:"))
+        );
     }
 }

@@ -105,7 +105,12 @@ pub fn compute_bloat(classes: &[MixinClassRecord]) -> Vec<MixinBloatAssessment> 
 
         let mut components = Vec::new();
         // (a) Share of handlers that do nothing observable — the core signal.
-        components.extend(component("inert handler ratio", inert_pct / 2, 50, inert_pct));
+        components.extend(component(
+            "inert handler ratio",
+            inert_pct / 2,
+            50,
+            inert_pct,
+        ));
         // (b) Absolute count, so a big mod with many inert handlers ranks above a
         //     tiny one at the same ratio.
         components.extend(component(
@@ -151,7 +156,7 @@ mod tests {
             return_count: 1,
             exception_handlers: 0,
             uses_reflection: false,
-            string_literals: Vec::new(),
+            reflective_targets: Vec::new(),
             modifies_return_value: effective,
             throws_exception: false,
             accesses_target_fields: Vec::new(),
@@ -173,6 +178,7 @@ mod tests {
             class_path: "x.class".into(),
             targets: vec!["T".into()],
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: Vec::new(),
             injected_methods: Vec::new(),
             shadows: Vec::new(),
@@ -185,6 +191,9 @@ mod tests {
             hot_paths: Vec::new(),
             effects: Vec::new(),
             plugin_gated: false,
+            side: crate::model::Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 

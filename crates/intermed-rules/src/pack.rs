@@ -5,16 +5,13 @@ use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::facts::kind;
 
-use crate::convert::upgrade_pack_to_v2;
-use crate::model::{
-    FindingTemplate, RuleKind, RulePack, RuleSpec, RULE_PACK_SCHEMA,
-};
-use crate::validate::validate_rule_pack;
 use crate::RulePackError;
+use crate::convert::upgrade_pack_to_v2;
+use crate::model::{FindingTemplate, RULE_PACK_SCHEMA, RuleKind, RulePack, RuleSpec};
+use crate::validate::validate_rule_pack;
 
 /// Embedded v2 core pack (single source of truth for Layer-J declarative rules).
-const EMBEDDED_CORE_V2: &str =
-    include_str!("../../../rules/core/intermed-core.rules.v2.json");
+const EMBEDDED_CORE_V2: &str = include_str!("../../../rules/core/intermed-core.rules.v2.json");
 
 /// Result for `intermed rules check`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +30,9 @@ impl RulePackCheck {
 /// Parse and validate a rule pack from JSON/YAML text.
 pub fn parse_rule_pack(text: &str, path_label: &str) -> Result<RulePack, RulePackError> {
     let pack: RulePack = if path_label.ends_with(".json") {
-        serde_json::from_str(text)
-            .map_err(|e| RulePackError(format!("parse {path_label}: {e}")))?
+        serde_json::from_str(text).map_err(|e| RulePackError(format!("parse {path_label}: {e}")))?
     } else {
-        serde_yaml::from_str(text)
-            .map_err(|e| RulePackError(format!("parse {path_label}: {e}")))?
+        serde_yaml::from_str(text).map_err(|e| RulePackError(format!("parse {path_label}: {e}")))?
     };
     validate_rule_pack(&pack)?;
     Ok(pack)
@@ -46,10 +41,7 @@ pub fn parse_rule_pack(text: &str, path_label: &str) -> Result<RulePack, RulePac
 pub fn load_rule_pack(path: &Path) -> Result<RulePack, RulePackError> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| RulePackError(format!("read {}: {e}", path.display())))?;
-    let ext = path
-        .extension()
-        .and_then(|x| x.to_str())
-        .unwrap_or("json");
+    let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("json");
     parse_rule_pack(&text, ext)
 }
 
@@ -135,9 +127,10 @@ pub fn default_core_pack_without_mixin() -> RulePack {
     let mut pack = default_core_pack_v2();
     pack.rules.retain(|r| {
         !r.id.starts_with("mixin-")
-            && !r.input_kinds.iter().any(|k| {
-                k == kind::MIXIN_OVERLAP || k == kind::HIGH_RISK_OVERWRITE
-            })
+            && !r
+                .input_kinds
+                .iter()
+                .any(|k| k == kind::MIXIN_OVERLAP || k == kind::HIGH_RISK_OVERWRITE)
     });
     pack
 }
@@ -234,10 +227,18 @@ mod tests {
         // Untrusted marketplace rulepacks: garbage input must produce a clean
         // `Err`, never a panic.
         let nasty = [
-            "", "{", "}", "[]", "null", "true", "{\"schema\":1}",
+            "",
+            "{",
+            "}",
+            "[]",
+            "null",
+            "true",
+            "{\"schema\":1}",
             "{\"schema\":\"intermed-rule-pack-v2\"}", // no rules
             "{\"schema\":\"intermed-rule-pack-v2\",\"id\":\"x\",\"rules\":\"notarray\"}",
-            "\u{0}\u{0}\u{0}", "not json at all", "{\"rules\":[{}]}",
+            "\u{0}\u{0}\u{0}",
+            "not json at all",
+            "{\"rules\":[{}]}",
             "{\"schema\":\"intermed-rule-pack-v2\",\"id\":\"x\",\"version\":\"1\",\"publisher\":\"p\",\"rules\":[{\"id\":\"r\",\"kind\":\"join\"}]}",
         ];
         for input in nasty {

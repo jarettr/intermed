@@ -3,7 +3,9 @@
 //! [`derive_handler_effect`] lifts structural [`HandlerBodySummary`] metrics into
 //! risk-oriented semantics used by the interaction engine and effect descriptions.
 
-use crate::model::{HandlerBodySummary, HandlerDataflow, HandlerEffect, HandlerSideEffect, ValueSource};
+use crate::model::{
+    HandlerBodySummary, HandlerDataflow, HandlerEffect, HandlerSideEffect, ValueSource,
+};
 
 /// Build a semantic [`HandlerEffect`] from a structural handler bytecode summary.
 ///
@@ -61,7 +63,9 @@ pub fn derive_handler_effect(summary: &HandlerBodySummary) -> HandlerEffect {
     // dataflow is available.
     let early_return = match df {
         Some(d) => d.cancels || d.sets_return_value,
-        None => summary.uses_callback_info && (summary.return_count > 0 || summary.branch_count > 0),
+        None => {
+            summary.uses_callback_info && (summary.return_count > 0 || summary.branch_count > 0)
+        }
     };
 
     HandlerEffect {
@@ -143,7 +147,7 @@ mod tests {
             return_count: 1,
             exception_handlers: 0,
             uses_reflection: false,
-            string_literals: Vec::new(),
+            reflective_targets: Vec::new(),
             modifies_return_value: true,
             throws_exception: false,
             accesses_target_fields: vec!["tickCount".into()],
@@ -178,9 +182,11 @@ mod tests {
         assert!(effect.early_return); // heuristic: CallbackInfo + branches/returns
         assert!(!effect.cancels); // but nothing was *proven*
         assert!(effect.complexity_score > 0);
-        assert!(effect
-            .side_effects
-            .contains(&HandlerSideEffect::CallbackControl));
+        assert!(
+            effect
+                .side_effects
+                .contains(&HandlerSideEffect::CallbackControl)
+        );
     }
 
     #[test]
@@ -222,8 +228,10 @@ mod tests {
         });
         let effect = derive_handler_effect(&writer);
         assert!(effect.writes_target_state);
-        assert!(effect
-            .side_effects
-            .contains(&HandlerSideEffect::TargetStateWrite));
+        assert!(
+            effect
+                .side_effects
+                .contains(&HandlerSideEffect::TargetStateWrite)
+        );
     }
 }

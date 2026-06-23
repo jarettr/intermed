@@ -42,8 +42,8 @@
 
 use std::path::Path;
 
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 pub mod attribution;
@@ -54,28 +54,29 @@ pub mod execution;
 pub mod report;
 pub mod run;
 
-pub use classify::{classify_log, classify_log_all, FailureCategory, FailureFamily};
+pub use attribution::{FailureAttribution, SEVERITY_CALIBRATION_MIN_SUPPORT, extract_attributions};
+pub use classify::{FailureCategory, FailureFamily, classify_log, classify_log_all};
 pub use corpus::{
-    discover_lock, read_lock, CandidateMod, CandidateProvider, CorpusCandidates, CorpusEnvironment,
-    CorpusLock, FileCandidateProvider, LockedMod, CORPUS_CANDIDATES_SCHEMA, CORPUS_LOCK_SCHEMA,
+    CORPUS_CANDIDATES_SCHEMA, CORPUS_LOCK_SCHEMA, CandidateMod, CandidateProvider,
+    CorpusCandidates, CorpusEnvironment, CorpusLock, FileCandidateProvider, LockedMod,
+    discover_lock, read_lock,
 };
-pub use attribution::{extract_attributions, FailureAttribution, SEVERITY_CALIBRATION_MIN_SUPPORT};
 pub use eval::{
-    evaluate, evaluate_manifest, evaluate_pair, CategoryAccuracy, FindingAccuracy,
-    FindingLevelAccuracy, RuleAccuracy, RuleAccuracyReport, EVAL_MANIFEST_SCHEMA,
-    RULE_ACCURACY_SCHEMA,
+    CategoryAccuracy, EVAL_MANIFEST_SCHEMA, FindingAccuracy, FindingLevelAccuracy,
+    RULE_ACCURACY_SCHEMA, RuleAccuracy, RuleAccuracyReport, evaluate, evaluate_manifest,
+    evaluate_pair,
 };
 pub use execution::{
-    outcome_to_smoke, EnvironmentRunner, EnvironmentSpec, ProcessOutcome, RunningProcess,
-    ServerProcessRunner,
+    EnvironmentRunner, EnvironmentSpec, ProcessOutcome, RunningProcess, ServerProcessRunner,
+    outcome_to_smoke,
 };
 pub use report::{
-    render_html, write_report, CompatibilityMatrix, MatrixCell, COMPAT_MATRIX_SCHEMA,
+    COMPAT_MATRIX_SCHEMA, CompatibilityMatrix, MatrixCell, render_html, write_report,
 };
 pub use run::{
-    classify_with_options, read_run, run_lab, run_lab_with, run_with, CapturedLogRunner, LabRun,
-    LabRunOptions, RawSmokeOutput, SmokeResult, SmokeRunner, SmokeStatus, DEFAULT_EXCERPT_MAX,
-    LAB_RUN_SCHEMA, SMOKE_OUTPUT_SCHEMA,
+    CapturedLogRunner, DEFAULT_EXCERPT_MAX, LAB_RUN_SCHEMA, LabRun, LabRunOptions, RawSmokeOutput,
+    SMOKE_OUTPUT_SCHEMA, SmokeResult, SmokeRunner, SmokeStatus, classify_with_options, read_run,
+    run_lab, run_lab_with, run_with,
 };
 
 /// Implementation status for the CLI's help / `--list-layers` output.

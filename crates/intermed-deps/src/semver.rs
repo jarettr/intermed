@@ -236,11 +236,36 @@ mod tests {
         // Robustness ("fuzz-lite"): malformed/hostile version and range strings
         // must return a value, never panic. Untrusted manifests reach here.
         let nasty = [
-            "", " ", "\u{0}", "[", "]", "(,", ",)", "[,]", "[[[", "))))",
-            "1.2.3.4.5.6.7", "............", "1.", ".1", "->>=", "||||",
-            "[1.0,", "1.0,2.0]", "v.v.v", "999999999999999999999999999",
-            "[1.0,2.0,3.0]", "~^>=<=!=", "0x10", "NaN", "\t\n\r",
-            "🦀.1.2", "1.2.3-+-+", "[a,b)", "1 2 3", "&&||",
+            "",
+            " ",
+            "\u{0}",
+            "[",
+            "]",
+            "(,",
+            ",)",
+            "[,]",
+            "[[[",
+            "))))",
+            "1.2.3.4.5.6.7",
+            "............",
+            "1.",
+            ".1",
+            "->>=",
+            "||||",
+            "[1.0,",
+            "1.0,2.0]",
+            "v.v.v",
+            "999999999999999999999999999",
+            "[1.0,2.0,3.0]",
+            "~^>=<=!=",
+            "0x10",
+            "NaN",
+            "\t\n\r",
+            "🦀.1.2",
+            "1.2.3-+-+",
+            "[a,b)",
+            "1 2 3",
+            "&&||",
         ];
         for v in nasty {
             for r in nasty {
@@ -298,7 +323,10 @@ mod tests {
     #[test]
     fn common_non_strict_mod_versions_parse() {
         assert_eq!(parse_lenient("v1.2.3").unwrap().to_string(), "1.2.3");
-        assert_eq!(parse_lenient("1.20.1-forge").unwrap().to_string(), "1.20.1-forge");
+        assert_eq!(
+            parse_lenient("1.20.1-forge").unwrap().to_string(),
+            "1.20.1-forge"
+        );
         assert_eq!(parse_lenient("2.4_fabric").unwrap().to_string(), "2.4.0");
     }
 }

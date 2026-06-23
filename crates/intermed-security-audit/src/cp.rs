@@ -8,11 +8,11 @@
 use std::collections::BTreeSet;
 
 use cafebabe::constant_pool::{ConstantPoolItem, LiteralConstant, MemberRef};
-use cafebabe::{parse_class_with_options, ParseOptions};
-#[cfg(feature = "noak-fallback")]
-use noak::reader::cpool::Item;
+use cafebabe::{ParseOptions, parse_class_with_options};
 #[cfg(feature = "noak-fallback")]
 use noak::reader::Class as NoakClass;
+#[cfg(feature = "noak-fallback")]
+use noak::reader::cpool::Item;
 
 /// JVM class-file magic: `0xCAFEBABE`.
 pub const CLASS_MAGIC: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
@@ -279,10 +279,12 @@ mod tests {
         );
         let evidence = extract_class_evidence(&class).expect("parse class");
         assert!(evidence.referenced_classes.contains("java/lang/Runtime"));
-        assert!(evidence
-            .method_invocations
-            .iter()
-            .any(|r| { r.class_name == "java/lang/Runtime" && r.member_name == "exec" }));
+        assert!(
+            evidence
+                .method_invocations
+                .iter()
+                .any(|r| { r.class_name == "java/lang/Runtime" && r.member_name == "exec" })
+        );
         assert!(evidence.field_accesses.is_empty());
     }
 
@@ -298,9 +300,11 @@ mod tests {
     fn bare_utf8_strings_are_not_invocation_evidence() {
         let class = fixtures::class_with_utf8_only(&["exec", "java/lang/ProcessBuilder"]);
         let evidence = extract_class_evidence(&class).expect("parse class");
-        assert!(!evidence
-            .referenced_classes
-            .contains("java/lang/ProcessBuilder"));
+        assert!(
+            !evidence
+                .referenced_classes
+                .contains("java/lang/ProcessBuilder")
+        );
         assert!(evidence.method_invocations.is_empty());
         // Plain UTF-8 pool entries are not `CONSTANT_String` literals.
         assert!(evidence.string_constants.is_empty());

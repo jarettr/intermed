@@ -68,9 +68,9 @@ fn bench_mod_count(count: usize) -> (u64, u64) {
         path: root.clone(),
         kind: TargetKind::ModsDir,
         mods_dir: Some(mods),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
 

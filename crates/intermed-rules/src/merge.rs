@@ -4,9 +4,9 @@
 //! the base rule; new ids append. Pack metadata (`id`, `version`, `publisher`)
 //! stays from the base so reports remain anchored to the InterMed core pack.
 
+use crate::RulePackError;
 use crate::model::RulePack;
 use crate::validate::validate_rule_pack;
-use crate::RulePackError;
 
 /// Overlay one or more packs onto `base`. Later overlays win on duplicate rule ids.
 ///

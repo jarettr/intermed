@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::instance_layout::{
-    mods_dir_for_target, resolve_layout, target_kind_from_layout, LayoutKind, ResolvedLayout,
+    LayoutKind, ResolvedLayout, mods_dir_for_target, resolve_layout, target_kind_from_layout,
 };
 
 /// The kind of thing a target path points at.

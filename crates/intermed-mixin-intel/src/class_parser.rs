@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use cafebabe::attributes::{Annotation, AttributeInfo};
 use cafebabe::descriptors::FieldType;
-use cafebabe::{parse_class_with_options, ParseOptions};
+use cafebabe::{ParseOptions, parse_class_with_options};
 
 use crate::annotation::{
     collect_class_literals, collect_string_values, has_annotation, is_annotation_type,
@@ -17,8 +17,8 @@ use crate::annotation::{
 use crate::bytecode::{analyze_handler_bodies, extract_constant_pool_calls};
 use crate::hierarchy::HierarchyIndex;
 use crate::injection_point::{
-    parse_at_descriptors, parse_injector_meta, parse_local_captures, parse_parameter_locals,
-    resolve_injection_sites, AtDescriptor, LocalCaptureDescriptor, ParamLocalDescriptor,
+    AtDescriptor, LocalCaptureDescriptor, ParamLocalDescriptor, parse_at_descriptors,
+    parse_injector_meta, parse_local_captures, parse_parameter_locals, resolve_injection_sites,
 };
 use crate::model::{
     HandlerBodySummary, MemberKind, MixinAddedMember, MixinCall, MixinHierarchyEdge,
@@ -121,11 +121,9 @@ pub fn parse_mixin_class_with_hierarchy(
     for method in &class.methods {
         collect_mixin_targets(&method.attributes, &mut targets);
         collect_mixin_operations(&method.attributes, &mut operations);
-        for raw in collect_raw_injections(
-            method.name.as_ref(),
-            &method.descriptor,
-            &method.attributes,
-        ) {
+        for raw in
+            collect_raw_injections(method.name.as_ref(), &method.descriptor, &method.attributes)
+        {
             handler_methods.insert(raw.handler_method.clone());
             raw_injections.push(raw);
         }
@@ -139,11 +137,7 @@ pub fn parse_mixin_class_with_hierarchy(
         ) {
             shadows.push(shadow);
         } else if operations_from_attrs(&method.attributes).contains(&MixinOperation::Overwrite) {
-            overwrite_methods.push(format!(
-                "{}{}",
-                method.name.as_ref(),
-                method.descriptor
-            ));
+            overwrite_methods.push(format!("{}{}", method.name.as_ref(), method.descriptor));
             handler_methods.insert(method.name.as_ref().to_string());
         } else if is_added_method(&method.attributes, method.name.as_ref()) {
             for target in &targets {
@@ -249,7 +243,9 @@ fn split_method_signature(method: &str) -> (&str, &str) {
     }
 }
 
-fn resolved_from_site(site: crate::injection_point::ResolvedInjectionSite) -> ResolvedInjectionPoint {
+fn resolved_from_site(
+    site: crate::injection_point::ResolvedInjectionSite,
+) -> ResolvedInjectionPoint {
     let local_index = site
         .param_locals
         .iter()
@@ -368,12 +364,14 @@ fn added_origin(attributes: &[AttributeInfo<'_>]) -> String {
 }
 
 fn has_any_mixin_annotation(attributes: &[AttributeInfo<'_>]) -> bool {
-    runtime_annotations(attributes).into_iter().any(|annotation| {
-        operation_from_annotation(annotation).is_some()
-            || is_annotation_type(annotation, SHADOW_ANNOTATION)
-            || is_annotation_type(annotation, ACCESSOR_ANNOTATION)
-            || is_annotation_type(annotation, INVOKER_ANNOTATION)
-    })
+    runtime_annotations(attributes)
+        .into_iter()
+        .any(|annotation| {
+            operation_from_annotation(annotation).is_some()
+                || is_annotation_type(annotation, SHADOW_ANNOTATION)
+                || is_annotation_type(annotation, ACCESSOR_ANNOTATION)
+                || is_annotation_type(annotation, INVOKER_ANNOTATION)
+        })
 }
 
 /// Collect *every* injector annotation on a handler method.

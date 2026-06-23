@@ -96,7 +96,8 @@ impl HotPathRules {
 
     /// Classify using target FQN plus resolved injection method names.
     pub fn tag_for_injection(&self, target: &str, method_display: &str) -> Option<String> {
-        self.tag_for(target).or_else(|| self.tag_by_method_name(method_display))
+        self.tag_for(target)
+            .or_else(|| self.tag_by_method_name(method_display))
     }
 
     /// Merge additional rules on top of defaults (later entries win).
@@ -109,9 +110,7 @@ impl HotPathRules {
 
     fn tag_by_simple_name(&self, target: &str) -> Option<String> {
         let simple = target.rsplit('.').next().unwrap_or(target);
-        self.simple_class
-            .get(&simple.to_ascii_lowercase())
-            .cloned()
+        self.simple_class.get(&simple.to_ascii_lowercase()).cloned()
     }
 
     fn tag_by_package_prefix(&self, target: &str) -> Option<String> {
@@ -153,10 +152,9 @@ pub fn any_hot_path(
     }
     for inj in injections {
         for method in &inj.methods {
-            if let Some(tag) = rules.tag_for_injection(
-                targets.first().map(String::as_str).unwrap_or(""),
-                method,
-            ) {
+            if let Some(tag) =
+                rules.tag_for_injection(targets.first().map(String::as_str).unwrap_or(""), method)
+            {
                 push_unique(&mut out, tag);
             }
         }

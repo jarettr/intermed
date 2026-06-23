@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use intermed_vfs::{
-    merge_lang_json, merge_lang_properties, merge_tag_values, scan_mods_dir, ConflictClass,
-    ResourceCollision,
+    ConflictClass, ResourceCollision, merge_lang_json, merge_lang_properties, merge_tag_values,
+    scan_mods_dir,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -163,9 +163,10 @@ fn stage_overlay_preview(
                 path: collision.path.clone(),
                 class: collision.class,
                 writers: collision.writers.clone(),
-                reason: "order-dependent winner pick; rerun with --include-unsafe-winners to stage \
+                reason:
+                    "order-dependent winner pick; rerun with --include-unsafe-winners to stage \
                          a preview"
-                    .to_string(),
+                        .to_string(),
             });
             continue;
         }
@@ -269,14 +270,9 @@ fn overlay_source(collision: &ResourceCollision) -> String {
         ConflictClass::LangJsonMerge => "merged lang json keys".to_string(),
         ConflictClass::LangPropertiesMerge => "merged lang properties".to_string(),
         ConflictClass::Identical => "identical".to_string(),
-        // Everything else is an order-dependent winner pick.
-        ConflictClass::LangFormatMismatch
-        | ConflictClass::JsonMergeCandidate
-        | ConflictClass::JsonOverride
-        | ConflictClass::TagReplaceOrderDependent
-        | ConflictClass::TagMixedRequired
-        | ConflictClass::TagInvalid
-        | ConflictClass::UnsafeReplace => winner(),
+        // Everything else (overrides, order-dependent classes, and the
+        // disjoint-object merge which has no generator yet) is a winner pick.
+        _ => winner(),
     }
 }
 
@@ -336,11 +332,9 @@ pub fn build_overlay_plan_v2(mods_dir: &Path) -> Result<OverlayPlanV2, PackOpsEr
     // Layer-M semantic diffs: the set of paths whose writers craft different
     // outputs (or bind a shared lang key to different text). These elevate an
     // otherwise-opaque override into a "must review" decision.
-    let semantic = intermed_resource_ast::scan_mods_dir(
-        mods_dir,
-        intermed_resource_ast::ResourceLevel::Full,
-    )
-    .map_err(|e| PackOpsError::new(e.to_string()))?;
+    let semantic =
+        intermed_resource_ast::scan_mods_dir(mods_dir, intermed_resource_ast::ResourceLevel::Full)
+            .map_err(|e| PackOpsError::new(e.to_string()))?;
     let diffs = intermed_resource_ast::diff::compute(&semantic.records);
     let semantic_review: std::collections::BTreeSet<&str> =
         diffs.iter().map(|d| d.path.as_str()).collect();
@@ -367,7 +361,9 @@ pub fn build_overlay_plan_v2(mods_dir: &Path) -> Result<OverlayPlanV2, PackOpsEr
         // Semantic escalation: a recipe/lang path where Layer M proved the meaning
         // differs always needs review, regardless of byte class.
         if semantic_review.contains(c.path.as_str()) {
-            review_items.push(item("writers disagree semantically (output/text changes) — choose a winner"));
+            review_items.push(item(
+                "writers disagree semantically (output/text changes) — choose a winner",
+            ));
             continue;
         }
         match c.class {
@@ -375,10 +371,14 @@ pub fn build_overlay_plan_v2(mods_dir: &Path) -> Result<OverlayPlanV2, PackOpsEr
             | ConflictClass::TagMixedRequired
             | ConflictClass::LangFormatMismatch
             | ConflictClass::JsonMergeCandidate => {
-                review_items.push(item("order-dependent or unproven merge — review before applying"));
+                review_items.push(item(
+                    "order-dependent or unproven merge — review before applying",
+                ));
             }
             _ => {
-                unsafe_items.push(item("order-dependent winner pick; load order decides at runtime"));
+                unsafe_items.push(item(
+                    "order-dependent winner pick; load order decides at runtime",
+                ));
             }
         }
     }

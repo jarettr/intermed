@@ -7,7 +7,6 @@ license.workspace = true
 description = "Phase 3 — transactional pack operations (overlay preview)."
 
 [dependencies]
-intermed-doctor-core.workspace = true
 intermed-vfs.workspace = true
 intermed-resource-ast.workspace = true
 serde.workspace = true

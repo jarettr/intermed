@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, FactId};
 use intermed_doctor_core::RuleCtx;
+use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::facts::{FactId, kind};
 
-use crate::graph::{is_platform_dep, platform_loader_family, PLATFORM_IDS};
+use crate::graph::{is_platform_dep, platform_loader_family};
 use crate::semver::version_in_range;
 
 /// A dependency `provides` declaration (e.g. a Jar-in-Jar bundled library, or a
@@ -105,7 +105,10 @@ fn range_status(versions: &[String], range: &str) -> RangeStatus {
 /// requirement — they must never become "missing dependency" findings. The
 /// dedicated ordering rule consults the installed set for real cycles.
 fn is_ordering_relation(relation: &str) -> bool {
-    matches!(relation, "loadbefore" | "loadafter" | "load_before" | "load_after")
+    matches!(
+        relation,
+        "loadbefore" | "loadafter" | "load_before" | "load_after"
+    )
 }
 
 /// Evaluate direct missing / version / Minecraft constraints without PubGrub.
@@ -128,11 +131,14 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     let mut provided: HashMap<String, Vec<ProviderEntry>> = HashMap::new();
     for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
         if let Some(p) = f.attr("provides") {
-            provided.entry(p.to_string()).or_default().push(ProviderEntry {
-                version: f.attr("version").map(str::to_string),
-                fact: f.id,
-                scope: f.attr("scope").unwrap_or("global").to_string(),
-            });
+            provided
+                .entry(p.to_string())
+                .or_default()
+                .push(ProviderEntry {
+                    version: f.attr("version").map(str::to_string),
+                    fact: f.id,
+                    scope: f.attr("scope").unwrap_or("global").to_string(),
+                });
         }
     }
 
@@ -470,24 +476,21 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 }
                 ProviderStatus::Absent if mandatory => {
                     out.push(
-                        Finding::builder(
-                            rule_id,
-                            format!("missing-dependency:{modid}->{dep_id}"),
-                        )
-                        .severity(Severity::Error)
-                        .category(Category::Dependency)
-                        .title(format!("Missing dependency: {dep_id}"))
-                        .explanation(format!(
-                            "{modid} requires {dep_id} ({range}), but it is not installed."
-                        ))
-                        .evidence(EvidenceEdge::subject(dep.id))
-                        .affects(modid)
-                        .fix(FixCandidate::advice(format!(
-                            "Install {dep_id} matching {range}."
-                        )))
-                        .tag("dependency")
-                        .tag("missing")
-                        .build(),
+                        Finding::builder(rule_id, format!("missing-dependency:{modid}->{dep_id}"))
+                            .severity(Severity::Error)
+                            .category(Category::Dependency)
+                            .title(format!("Missing dependency: {dep_id}"))
+                            .explanation(format!(
+                                "{modid} requires {dep_id} ({range}), but it is not installed."
+                            ))
+                            .evidence(EvidenceEdge::subject(dep.id))
+                            .affects(modid)
+                            .fix(FixCandidate::advice(format!(
+                                "Install {dep_id} matching {range}."
+                            )))
+                            .tag("dependency")
+                            .tag("missing")
+                            .build(),
                     );
                 }
                 // Optional + (unknown provider or absent): nothing to report.
@@ -496,9 +499,4 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         }
     }
     out
-}
-
-#[allow(dead_code)]
-pub(crate) fn platform_ids() -> &'static [&'static str] {
-    PLATFORM_IDS
 }

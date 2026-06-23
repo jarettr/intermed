@@ -51,9 +51,7 @@ fn parse_supported(v: Option<&Value>) -> (Option<i64>, Option<i64>) {
             let x = n.as_i64();
             (x, x)
         }
-        Some(Value::Array(arr)) if arr.len() == 2 => {
-            (arr[0].as_i64(), arr[1].as_i64())
-        }
+        Some(Value::Array(arr)) if arr.len() == 2 => (arr[0].as_i64(), arr[1].as_i64()),
         Some(Value::Object(o)) => (
             o.get("min_inclusive").and_then(Value::as_i64),
             o.get("max_inclusive").and_then(Value::as_i64),
@@ -80,7 +78,9 @@ mod tests {
         )
         .unwrap();
         let p = parse(&v);
-        let ResourceSummary::PackMcmeta(s) = &p.summary else { panic!() };
+        let ResourceSummary::PackMcmeta(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.pack_format, Some(15));
         assert_eq!(s.supported_min, Some(15));
         assert_eq!(s.supported_max, Some(18));
@@ -93,7 +93,9 @@ mod tests {
             r#"{"pack":{"pack_format":15,"supported_formats":{"min_inclusive":15,"max_inclusive":21}}}"#,
         )
         .unwrap();
-        let ResourceSummary::PackMcmeta(s) = &parse(&v).summary else { panic!() };
+        let ResourceSummary::PackMcmeta(s) = &parse(&v).summary else {
+            panic!()
+        };
         assert_eq!(s.supported_max, Some(21));
     }
 

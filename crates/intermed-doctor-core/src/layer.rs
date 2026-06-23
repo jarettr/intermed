@@ -1,4 +1,4 @@
-//! The twelve diagnostic layers (A–L) and the phase that brings each online.
+//! The diagnostic layers (A–K and M) and the phase that brings each online.
 //!
 //! Every [`Collector`](crate::Collector) declares its layer. The report uses
 //! this to show which layers ran and which are deferred to a future phase — so
@@ -9,19 +9,18 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Layer {
-    TargetDetection,  // A
-    Metadata,         // B
-    Dependency,       // C
-    Log,              // D
-    Resource,         // E
-    Mixin,            // F
-    Security,         // G
-    Sbom,             // H
-    Performance,      // I
-    Rules,            // J
-    Lab,              // K
-    RuntimePreflight, // L
-    DataSemantics,    // M
+    TargetDetection, // A
+    Metadata,        // B
+    Dependency,      // C
+    Log,             // D
+    Resource,        // E
+    Mixin,           // F
+    Security,        // G
+    Sbom,            // H
+    Performance,     // I
+    Rules,           // J
+    Lab,             // K
+    DataSemantics,   // M
 }
 
 impl Layer {
@@ -39,7 +38,6 @@ impl Layer {
             Layer::Performance => "I",
             Layer::Rules => "J",
             Layer::Lab => "K",
-            Layer::RuntimePreflight => "L",
             Layer::DataSemantics => "M",
         }
     }
@@ -57,7 +55,6 @@ impl Layer {
             Layer::Performance => "Performance evidence (spark)",
             Layer::Rules => "Rule engine",
             Layer::Lab => "Compatibility lab",
-            Layer::RuntimePreflight => "Runtime preflight",
             Layer::DataSemantics => "Resource / data semantics (AST)",
         }
     }
@@ -75,7 +72,6 @@ impl Layer {
             Layer::Security | Layer::Sbom => 6,
             Layer::Performance => 7,
             Layer::Lab => 8,
-            Layer::RuntimePreflight => 9,
             Layer::DataSemantics => 3,
         }
     }

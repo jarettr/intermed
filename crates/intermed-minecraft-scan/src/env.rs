@@ -29,11 +29,7 @@ impl Collector for EnvironmentCollector {
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let mut emitted = 0;
         let surface = &ctx.target.path;
-        let game_root = ctx
-            .target
-            .game_root
-            .as_deref()
-            .unwrap_or(surface.as_path());
+        let game_root = ctx.target.game_root.as_deref().unwrap_or(surface.as_path());
 
         let layout = ctx.target.layout;
         let instance_type = ctx
@@ -101,14 +97,12 @@ struct LoaderInfo {
 }
 
 fn detect_instance_type_fallback(target: &Target) -> InstanceType {
-    target
-        .instance_type
-        .unwrap_or(match target.kind {
-            TargetKind::Server => InstanceType::Server,
-            TargetKind::ModsDir => InstanceType::Integrated,
-            TargetKind::Instance => InstanceType::Integrated,
-            _ => InstanceType::Integrated,
-        })
+    target.instance_type.unwrap_or(match target.kind {
+        TargetKind::Server => InstanceType::Server,
+        TargetKind::ModsDir => InstanceType::Integrated,
+        TargetKind::Instance => InstanceType::Integrated,
+        _ => InstanceType::Integrated,
+    })
 }
 
 fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
@@ -119,7 +113,10 @@ fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
     let has = |base: &Path, rel: &str| base.join(rel).exists();
     let check_roots = |rel: &str| has(root, rel) || has(surface, rel);
 
-    if check_roots("libraries/net/fabricmc") || check_roots("fabric-server-launch.jar") || check_roots(".fabric") {
+    if check_roots("libraries/net/fabricmc")
+        || check_roots("fabric-server-launch.jar")
+        || check_roots(".fabric")
+    {
         return LoaderInfo {
             loader: Some(Loader::Fabric),
             component: Some("fabric-loader".to_string()),
@@ -160,8 +157,7 @@ fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
             version: None,
         };
     }
-    if check_roots("plugins")
-        && (check_roots("spigot.yml") || dir_has_prefixed_jar(root, "spigot"))
+    if check_roots("plugins") && (check_roots("spigot.yml") || dir_has_prefixed_jar(root, "spigot"))
     {
         return LoaderInfo {
             loader: Some(Loader::Spigot),
@@ -355,16 +351,18 @@ fn version_from_loader_id(id: &str) -> Option<String> {
 fn detect_host_launcher(surface: &Path, layout: Option<LayoutKind>) -> Option<String> {
     let has = |rel: &str| surface.join(rel).exists();
     if let Some(kind) = layout {
-        return Some(match kind {
-            LayoutKind::PrismInstance => "prism",
-            LayoutKind::MultiMcInstance => "multimc",
-            LayoutKind::CurseForgePack => "curseforge",
-            LayoutKind::ModrinthPack => "modrinth",
-            LayoutKind::DotMinecraft => "vanilla",
-            LayoutKind::DedicatedServer => "dedicated",
-            LayoutKind::BareModsDir | LayoutKind::Unknown => return None,
-        }
-        .to_string());
+        return Some(
+            match kind {
+                LayoutKind::PrismInstance => "prism",
+                LayoutKind::MultiMcInstance => "multimc",
+                LayoutKind::CurseForgePack => "curseforge",
+                LayoutKind::ModrinthPack => "modrinth",
+                LayoutKind::DotMinecraft => "vanilla",
+                LayoutKind::DedicatedServer => "dedicated",
+                LayoutKind::BareModsDir | LayoutKind::Unknown => return None,
+            }
+            .to_string(),
+        );
     }
     if has("instance.cfg") && has("mmc-pack.json") {
         return Some("prism".to_string());
@@ -385,7 +383,11 @@ fn detect_host_launcher(surface: &Path, layout: Option<LayoutKind>) -> Option<St
 }
 
 /// Try to read a Minecraft version from common locations. Best-effort.
-fn detect_mc_version(surface: &Path, game_root: &Path, layout: Option<LayoutKind>) -> Option<String> {
+fn detect_mc_version(
+    surface: &Path,
+    game_root: &Path,
+    layout: Option<LayoutKind>,
+) -> Option<String> {
     for path in mc_version_paths(surface, game_root, layout) {
         if let Some(ver) = read_mc_version_file(&path) {
             return Some(ver);
@@ -417,7 +419,10 @@ fn read_mc_version_file(path: &Path) -> Option<String> {
         let components = v.get("components")?.as_array()?;
         for c in components {
             if c.get("uid").and_then(|u| u.as_str()) == Some("net.minecraft") {
-                return c.get("version").and_then(|x| x.as_str()).map(str::to_string);
+                return c
+                    .get("version")
+                    .and_then(|x| x.as_str())
+                    .map(str::to_string);
             }
         }
     }
@@ -507,7 +512,10 @@ mod tests {
         touch(&root.join("plugins").join(".keep"), b"");
         touch(&root.join("spigot.yml"), b"settings: {}");
         touch(&root.join("bukkit.yml"), b"settings: {}");
-        touch(&root.join("config").join("paper-global.yml"), b"_version: 1");
+        touch(
+            &root.join("config").join("paper-global.yml"),
+            b"_version: 1",
+        );
         let target = Target {
             path: root.clone(),
             kind: TargetKind::Server,

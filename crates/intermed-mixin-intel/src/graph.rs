@@ -410,6 +410,7 @@ mod tests {
             class_path: format!("{mixin}.class"),
             targets: vec![target.into()],
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: vec![MixinOperation::Inject],
             injected_methods: Vec::new(),
             shadows: Vec::new(),
@@ -422,6 +423,9 @@ mod tests {
             hot_paths: Vec::new(),
             effects: Vec::new(),
             plugin_gated: false,
+            side: crate::model::Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 

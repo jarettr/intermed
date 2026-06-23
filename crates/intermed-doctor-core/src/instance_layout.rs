@@ -86,7 +86,12 @@ pub fn resolve_layout(surface_root: &Path) -> ResolvedLayout {
     let game_root = resolve_game_root(surface_root, layout);
     let mods_dir = find_mods_directory(surface_root).or_else(|| find_mods_directory(&game_root));
     let plugins_dir = find_plugins_directory(surface_root, &game_root);
-    let instance_type = detect_instance_type(&game_root, layout, mods_dir.as_deref(), plugins_dir.as_deref());
+    let instance_type = detect_instance_type(
+        &game_root,
+        layout,
+        mods_dir.as_deref(),
+        plugins_dir.as_deref(),
+    );
 
     ResolvedLayout {
         surface_root: surface_root.to_path_buf(),
@@ -403,7 +408,12 @@ mod tests {
         let layout = resolve_layout(&root);
         assert_eq!(layout.layout, LayoutKind::PrismInstance);
         assert_eq!(layout.game_root, root.join(".minecraft"));
-        assert!(layout.mods_dir.as_ref().is_some_and(|p| p.ends_with("mods")));
+        assert!(
+            layout
+                .mods_dir
+                .as_ref()
+                .is_some_and(|p| p.ends_with("mods"))
+        );
         assert_eq!(layout.instance_type, InstanceType::Integrated);
         fs::remove_dir_all(root).ok();
     }
@@ -423,14 +433,22 @@ mod tests {
     #[test]
     fn curseforge_pack_overrides_mods() {
         let root = temp_root("cf");
-        touch(&root.join("manifest.json"), br#"{"minecraft":{"version":"1.20.1"}}"#);
+        touch(
+            &root.join("manifest.json"),
+            br#"{"minecraft":{"version":"1.20.1"}}"#,
+        );
         touch(&root.join("modlist.html"), b"<html></html>");
         touch(&root.join("overrides/mods/forge-mod.jar"), b"j");
 
         let layout = resolve_layout(&root);
         assert_eq!(layout.layout, LayoutKind::CurseForgePack);
         assert_eq!(layout.game_root, root.join("overrides"));
-        assert!(layout.mods_dir.as_ref().is_some_and(|p| p.ends_with("overrides/mods")));
+        assert!(
+            layout
+                .mods_dir
+                .as_ref()
+                .is_some_and(|p| p.ends_with("overrides/mods"))
+        );
         assert_eq!(layout.instance_type, InstanceType::Integrated);
         fs::remove_dir_all(root).ok();
     }

@@ -24,7 +24,10 @@ pub fn parse(value: &Value) -> DomainParse {
     };
     let mut references = Vec::new();
 
-    let parent = obj.get("parent").and_then(Value::as_str).map(str::to_string);
+    let parent = obj
+        .get("parent")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     if let Some(p) = &parent {
         references.push(reference(RefRelation::ParentModel, p));
     }
@@ -65,7 +68,7 @@ fn reference(relation: RefRelation, id: &str) -> ResourceReference {
         namespace: namespace_of(id),
         target: id.to_string(),
         required: true,
-        conditioned: false,
+        conditions: Vec::new(),
         is_tag: false,
     }
 }
@@ -88,10 +91,20 @@ mod tests {
         )
         .unwrap();
         let p = parse(&v);
-        let ResourceSummary::Model(s) = &p.summary else { panic!() };
+        let ResourceSummary::Model(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.parent.as_deref(), Some("minecraft:item/generated"));
         assert_eq!(s.texture_count, 1); // `#layer0` is a variable, not a ref
-        assert!(p.references.iter().any(|r| r.relation == RefRelation::ParentModel));
-        assert!(p.references.iter().any(|r| r.relation == RefRelation::UsesTexture));
+        assert!(
+            p.references
+                .iter()
+                .any(|r| r.relation == RefRelation::ParentModel)
+        );
+        assert!(
+            p.references
+                .iter()
+                .any(|r| r.relation == RefRelation::UsesTexture)
+        );
     }
 }

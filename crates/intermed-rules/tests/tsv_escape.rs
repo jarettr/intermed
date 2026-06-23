@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use intermed_doctor_core::facts::{kind, FactStore, SourceRef};
+use intermed_doctor_core::facts::{FactStore, SourceRef, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
-use intermed_rules::{escape_souffle_symbol, escape_tsv_field, SouffleRulePack};
+use intermed_rules::{SouffleRulePack, escape_souffle_symbol, escape_tsv_field};
 
 #[test]
 fn escape_tsv_adversarial_inputs() {
@@ -47,9 +47,9 @@ fn souffle_facts_golden_mod_decl_line() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
@@ -95,12 +95,12 @@ fn souffle_rule_pack_accepts_adversarial_subjects_when_available() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = SouffleRulePack::new().evaluate(&ctx);
+    let findings = SouffleRulePack::default().evaluate(&ctx);
     assert!(findings.iter().any(|f| f.id.contains("duplicate-id")));
 }

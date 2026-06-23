@@ -16,10 +16,7 @@ pub fn should_scan_path(path: &Path, settings: &ScanSettings) -> bool {
         return true;
     };
     match fs::metadata(path) {
-        Ok(meta) => meta
-            .modified()
-            .map(|mtime| mtime >= cutoff)
-            .unwrap_or(true),
+        Ok(meta) => meta.modified().map(|mtime| mtime >= cutoff).unwrap_or(true),
         Err(_) => false,
     }
 }
@@ -68,7 +65,10 @@ pub fn parse_changed_since(input: &str) -> Result<SystemTime, String> {
             .ok_or_else(|| format!("invalid date `{trimmed}`"))?;
         let parsed = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc);
         return Ok(SystemTime::UNIX_EPOCH
-            + std::time::Duration::new(parsed.timestamp() as u64, parsed.timestamp_subsec_nanos()));
+            + std::time::Duration::new(
+                parsed.timestamp() as u64,
+                parsed.timestamp_subsec_nanos(),
+            ));
     }
     let parsed = chrono::DateTime::parse_from_rfc3339(trimmed)
         .map_err(|e| format!("invalid RFC3339 timestamp `{trimmed}`: {e}"))?;

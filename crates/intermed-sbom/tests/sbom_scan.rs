@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use intermed_sbom::{scan_mods_dir, DistributionPlatform, SignatureStrength, SourceClass};
+use intermed_sbom::{DistributionPlatform, SignatureStrength, SourceClass, scan_mods_dir};
 use zip::write::SimpleFileOptions;
 
 #[test]
@@ -106,7 +106,10 @@ fn scan_detects_certified_jar_signature() {
     write_signed_fabric_jar(&mods.join("signed.jar"), "signed");
 
     let scan = scan_mods_dir(&mods).unwrap();
-    assert_eq!(scan.records[0].signature_strength, SignatureStrength::Certified);
+    assert_eq!(
+        scan.records[0].signature_strength,
+        SignatureStrength::Certified
+    );
     assert!(scan.records[0].signed);
     assert_eq!(scan.records[0].trust_score, 100);
 

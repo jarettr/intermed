@@ -1,5 +1,5 @@
-use intermed_deps::{resolve_store, DependencyRule, ResolutionOutcome};
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_deps::{DependencyRule, ResolutionOutcome, resolve_store};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 
 #[test]
@@ -30,7 +30,11 @@ fn global_unsat_finding_emitted() {
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DependencyRule.evaluate(&ctx);
     assert!(findings.iter().any(|f| f.id == "dependency-unsat:global"));
-    assert!(findings.iter().any(|f| f.id == "wrong-version:alpha->fabric-api"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "wrong-version:alpha->fabric-api")
+    );
 }
 
 #[test]
@@ -65,7 +69,11 @@ fn provides_alias_satisfies_dependency() {
     let target = test_target();
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DependencyRule.evaluate(&ctx);
-    assert!(!findings.iter().any(|f| f.id.starts_with("missing-dependency")));
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.id.starts_with("missing-dependency"))
+    );
     assert!(!findings.iter().any(|f| f.id == "dependency-unsat:global"));
 }
 
@@ -94,9 +102,9 @@ fn test_target() -> Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     }
 }

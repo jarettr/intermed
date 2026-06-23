@@ -8,8 +8,8 @@ use std::collections::BTreeSet;
 
 use cafebabe::attributes::{AttributeData, CodeData};
 use cafebabe::bytecode::Opcode;
-use cafebabe::constant_pool::{ConstantPoolItem, LiteralConstant, MemberRef};
-use cafebabe::{parse_class_with_options, MethodAccessFlags, ParseOptions};
+use cafebabe::constant_pool::{ConstantPoolItem, MemberRef};
+use cafebabe::{MethodAccessFlags, ParseOptions, parse_class_with_options};
 
 use crate::annotation::descriptor_to_dotted;
 use crate::model::{CallKind, CallProvenance, HandlerBodySummary, MixinCall};
@@ -83,7 +83,7 @@ pub fn analyze_handler_bodies(
                 return_count: 0,
                 exception_handlers: 0,
                 uses_reflection: false,
-                string_literals: Vec::new(),
+                reflective_targets: Vec::new(),
                 modifies_return_value: false,
                 throws_exception: false,
                 accesses_target_fields: Vec::new(),
@@ -100,20 +100,14 @@ pub fn analyze_handler_bodies(
         let is_static = method.access_flags.contains(MethodAccessFlags::STATIC);
         let (mut summary, body_calls) =
             summarize_code(name, &descriptor, code, target_slash, mixin_targets);
-        summary.dataflow =
-            crate::dataflow::analyze_handler_dataflow(code, &method.descriptor, is_static, target_slash);
+        summary.dataflow = crate::dataflow::analyze_handler_dataflow(
+            code,
+            &method.descriptor,
+            is_static,
+            target_slash,
+        );
         summaries.push(summary);
         calls.extend(body_calls);
-    }
-
-    for summary in &mut summaries {
-        if summary.uses_reflection {
-            for s in extract_string_constants(bytes) {
-                if !summary.string_literals.iter().any(|lit| lit == &s) {
-                    summary.string_literals.push(s);
-                }
-            }
-        }
     }
 
     (summaries, calls.into_iter().collect())
@@ -226,8 +220,23 @@ fn summarize_code(
     if !uses_reflection && reflection_machinery_present(&calls) {
         // String literals + reflective machinery in the same handler are tracked
         // separately; calls already captured the structural invokes.
-        uses_reflection = calls.iter().any(|c| c.provenance == CallProvenance::Reflective);
+        uses_reflection = calls
+            .iter()
+            .any(|c| c.provenance == CallProvenance::Reflective);
     }
+
+    // Only a *reflective* handler's literals are evidence, and only the ones that
+    // name a dispatch target (a qualified class or a dangerous reflective member).
+    // Non-reflective handlers keep nothing — this is both the security signal and
+    // the reason the field is empty for the overwhelming majority of handlers.
+    let reflective_targets: Vec<String> = if uses_reflection {
+        string_literals
+            .into_iter()
+            .filter(|s| looks_like_reflective_target(s))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let summary = HandlerBodySummary {
         handler_method: handler_method.to_string(),
@@ -237,7 +246,7 @@ fn summarize_code(
         return_count,
         exception_handlers: u32::from(code.exception_table.len() as u16),
         uses_reflection,
-        string_literals: string_literals.into_iter().collect(),
+        reflective_targets,
         modifies_return_value,
         throws_exception,
         accesses_target_fields: accesses_target_fields.into_iter().collect(),
@@ -263,11 +272,7 @@ fn call_kind_for_opcode(opcode: &Opcode<'_>) -> CallKind {
 fn is_typed_return_opcode(opcode: &Opcode<'_>) -> bool {
     matches!(
         opcode,
-        Opcode::Ireturn
-            | Opcode::Lreturn
-            | Opcode::Freturn
-            | Opcode::Dreturn
-            | Opcode::Areturn
+        Opcode::Ireturn | Opcode::Lreturn | Opcode::Freturn | Opcode::Dreturn | Opcode::Areturn
     )
 }
 
@@ -375,7 +380,9 @@ fn is_reflective_member(member: &MemberRef<'_>) -> bool {
 }
 
 fn reflection_machinery_present(calls: &BTreeSet<MixinCall>) -> bool {
-    calls.iter().any(|c| c.provenance == CallProvenance::Reflective)
+    calls
+        .iter()
+        .any(|c| c.provenance == CallProvenance::Reflective)
 }
 
 fn code_attributes_pool_strings(code: &CodeData<'_>) -> Vec<String> {
@@ -506,22 +513,46 @@ fn pool_member_to_call(
     })
 }
 
-/// Scan class constant pool for string literals (reflective corroboration).
-pub fn extract_string_constants(bytes: &[u8]) -> BTreeSet<String> {
-    let mut opts = ParseOptions::default();
-    opts.parse_bytecode(false);
-    let Ok(class) = parse_class_with_options(bytes, &opts) else {
-        return BTreeSet::new();
-    };
-    let mut out = BTreeSet::new();
-    for item in class.constantpool_iter() {
-        if let ConstantPoolItem::LiteralConstant(LiteralConstant::String(value)) = item {
-            out.insert(value.into_owned());
-        } else if let ConstantPoolItem::LiteralConstant(LiteralConstant::StringBytes(bytes)) = item {
-            out.insert(String::from_utf8_lossy(bytes).into_owned());
-        }
+/// A handler string constant worth keeping as reflective-dispatch evidence: a
+/// qualified class name (`java.lang.Runtime`, `sun/misc/Unsafe`) or a dangerous
+/// reflective member/loader token. Filters out log lines, format strings, config
+/// keys, etc., so the retained set is tiny and meaningful.
+fn looks_like_reflective_target(s: &str) -> bool {
+    // Real class/member names are short; long strings are messages, not targets.
+    if s.is_empty() || s.len() > 200 {
+        return false;
     }
-    out
+    const DANGEROUS_MEMBERS: &[&str] = &[
+        "exec",
+        "getRuntime",
+        "defineClass",
+        "setAccessible",
+        "newInstance",
+        "loadLibrary",
+        "load",
+        "exit",
+        "halt",
+        "getDeclaredMethod",
+        "getMethod",
+        "invoke",
+        "forName",
+    ];
+    if DANGEROUS_MEMBERS.contains(&s) {
+        return true;
+    }
+    // A qualified class name: 2+ identifier segments joined by '.' or '/'.
+    let sep = if s.contains('/') { '/' } else { '.' };
+    let segments: Vec<&str> = s.split(sep).collect();
+    segments.len() >= 2
+        && segments.iter().all(|seg| {
+            let mut chars = seg.chars();
+            chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+        })
 }
 
 #[cfg(test)]
@@ -549,10 +580,12 @@ mod tests {
         assert!(summary.modifies_return_value);
         assert!(summary.uses_callback_info);
         assert!(!summary.throws_exception);
-        assert!(summary
-            .accesses_target_fields
-            .iter()
-            .any(|f| f.contains("tickCount")));
+        assert!(
+            summary
+                .accesses_target_fields
+                .iter()
+                .any(|f| f.contains("tickCount"))
+        );
         assert!(summary.return_count >= 1);
         assert!(!calls.is_empty() || !summary.accesses_target_fields.is_empty());
     }

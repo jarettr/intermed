@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH intermed 1  "intermed 0.1.0" 
+.TH intermed 1  "intermed 0.1.0-alpha" 
 .SH NAME
 intermed \- InterMed — Minecraft modpack/server evidence engine
 .SH SYNOPSIS
@@ -8,11 +8,11 @@ intermed \- InterMed — Minecraft modpack/server evidence engine
 .SH DESCRIPTION
 InterMed builds a fact graph from Minecraft servers, instances, mods directories, and logs, then derives findings with full provenance.
 .PP
-See docs/EXAMPLES.md for copy\-paste recipes for every subcommand.
+See docs/guides/quickstart.md for copy\-paste recipes for every subcommand.
 .SH OPTIONS
 .TP
 \fB\-\-config\fR \fI<FILE>\fR
-Config file (`intermed\-config\-v1` TOML). Overrides discovery; see docs/CONFIG.md
+Config file (`intermed\-config\-v1` TOML). Overrides discovery; see docs/reference/configuration.md
 .TP
 \fB\-\-dump\-config\fR
 Print the effective default config as TOML and exit (no subcommand required)
@@ -37,7 +37,10 @@ intermed\-vfs(1)
 Inspect resource/data overrides and generate overlay previews
 .TP
 intermed\-deps(1)
-Layer\-C dependency graph and PubGrub resolution
+Layer\-C dependency graph, resolution, and explainable queries
+.TP
+intermed\-impact(1)
+Blast\-radius analysis for removing or updating a mod
 .TP
 intermed\-mixin\-map(1)
 Inspect static Mixin targets, overlaps, and overwrite risks
@@ -79,6 +82,6 @@ Examples:
   intermed mixin\-map ./mods
   intermed rules check ./rules
 
-More: docs/EXAMPLES.md | Man: docs/man/intermed.1
+More: docs/guides/quickstart.md | Reference: docs/reference/commands.md | Man: docs/man/intermed.1
 .SH VERSION
-v0.1.0
+v0.1.0\-alpha

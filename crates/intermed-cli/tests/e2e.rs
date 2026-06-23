@@ -243,13 +243,18 @@ fn doctor_mixin_risk_flag_controls_layer_f() {
     assert_eq!(with.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&with.stdout).unwrap();
     assert_eq!(report["fact_stats"]["mixin_overlap"], 1);
-    assert!(report["findings"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|f| f["id"] == "mixin-risk:net.minecraft.client.render.WorldRenderer"));
     assert!(
-        report["fact_stats"]["mixin_recommendation"].as_u64().unwrap_or(0) >= 1,
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == "mixin-risk:net.minecraft.client.render.WorldRenderer")
+    );
+    assert!(
+        report["fact_stats"]["mixin_recommendation"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
         "hot-path overwrite must emit mixin_recommendation facts"
     );
     let findings = report["findings"].as_array().unwrap();
@@ -267,26 +272,38 @@ fn doctor_mixin_risk_flag_controls_layer_f() {
         "inject-only effect summary; overwrite uses mixin-overwrite-effect"
     );
     assert!(
-        findings.iter().any(|f| f["id"].as_str().unwrap_or("").starts_with("mixin-overwrite-effect:")),
+        findings.iter().any(|f| f["id"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("mixin-overwrite-effect:")),
         "enhanced overwrite findings must attach recommendations via site_key"
     );
 }
 
 #[test]
-fn doctor_datalog_logic_emits_core_rule_findings() {
-    let fixture = Fixture::new("datalog-doctor");
+fn doctor_columnar_logic_emits_core_rule_findings() {
+    let fixture = Fixture::new("columnar-doctor");
     fixture.write_duplicate_id_mods();
 
-    let output = run(["doctor", fixture.mods_str(), "--logic", "datalog", "--json"]);
+    // Columnar is the default; pass it explicitly to assert the Layer-J backend ran.
+    let output = run([
+        "doctor",
+        fixture.mods_str(),
+        "--logic",
+        "columnar",
+        "--json",
+    ]);
     assert_eq!(output.status.code(), Some(2));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let findings = report["findings"].as_array().unwrap();
     assert!(findings.iter().any(|f| f["id"] == "duplicate-id:dupe"));
-    assert!(report["rules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["id"] == "datalog-rule-pack"));
+    assert!(
+        report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "columnar-rule-pack")
+    );
 }
 
 #[test]
@@ -300,11 +317,13 @@ fn doctor_souffle_logic_is_real_optional_backend() {
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let findings = report["findings"].as_array().unwrap();
         assert!(findings.iter().any(|f| f["id"] == "duplicate-id:dupe"));
-        assert!(report["rules"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|r| r["id"] == "souffle-rule-pack"));
+        assert!(
+            report["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r["id"] == "souffle-rule-pack")
+        );
     } else {
         assert_eq!(output.status.code(), Some(2));
         let stderr = String::from_utf8(output.stderr).unwrap();
@@ -412,14 +431,27 @@ fn lab_eval_scores_doctor_predictions_against_ground_truth() {
 }
 
 #[test]
-fn doctor_json_omits_profile_when_no_cache() {
+fn doctor_json_embeds_phase_timings_even_without_cache() {
+    // Per-rule / per-collector timings are always embedded in the JSON report
+    // (they cost nothing to surface and downstream grouping wants them). Only the
+    // on-disk cache walk is gated on a cache being present.
     let fixture = Fixture::new("no-cache-json");
     fixture.write_safe_merge_mods();
 
     let output = run(["doctor", fixture.mods_str(), "--json", "--no-cache"]);
     assert_success(&output);
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(report.get("profile").is_none());
+    let profile = report
+        .get("profile")
+        .expect("profile (phase timings) is always present");
+    assert_eq!(profile["schema"], "intermed-doctor-profile-v1");
+    assert!(
+        profile["rules"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "per-rule timings present"
+    );
 }
 
 #[test]
@@ -489,9 +521,11 @@ fn doctor_phase7_performance_imports_spark_report() {
             >= 1
     );
     let collectors = report["collectors"].as_array().unwrap();
-    assert!(collectors
-        .iter()
-        .any(|c| c["id"] == "spark-importer" && c["status"] == "active"));
+    assert!(
+        collectors
+            .iter()
+            .any(|c| c["id"] == "spark-importer" && c["status"] == "active")
+    );
 }
 
 #[test]
@@ -693,15 +727,19 @@ fn real_mods_directory_runs_doctor_and_vfs() {
 
     let vfs = run(["vfs", "scan", dir.as_str()]);
     assert_success(&vfs);
-    assert!(String::from_utf8(vfs.stdout)
-        .unwrap()
-        .contains("InterMed VFS"));
+    assert!(
+        String::from_utf8(vfs.stdout)
+            .unwrap()
+            .contains("InterMed VFS")
+    );
 
     let mixin = run(["mixin-map", dir.as_str()]);
     assert_success(&mixin);
-    assert!(String::from_utf8(mixin.stdout)
-        .unwrap()
-        .contains("InterMed Mixin Map"));
+    assert!(
+        String::from_utf8(mixin.stdout)
+            .unwrap()
+            .contains("InterMed Mixin Map")
+    );
 
     let doctor = run(["doctor", dir.as_str(), "--json"]);
     assert!(
@@ -711,6 +749,205 @@ fn real_mods_directory_runs_doctor_and_vfs() {
     );
     let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["schema"], "intermed-doctor-report-v1");
+}
+
+// ── VFS / Layer-M regression corpus ─────────────────────────────────────────
+//
+// Synthetic two-writer fixtures with an *expected policy* (roadmap §15): each
+// resource situation maps to a specific finding id, severity, and visibility. A
+// drift here means a layer got louder or quieter than intended — exactly what the
+// "умнее, не громче" guarantee is about.
+
+/// Map a `--json` report's findings to `id -> (severity, visibility)`.
+fn findings_index(
+    report: &serde_json::Value,
+) -> std::collections::BTreeMap<String, (String, String)> {
+    report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["id"].as_str().unwrap().to_string(),
+                (
+                    f["severity"].as_str().unwrap().to_string(),
+                    f["visibility"].as_str().unwrap_or("default").to_string(),
+                ),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn vfs_m_regression_corpus_expected_policy() {
+    let fx = Fixture::new("vfs-m-corpus");
+    // alpha + beta disagree on a recipe output, agree-by-union on a tag, both ship
+    // a differing pack.mcmeta, conflict on a lang key, and override a loot table.
+    let alpha: &[(&str, &[u8])] = &[
+        ("data/create/recipes/crushing/tuff.json",
+         br#"{"type":"create:crushing","ingredients":[{"item":"minecraft:tuff"}],"results":[{"item":"minecraft:gold_nugget"}]}"#),
+        ("data/c/tags/items/ingots.json", br#"{"values":["alpha:ingot"]}"#),
+        ("data/c/loot_tables/blocks/ore.json", br#"{"pools":[{"entries":[{"type":"minecraft:item","name":"alpha:gem"}]}]}"#),
+        ("assets/c/lang/en_us.json", br#"{"item.shared":"Alpha"}"#),
+        ("pack.mcmeta", br#"{"pack":{"pack_format":15,"description":"alpha"}}"#),
+    ];
+    let beta: &[(&str, &[u8])] = &[
+        ("data/create/recipes/crushing/tuff.json",
+         br#"{"type":"create:crushing","ingredients":[{"item":"minecraft:tuff"}],"results":[{"item":"createaddition:electrum_nugget"}]}"#),
+        ("data/c/tags/items/ingots.json", br#"{"values":["beta:ingot"]}"#),
+        ("data/c/loot_tables/blocks/ore.json", br#"{"pools":[{"entries":[{"type":"minecraft:item","name":"beta:gem"}]}]}"#),
+        ("assets/c/lang/en_us.json", br#"{"item.shared":"Beta"}"#),
+        ("pack.mcmeta", br#"{"pack":{"pack_format":18,"description":"beta"}}"#),
+    ];
+    write_fabric_jar(&fx.mods.join("alpha.jar"), "alpha", alpha);
+    write_fabric_jar(&fx.mods.join("beta.jar"), "beta", beta);
+
+    let output = run([
+        "doctor",
+        fx.mods_str(),
+        "--json",
+        "--no-cache",
+        "--resource-level",
+        "full",
+    ]);
+    assert_success_or_warnings(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let idx = findings_index(&report);
+
+    // Recipe output override → warn, default-visible, and the byte-level
+    // json-override is folded in (no duplicate resource-conflict finding).
+    let recipe = "recipe-output-override:data/create/recipes/crushing/tuff.json";
+    assert_eq!(
+        idx.get(recipe).map(|(s, _)| s.as_str()),
+        Some("warn"),
+        "recipe override warns"
+    );
+    assert!(
+        !idx.contains_key("resource-conflict:json-override:data/create/recipes/crushing/tuff.json"),
+        "Layer-E json-override is suppressed into the Layer-M recipe finding"
+    );
+
+    // Loot drop override → warn.
+    assert_eq!(
+        idx.get("loot-table-output-override:data/c/loot_tables/blocks/ore.json")
+            .map(|(s, _)| s.as_str()),
+        Some("warn"),
+    );
+
+    // Lang key conflict → a single grouped note (Layer M owns it; Layer E stays quiet).
+    assert_eq!(
+        idx.get("lang-key-conflict").map(|(s, _)| s.as_str()),
+        Some("note")
+    );
+
+    // Safe tag set-union merge → info + explain-only (hidden from default report).
+    let safe_tag = "resource-conflict:safe-crdt-merge:data/c/tags/items/ingots.json";
+    assert_eq!(
+        idx.get(safe_tag),
+        Some(&("info".to_string(), "explain-only".to_string()))
+    );
+
+    // pack.mcmeta override → overlay-only (expected; an overlay carries its own).
+    let mcmeta = idx.iter().find(|(id, _)| id.ends_with("pack.mcmeta"));
+    assert!(
+        matches!(mcmeta, Some((_, (_, vis))) if vis == "overlay-only"),
+        "pack.mcmeta override is overlay-only, got {mcmeta:?}"
+    );
+
+    // The default terminal report must NOT print the safe merge or pack.mcmeta as
+    // problems — they appear only as a collapsed summary line.
+    let term = run([
+        "doctor",
+        fx.mods_str(),
+        "--no-cache",
+        "--resource-level",
+        "full",
+    ]);
+    let text = String::from_utf8_lossy(&term.stdout);
+    assert!(
+        text.contains("safe set-union merges"),
+        "safe merges collapsed to a summary line"
+    );
+}
+
+#[test]
+fn resource_findings_equivalent_across_backends() {
+    // The resource-conflict rules are backend-independent declarative rules, so a
+    // resource fixture must yield the *same* resource findings on the in-process
+    // columnar engine and the external Soufflé backend (over the same IR). This is the
+    // remaining cross-backend equivalence guarantee for simple resource rules.
+    let fx = Fixture::new("backend-equiv");
+    write_fabric_jar(
+        &fx.mods.join("alpha.jar"),
+        "alpha",
+        &[
+            ("data/c/tags/items/x.json", br#"{"values":["alpha:a"]}"#),
+            (
+                "data/c/recipes/r.json",
+                br#"{"type":"create:crushing","results":[{"item":"a:x"}]}"#,
+            ),
+        ],
+    );
+    write_fabric_jar(
+        &fx.mods.join("beta.jar"),
+        "beta",
+        &[
+            ("data/c/tags/items/x.json", br#"{"values":["beta:b"]}"#),
+            (
+                "data/c/recipes/r.json",
+                br#"{"type":"create:crushing","results":[{"item":"b:y"}]}"#,
+            ),
+        ],
+    );
+
+    let resource_ids = |logic: &str| -> Vec<(String, String)> {
+        let out = run([
+            "doctor",
+            fx.mods_str(),
+            "--json",
+            "--no-cache",
+            "--resource-level",
+            "full",
+            "--logic",
+            logic,
+        ]);
+        assert_success_or_warnings(&out);
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut v: Vec<(String, String)> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| {
+                let id = f["id"].as_str().unwrap();
+                id.starts_with("resource-conflict:")
+                    || id.contains("-override:")
+                    || id == "lang-key-conflict"
+            })
+            .map(|f| {
+                (
+                    f["id"].as_str().unwrap().to_string(),
+                    f["severity"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    };
+
+    let columnar = resource_ids("columnar");
+    assert!(
+        !columnar.is_empty(),
+        "fixture should produce resource findings"
+    );
+    // The remaining cross-backend equivalence: the in-process columnar engine vs the
+    // external Soufflé backend (when its binary is present), over the same IR.
+    if souffle_available_in_path() {
+        let souffle = resource_ids("souffle");
+        assert_eq!(
+            columnar, souffle,
+            "resource findings must be identical across backends"
+        );
+    }
 }
 
 struct Fixture {

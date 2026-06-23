@@ -1,4 +1,4 @@
-NOTE Resource can be merged safely: data/minecraft/tags/items/test.json
+INFO Resource can be merged safely: data/minecraft/tags/items/test.json
 id: resource-conflict:safe-crdt-merge:data/minecraft/tags/items/test.json
 rule: resource-conflict
 
@@ -9,7 +9,7 @@ Fix candidates:
 
 Evidence:
 - f# Subject weight=1.00: resource_collision subject=data/minecraft/tags/items/test.json
-  attrs: {"archives":"alpha.jar,beta.jar","class":"safe-crdt-merge","domain":"tag","reason":"all writers append values without replace — a deterministic, order-independent set union","safe_merge":true,"writers":"alpha,beta"}
+  attrs: {"archives":"alpha.jar,beta.jar","class":"safe-crdt-merge","domain":"tag","load_order_confidence":"high","order_dependent":false,"reason":"all writers append values without replace — a deterministic, order-independent set union","safe_merge":true,"writer_count":2,"writers":"alpha,beta"}
   source: data/minecraft/tags/items/test.json extractor=vfs-scanner
 - f# ConflictsWith weight=0.80: resource_writer subject=alpha
   attrs: {"archive":"alpha.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":30}

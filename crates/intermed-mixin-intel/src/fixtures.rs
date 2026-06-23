@@ -340,7 +340,13 @@ pub fn class_with_method(internal_name: &str, method_name: &str, method_desc: &s
     let rva_name = cp.utf8("RuntimeVisibleAnnotations");
     let mut rva = Vec::new();
     rva.extend_from_slice(&0u16.to_be_bytes()); // zero annotations
-    cp.finish_class(this, super_class, rva_name, rva, vec![(mname, mdesc, code_name, code)])
+    cp.finish_class(
+        this,
+        super_class,
+        rva_name,
+        rva,
+        vec![(mname, mdesc, code_name, code)],
+    )
 }
 
 /// Build a mixin class with `@Inject` handler bytecode that touches the target.

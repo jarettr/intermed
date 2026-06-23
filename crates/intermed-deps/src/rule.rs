@@ -4,10 +4,11 @@ use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandida
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{Rule, RuleCtx};
 
+use crate::effective::effective_findings;
 use crate::implicit::implicit_findings;
 use crate::ordering::ordering_findings;
 use crate::pairwise::pairwise_findings;
-use crate::resolver::{resolve_store, ResolutionOutcome};
+use crate::resolver::{ResolutionOutcome, resolve_store};
 
 /// Layer-C dependency rule: direct semver checks and PubGrub global unsat.
 pub struct DependencyRule;
@@ -21,6 +22,7 @@ impl Rule for DependencyRule {
         let mut out = pairwise_findings(ctx, self.id());
         out.extend(ordering_findings(ctx, self.id()));
         out.extend(implicit_findings(ctx, self.id()));
+        out.extend(effective_findings(ctx, self.id()));
         if should_emit_pubgrub_unsat(&out) {
             if let Some(finding) = pubgrub_finding(ctx, self.id()) {
                 out.push(finding);
@@ -37,9 +39,9 @@ fn should_emit_pubgrub_unsat(pairwise: &[Finding]) -> bool {
     let has_missing = pairwise
         .iter()
         .any(|f| f.id.starts_with("missing-dependency:"));
-    let has_version = pairwise.iter().any(|f| {
-        f.id.starts_with("wrong-version:") || f.id.starts_with("wrong-mc-version:")
-    });
+    let has_version = pairwise
+        .iter()
+        .any(|f| f.id.starts_with("wrong-version:") || f.id.starts_with("wrong-mc-version:"));
     if has_version {
         return true;
     }

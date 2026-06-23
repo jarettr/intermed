@@ -18,10 +18,10 @@
 
 pub mod collector;
 pub mod engine;
+pub mod instance_layout;
 pub mod io_util;
 pub mod jar_cache;
 pub mod layer;
-pub mod instance_layout;
 pub mod modpack;
 pub mod modpack_manifest;
 pub mod profile;
@@ -29,35 +29,34 @@ pub mod report;
 pub mod rule;
 pub mod scan_filter;
 pub mod settings;
+pub mod suppression;
 pub mod target;
 
 pub use collector::{CollectCtx, Collector, CollectorOutcome, CollectorStatus, DeferredCollector};
 pub use engine::{DiagnosticEngine, DiagnosticRun, EngineBuilder};
+pub use instance_layout::{
+    LayoutKind, ResolvedLayout, find_mods_directory, resolve_game_root, resolve_layout,
+};
 pub use io_util::write_atomic;
 pub use jar_cache::{
-    CacheStats, JarCache, JarCacheConfig, LocalDirRemoteTier, RemoteCacheTier,
-    CACHE_SCHEMA as JAR_CACHE_SCHEMA, DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES,
-    DEFAULT_CACHE_MIN_BYTES, DEFAULT_FINGERPRINT_REVERIFY_DAYS, DEFAULT_PRUNE_INTERVAL_DAYS,
+    CACHE_SCHEMA as JAR_CACHE_SCHEMA, CacheStats, DEFAULT_CACHE_MAX_AGE_DAYS,
+    DEFAULT_CACHE_MAX_BYTES, DEFAULT_CACHE_MIN_BYTES, DEFAULT_FINGERPRINT_REVERIFY_DAYS,
+    DEFAULT_PRUNE_INTERVAL_DAYS, JarCache, JarCacheConfig, LocalDirRemoteTier, RemoteCacheTier,
 };
 pub use layer::Layer;
-pub use profile::{DiagnosticProfile, PhaseTiming, PROFILE_SCHEMA};
+pub use modpack::{ModpackError, ModpackMount, materialize_modpack_archive};
+pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
+pub use profile::{DiagnosticProfile, PROFILE_SCHEMA, PhaseTiming};
 pub use report::{DoctorReport, REPORT_SCHEMA};
 pub use rule::{Rule, RuleCtx};
-pub use modpack::{materialize_modpack_archive, ModpackError, ModpackMount};
-pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
-pub use scan_filter::{
-    filter_jar_paths, list_jar_archives, parse_changed_since, should_scan_path,
-};
+pub use scan_filter::{filter_jar_paths, list_jar_archives, parse_changed_since, should_scan_path};
 pub use settings::{
-    default_settings, DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel,
-    MetadataSettings, MixinLevel, MixinSettings, ResourceAstLevel, ResourceSettings, ScanSettings,
-    SbomSettings, SecuritySettings,
-};
-pub use instance_layout::{
-    find_mods_directory, resolve_layout, resolve_game_root, LayoutKind, ResolvedLayout,
+    DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel, MetadataSettings, MixinLevel,
+    MixinSettings, ResourceAstLevel, ResourceSettings, SbomSettings, ScanSettings,
+    SecuritySettings, default_settings,
 };
 pub use target::{
-    detect_target, target_from_layout, Environment, InstanceType, Loader, Side, Target, TargetKind,
+    Environment, InstanceType, Loader, Side, Target, TargetKind, detect_target, target_from_layout,
 };
 
 // Re-export the foundational crates so collector/rule crates can depend on just

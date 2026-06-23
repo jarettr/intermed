@@ -35,8 +35,8 @@ mod remote;
 mod util;
 
 pub use config::{
-    JarCacheConfig, DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES, DEFAULT_CACHE_MIN_BYTES,
-    DEFAULT_FINGERPRINT_REVERIFY_DAYS, DEFAULT_PRUNE_INTERVAL_DAYS,
+    DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES, DEFAULT_CACHE_MIN_BYTES,
+    DEFAULT_FINGERPRINT_REVERIFY_DAYS, DEFAULT_PRUNE_INTERVAL_DAYS, JarCacheConfig,
 };
 pub use remote::LocalDirRemoteTier;
 
@@ -50,15 +50,15 @@ use std::sync::{Arc, Mutex};
 /// Sentinel for `cached_bytes_on_disk`: means "not yet measured this session".
 const DISK_USAGE_STALE: u64 = u64::MAX;
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::io_util::write_atomic;
 
 use fingerprint::FingerprintManager;
 use prune::{disk_usage, maybe_prune};
 use util::{
-    default_cache_root, file_mtime, new_write_locks, sanitize_segment, sha256_file, shard_index,
-    WRITE_SHARDS,
+    WRITE_SHARDS, default_cache_root, file_mtime, new_write_locks, sanitize_segment, sha256_file,
+    shard_index,
 };
 
 /// Schema tag embedded in every cache record.
@@ -611,6 +611,7 @@ impl JarCache {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let path = self.cache_path(collector_id, cache_version, sha256);
+        let old_size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -641,8 +642,13 @@ impl JarCache {
         let written = text.len() as u64;
         let prev = self.cached_bytes_on_disk.load(Ordering::Relaxed);
         if prev != DISK_USAGE_STALE {
-            self.cached_bytes_on_disk
-                .fetch_add(written, Ordering::Relaxed);
+            if written > old_size {
+                self.cached_bytes_on_disk
+                    .fetch_add(written - old_size, Ordering::Relaxed);
+            } else if old_size > written {
+                self.cached_bytes_on_disk
+                    .fetch_sub(old_size - written, Ordering::Relaxed);
+            }
         }
         Ok(())
     }
@@ -651,7 +657,8 @@ impl JarCache {
         let freed = maybe_prune(&self.root, &self.config)?;
         if freed > 0 {
             // Pruning changed the on-disk layout; invalidate the cached size.
-            self.cached_bytes_on_disk.store(DISK_USAGE_STALE, Ordering::Relaxed);
+            self.cached_bytes_on_disk
+                .store(DISK_USAGE_STALE, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -665,7 +672,8 @@ impl JarCache {
         }
         let freed = prune::prune_stale_entries(&self.root, &self.config)?;
         if freed > 0 {
-            self.cached_bytes_on_disk.store(DISK_USAGE_STALE, Ordering::Relaxed);
+            self.cached_bytes_on_disk
+                .store(DISK_USAGE_STALE, Ordering::Relaxed);
         }
         Ok(freed)
     }
@@ -695,7 +703,8 @@ impl JarCache {
     fn prune_stale_entries(&self) -> io::Result<()> {
         let freed = prune::prune_stale_entries(&self.root, &self.config)?;
         if freed > 0 {
-            self.cached_bytes_on_disk.store(DISK_USAGE_STALE, Ordering::Relaxed);
+            self.cached_bytes_on_disk
+                .store(DISK_USAGE_STALE, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -984,8 +993,8 @@ mod tests {
 
     #[test]
     fn single_flight_coalesces_concurrent_scans_of_one_jar() {
-        use std::sync::atomic::AtomicUsize;
         use std::sync::Barrier;
+        use std::sync::atomic::AtomicUsize;
 
         let root = temp_root("single-flight");
         let jar = root.join("mod.jar");
@@ -1093,7 +1102,7 @@ mod tests {
 
     #[test]
     fn scan_panic_does_not_poison_the_cache() {
-        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
 
         let root = temp_root("scan-panic");
         let jar = root.join("mod.jar");
@@ -1221,6 +1230,9 @@ mod tests {
         let v: u8 = cache2.get_or_scan("c", "v1", &jar, || 2);
         assert_eq!(v, 1, "served the cached payload");
         let after = fs::metadata(&payload).unwrap().modified().unwrap();
-        assert!(after > before, "hot entry's mtime was bumped (LRU promotion)");
+        assert!(
+            after > before,
+            "hot entry's mtime was bumped (LRU promotion)"
+        );
     }
 }

@@ -4,31 +4,7 @@
   "parse_status": "parsed",
   "references": [
     {
-      "conditioned": false,
-      "is_tag": false,
-      "namespace": "create",
-      "relation": "uses-recipe-type",
-      "required": true,
-      "target": "create:crushing"
-    },
-    {
-      "conditioned": false,
-      "is_tag": false,
-      "namespace": "create",
-      "relation": "produces-item",
-      "required": true,
-      "target": "create:crushed_iron"
-    },
-    {
-      "conditioned": false,
-      "is_tag": false,
-      "namespace": "minecraft",
-      "relation": "produces-item",
-      "required": true,
-      "target": "minecraft:gravel"
-    },
-    {
-      "conditioned": false,
+      "conditions": [],
       "is_tag": false,
       "namespace": "minecraft",
       "relation": "uses-item",
@@ -36,12 +12,36 @@
       "target": "minecraft:cobblestone"
     },
     {
-      "conditioned": false,
+      "conditions": [],
       "is_tag": true,
       "namespace": "c",
       "relation": "uses-tag",
       "required": true,
       "target": "c:ingots/iron"
+    },
+    {
+      "conditions": [],
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "uses-recipe-type",
+      "required": true,
+      "target": "create:crushing"
+    },
+    {
+      "conditions": [],
+      "is_tag": false,
+      "namespace": "create",
+      "relation": "produces-item",
+      "required": true,
+      "target": "create:crushed_iron"
+    },
+    {
+      "conditions": [],
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "produces-item",
+      "required": true,
+      "target": "minecraft:gravel"
     }
   ],
   "resource_path": "data/create/recipe/gadget.json",
@@ -53,11 +53,13 @@
       "minecraft:cobblestone"
     ],
     "kind": "recipe",
+    "opacity": "partially-known",
     "output_count": 2,
     "outputs": [
       "create:crushed_iron",
       "minecraft:gravel"
     ],
-    "recipe_type": "create:crushing"
+    "recipe_type": "create:crushing",
+    "serializer_namespace": "create"
   }
 }

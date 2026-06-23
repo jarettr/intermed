@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use pubgrub::{resolve, PubGrubError, SelectedDependencies};
+use pubgrub::{PubGrubError, SelectedDependencies, resolve};
 
 use crate::provider::ModpackProvider;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::graph::{build_graph, ModpackGraph, MODPACK_ROOT_ID};
+use crate::graph::{MODPACK_ROOT_ID, ModpackGraph, build_graph};
 use crate::provider::build_provider;
 use crate::report::format_unsat_tree;
 use crate::semver::parse_mod_version;
@@ -31,9 +31,7 @@ pub enum ResolutionOutcome {
         explanation: String,
     },
     /// Not enough semver-parseable packages to run PubGrub safely.
-    Skipped {
-        reason: ResolutionSkipReason,
-    },
+    Skipped { reason: ResolutionSkipReason },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +126,7 @@ fn selection_to_strings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
+    use intermed_doctor_core::facts::{FactStore, kind};
 
     #[test]
     fn satisfied_when_versions_match() {

@@ -1,7 +1,7 @@
 //! Rule-layer tests: facts → [`MixinRiskRule`] findings with recommendations.
 
 use intermed_doctor_core::evidence::Severity;
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{CollectCtx, Collector, Rule, RuleCtx, Target, TargetKind};
 use intermed_mixin_intel::fixtures;
 use intermed_mixin_intel::{collector, rule};
@@ -14,9 +14,9 @@ fn mods_target(mods: &std::path::Path) -> Target {
         path: mods.to_path_buf(),
         kind: TargetKind::ModsDir,
         mods_dir: Some(mods.to_path_buf()),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     }
 }
@@ -68,10 +68,12 @@ fn overwrite_finding_attaches_inject_recommendation_via_site_key() {
         .expect("enhanced overwrite finding");
     assert!(overwrite.explanation.contains("@Inject"));
     assert!(!overwrite.fix_candidates.is_empty());
-    assert!(overwrite
-        .fix_candidates
-        .iter()
-        .any(|c| c.description.contains("CallbackInfo")));
+    assert!(
+        overwrite
+            .fix_candidates
+            .iter()
+            .any(|c| c.description.contains("CallbackInfo"))
+    );
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -131,7 +133,11 @@ fn mixin_effect_summary_includes_recommendations_and_historical_boost() {
         .expect("effect summary finding");
     assert_eq!(summary.severity, Severity::Warn);
     assert!(summary.explanation.contains("Historical runtime logs"));
-    assert!(summary.explanation.contains("Handler complexity score is 60/100"));
+    assert!(
+        summary
+            .explanation
+            .contains("Handler complexity score is 60/100")
+    );
     assert!(summary.explanation.contains("Recommendations:"));
     assert!(!summary.fix_candidates.is_empty());
 }
@@ -172,12 +178,10 @@ fn overwrite_effect_does_not_duplicate_as_effect_summary() {
             .iter()
             .any(|f| f.id.starts_with("mixin-overwrite-effect:"))
     );
-    assert!(
-        !findings
-            .iter()
-            .any(|f| f.machine_tags.iter().any(|t| t == "mixin-effect-summary")
-                && f.explanation.contains("@Overwrite"))
-    );
+    assert!(!findings.iter().any(
+        |f| f.machine_tags.iter().any(|t| t == "mixin-effect-summary")
+            && f.explanation.contains("@Overwrite")
+    ));
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -242,4 +246,297 @@ fn risk_finding_includes_involved_mod_capabilities() {
     );
     // …and the capability fact is wired in as evidence.
     assert!(risk.evidence.iter().any(|e| e.fact == cap));
+}
+
+#[test]
+fn risk_cluster_fact_becomes_a_finding_citing_failing_sites() {
+    // A site-level overhaul (Phases 13/14) risk cluster, plus the failing
+    // application-site it rolls up, should surface as one actionable finding that
+    // cites the site fact as evidence.
+    let mut store = FactStore::new();
+    let site = store
+        .fact("mixin-analyzer", kind::MIXIN_APPLICATION_SITE)
+        .subject("modx::modx.Mixin::onTick->net.example.Foo#bar()V@INVOKE")
+        .attr("mod", "modx")
+        .attr("target_class", "net.example.Foo")
+        .attr("target_method", "bar()V")
+        .attr("selector_verification", "no-match")
+        .attr("target_resolution", "exact-match")
+        .attr("signature_check", "valid")
+        .attr("local_capture_status", "no-local-capture")
+        .emit();
+    store
+        .fact("mixin-analyzer", kind::MIXIN_RISK_CLUSTER)
+        .subject("cluster-net.example.Foo")
+        .attr("kind", "apply-failure")
+        .attr("target_class", "net.example.Foo")
+        .attr("severity", "warn")
+        .attr("confirmation_level", "static-exact")
+        .attr("headline", "1 selector issue on `net.example.Foo` (modx)")
+        .attr("recommended_action", "Inspect the failing sites.")
+        .emit();
+
+    let target = mods_target(std::path::Path::new("."));
+    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let cluster = findings
+        .iter()
+        .find(|f| f.id == "mixin-cluster:cluster-net.example.Foo")
+        .expect("risk cluster finding");
+    assert_eq!(cluster.severity, Severity::Warn);
+    // The failing application-site fact is cited as supporting evidence.
+    assert!(
+        cluster.evidence.iter().any(|e| e.fact == site),
+        "cluster finding must cite the failing site fact"
+    );
+    assert!(cluster.machine_tags.iter().any(|t| t == "risk-cluster"));
+}
+
+#[test]
+fn mixin_runtime_mutation_correlates_with_layer_m_static_conflict() {
+    // A mixin hooking the recipe loader + a Layer-M static recipe conflict should
+    // produce a cross-layer "may be overridden at runtime" finding citing both.
+    let mut store = FactStore::new();
+    let mutation = store
+        .fact("mixin-analyzer", kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+        .subject("recipe")
+        .attr("mod", "tweakermod")
+        .attr("mixin", "tweakermod.RecipeMixin")
+        .attr(
+            "site_id",
+            "tweakermod::RecipeMixin::onApply->net.minecraft.recipe.RecipeManager#apply@HEAD",
+        )
+        .attr("target_class", "net.minecraft.recipe.RecipeManager")
+        .attr("subsystem", "recipe")
+        .attr("domain", "recipe")
+        .attr("operation", "redirect")
+        .attr("effect", "rewrites-load-call")
+        .attr("confidence", 85)
+        .emit();
+    let diff = store
+        .fact("resource-ast-scanner", kind::RESOURCE_SEMANTIC_DIFF)
+        .subject("data/minecraft/recipe/stick.json")
+        .attr("diff_kind", "recipe-output-override")
+        .attr("writers", "moda,modb")
+        .attr("detail", "conflicting outputs")
+        .emit();
+
+    let target = mods_target(std::path::Path::new("."));
+    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let f = findings
+        .iter()
+        .find(|f| f.id == "mixin-resource-override:recipe")
+        .expect("cross-layer recipe override finding");
+    assert_eq!(f.severity, Severity::Warn);
+    assert!(f.machine_tags.iter().any(|t| t == "cross-layer"));
+    // Cites BOTH the mixin mutation and the Layer-M static diff.
+    assert!(f.evidence.iter().any(|e| e.fact == mutation));
+    assert!(f.evidence.iter().any(|e| e.fact == diff));
+}
+
+#[test]
+fn mixin_and_script_both_mutating_recipes_correlate() {
+    let mut store = FactStore::new();
+    store
+        .fact("mixin-analyzer", kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+        .subject("recipe")
+        .attr("mod", "tweakermod")
+        .attr("mixin", "tweakermod.RecipeMixin")
+        .attr("site_id", "s")
+        .attr("target_class", "net.minecraft.recipe.RecipeManager")
+        .attr("subsystem", "recipe")
+        .attr("domain", "recipe")
+        .attr("operation", "inject")
+        .attr("effect", "hooks-loader")
+        .attr("confidence", 55)
+        .emit();
+    store
+        .fact("dynamics-scanner", kind::RUNTIME_SCRIPT_MODIFIES_RECIPE)
+        .subject("minecraft:stick")
+        .attr("engine", "kubejs")
+        .attr("via", "ServerEvents.recipes")
+        .emit();
+
+    let target = mods_target(std::path::Path::new("."));
+    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let f = findings
+        .iter()
+        .find(|f| f.id == "mixin-script-resource:recipe")
+        .expect("mixin+script recipe finding");
+    assert!(f.explanation.contains("kubejs"));
+}
+
+#[test]
+fn runtime_log_confirms_a_static_site() {
+    // A MixinApplyError log line naming a mixin that also exists as a static site
+    // should produce a confirmed Error finding citing both facts.
+    let mut store = FactStore::new();
+    let site = store
+        .fact("mixin-analyzer", kind::MIXIN_APPLICATION_SITE)
+        .subject("modz::modz.mixin.ServerMixin::onTick->net.minecraft.Server#tick()V@HEAD")
+        .attr("mod", "modz")
+        .attr("mixin", "modz.mixin.ServerMixin")
+        .attr("target_class", "net.minecraft.Server")
+        .attr("target_method", "tick()V")
+        .attr("site_key", "tick()V@HEAD")
+        .emit();
+    let log = store
+        .fact("log-collector", kind::LOG_SIGNAL)
+        .subject("MixinApplyError")
+        .attr("line", 42i64)
+        .attr(
+            "excerpt",
+            "InvalidInjectionException: @Inject could not find any targets matching 'tick()V' in somemod.mixins.json:ServerMixin",
+        )
+        .emit();
+
+    let target = mods_target(std::path::Path::new("."));
+    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let f = findings
+        .iter()
+        .find(|f| f.id.starts_with("mixin-runtime-confirmed:"))
+        .expect("runtime-confirmed finding");
+    assert_eq!(f.severity, Severity::Error);
+    assert!(f.evidence.iter().any(|e| e.fact == site));
+    assert!(f.evidence.iter().any(|e| e.fact == log));
+}
+
+#[test]
+fn mixin_security_surface_elevates_with_layer_g_capability() {
+    // A mixin into the networking subsystem + a Layer-G uses_unsafe on the same mod
+    // ⇒ elevated Warn finding citing both.
+    let mut store = FactStore::new();
+    let surface = store
+        .fact("mixin-analyzer", kind::MIXIN_SECURITY_SURFACE)
+        .subject("sketchymod")
+        .attr("mixin", "sketchymod.NetMixin")
+        .attr("site_id", "s")
+        .attr("target_class", "net.minecraft.network.ClientConnection")
+        .attr("subsystem", "networking")
+        .attr("operation", "redirect")
+        .attr("reason", "weaves into network packet / connection handling")
+        .attr("confidence", 90)
+        .emit();
+    let unsafe_fact = store
+        .fact("security-audit", kind::USES_UNSAFE)
+        .subject("sketchymod")
+        .emit();
+
+    let target = mods_target(std::path::Path::new("."));
+    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let f = findings
+        .iter()
+        .find(|f| f.id == "mixin-security:sketchymod:networking")
+        .expect("security finding");
+    assert_eq!(f.severity, Severity::Warn);
+    assert!(f.machine_tags.iter().any(|t| t == "elevated"));
+    assert!(f.evidence.iter().any(|e| e.fact == surface));
+    assert!(f.evidence.iter().any(|e| e.fact == unsafe_fact));
+}
+
+#[test]
+fn mixin_security_surface_alone_is_a_note() {
+    let mut store = FactStore::new();
+    store
+        .fact("mixin-analyzer", kind::MIXIN_SECURITY_SURFACE)
+        .subject("netmod")
+        .attr("mixin", "netmod.M")
+        .attr("site_id", "s")
+        .attr("target_class", "net.minecraft.network.ClientConnection")
+        .attr("subsystem", "networking")
+        .attr("operation", "inject")
+        .attr("reason", "weaves into network packet / connection handling")
+        .attr("confidence", 70)
+        .emit();
+    let target = mods_target(std::path::Path::new("."));
+    let f = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .into_iter()
+        .find(|f| f.id == "mixin-security:netmod:networking")
+        .expect("security note");
+    assert_eq!(f.severity, Severity::Note);
+    assert!(!f.machine_tags.iter().any(|t| t == "elevated"));
+}
+
+#[test]
+fn worldgen_resource_plus_worldgen_mixin_is_flagged() {
+    // Layer M: the mod ships a worldgen file. Layer F: its mixin modifies worldgen.
+    let mut store = FactStore::new();
+    store
+        .fact("vfs", kind::RESOURCE_WRITER)
+        .subject("wgmod")
+        .attr("path", "data/wgmod/worldgen/configured_feature/x.json")
+        .attr("json", true)
+        .emit();
+    store
+        .fact("mixin-analyzer", kind::MOD_CAPABILITY)
+        .subject("wgmod")
+        .attr("capability", "modifies_worldgen")
+        .emit();
+    let target = mods_target(std::path::Path::new("."));
+    let f = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .into_iter()
+        .find(|f| f.id == "worldgen-resource-plus-worldgen-mixin-risk:wgmod")
+        .expect("cluster-D worldgen finding");
+    assert_eq!(f.severity, Severity::Note);
+    assert!(f.machine_tags.iter().any(|t| t == "cross-layer"));
+    assert!(f.machine_tags.iter().any(|t| t == "worldgen"));
+}
+
+#[test]
+fn worldgen_resource_without_worldgen_mixin_is_not_flagged() {
+    // Shipping worldgen data without a worldgen-modifying mixin must NOT fire
+    // (the join, not either side alone, is the signal).
+    let mut store = FactStore::new();
+    store
+        .fact("vfs", kind::RESOURCE_WRITER)
+        .subject("wgmod")
+        .attr("path", "data/wgmod/worldgen/configured_feature/x.json")
+        .attr("json", true)
+        .emit();
+    store
+        .fact("mixin-analyzer", kind::MOD_CAPABILITY)
+        .subject("wgmod")
+        .attr("capability", "modifies_rendering")
+        .emit();
+    let target = mods_target(std::path::Path::new("."));
+    assert!(
+        rule()
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .into_iter()
+            .all(|f| !f
+                .id
+                .starts_with("worldgen-resource-plus-worldgen-mixin-risk"))
+    );
+}
+
+#[test]
+fn reloadable_data_loader_hook_stays_in_the_existing_bridge_path() {
+    // Regression guard against re-introducing a second consumer of the
+    // resource_bridge signal: a mod shipping recipes + hooking the recipe loader
+    // must NOT produce a cluster-D finding. That correlation is owned by
+    // `cross_layer_resource_findings` (keyed on the bridge's `domain`), exercised by
+    // `mixin_runtime_mutation_correlates_with_layer_m_static_conflict` above.
+    let mut store = FactStore::new();
+    store
+        .fact("vfs", kind::RESOURCE_WRITER)
+        .subject("datamod")
+        .attr("path", "data/datamod/recipes/r.json")
+        .attr("json", true)
+        .emit();
+    store
+        .fact("mixin-analyzer", kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+        .subject("recipe")
+        .attr("mod", "datamod")
+        .attr("domain", "recipe")
+        .attr("effect", "replaces-loader")
+        .attr("mixin", "datamod.M")
+        .emit();
+    let target = mods_target(std::path::Path::new("."));
+    assert!(
+        rule()
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .into_iter()
+            .all(|f| !f.id.starts_with("resource-reload-mixin-risk"))
+    );
 }

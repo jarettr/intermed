@@ -6,7 +6,7 @@ use creeper_semver_pubgrub::SmallVersion;
 use pubgrub::OfflineDependencyProvider;
 use thiserror::Error;
 
-use crate::graph::{is_platform_dep, ModpackGraph, MODPACK_ROOT_ID};
+use crate::graph::{MODPACK_ROOT_ID, ModpackGraph, is_platform_dep};
 use crate::ranges::{ModRange, parse_mod_range};
 use crate::semver::parse_mod_version;
 
@@ -94,7 +94,8 @@ fn dependency_constraints(
         {
             continue;
         }
-        if !known_packages.contains(&edge.to) && !graph.provides.iter().any(|a| a.alias_id == edge.to)
+        if !known_packages.contains(&edge.to)
+            && !graph.provides.iter().any(|a| a.alias_id == edge.to)
         {
             // Missing packages are modeled by absence from the provider catalog;
             // still emit the constraint so PubGrub can explain the gap.
@@ -113,7 +114,7 @@ fn dependency_constraints(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
+    use intermed_doctor_core::facts::{FactStore, kind};
 
     use crate::graph::build_graph;
 

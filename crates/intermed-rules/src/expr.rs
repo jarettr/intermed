@@ -30,6 +30,83 @@ pub fn extract_equijoin_keys(expr: &str) -> Vec<(String, String)> {
     }
 }
 
+/// Parse a `where`/`on`/`having` expression string into a columnar IR
+/// [`Condition`](intermed_columnar::ir::Condition), or `None` when it uses a shape the
+/// IR does not model (e.g. a settings interpolation `{…}` or a non-ident comparand).
+/// `TRUE` maps to `Condition::True`.
+pub fn parse_to_condition(input: &str) -> Option<intermed_columnar::ir::Condition> {
+    if input.trim().eq_ignore_ascii_case("TRUE") {
+        return Some(intermed_columnar::ir::Condition::True);
+    }
+    let ast = parse_expr(input).ok()?;
+    ast_to_condition(&ast)
+}
+
+fn map_op(op: CmpOp) -> intermed_columnar::ir::CmpOp {
+    use intermed_columnar::ir::CmpOp as C;
+    match op {
+        CmpOp::Eq => C::Eq,
+        CmpOp::Ne => C::Ne,
+        CmpOp::Lt => C::Lt,
+        CmpOp::Le => C::Le,
+        CmpOp::Gt => C::Gt,
+        CmpOp::Ge => C::Ge,
+    }
+}
+
+fn ident_of(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Ident(id) => Some(id),
+        _ => None,
+    }
+}
+
+fn ast_to_condition(e: &Expr) -> Option<intermed_columnar::ir::Condition> {
+    use intermed_columnar::ir::{Condition, ScalarValue};
+    Some(match e {
+        Expr::And(a, b) => Condition::And(
+            Box::new(ast_to_condition(a)?),
+            Box::new(ast_to_condition(b)?),
+        ),
+        Expr::Or(a, b) => Condition::Or(
+            Box::new(ast_to_condition(a)?),
+            Box::new(ast_to_condition(b)?),
+        ),
+        Expr::Not(a) => Condition::Not(Box::new(ast_to_condition(a)?)),
+        Expr::IsNotNull(e) => Condition::NotNull {
+            column: ident_of(e)?.to_string(),
+        },
+        Expr::IsNull(e) => Condition::IsNull {
+            column: ident_of(e)?.to_string(),
+        },
+        Expr::In(e, values) => Condition::In {
+            column: ident_of(e)?.to_string(),
+            values: values.clone(),
+        },
+        Expr::Cmp(left, op, right) => match (left.as_ref(), right.as_ref()) {
+            (Expr::Ident(col), Expr::Literal(v)) => Condition::Cmp {
+                column: col.clone(),
+                op: map_op(*op),
+                value: ScalarValue::Str(v.clone()),
+            },
+            (Expr::Ident(l), Expr::Ident(r)) => {
+                // A settings interpolation lexes as an Ident containing `{`; the IR
+                // can't resolve settings, so reject.
+                if l.contains('{') || r.contains('{') {
+                    return None;
+                }
+                Condition::ColCmp {
+                    left: l.clone(),
+                    op: map_op(*op),
+                    right: r.clone(),
+                }
+            }
+            _ => return None,
+        },
+        Expr::Ident(_) | Expr::Literal(_) => return None,
+    })
+}
+
 fn collect_equijoins(expr: &Expr) -> Vec<(String, String)> {
     match expr {
         Expr::Cmp(left, CmpOp::Eq, right) => {
@@ -195,7 +272,9 @@ impl std::fmt::Display for ParseError {
 /// # Errors
 /// Returns a human-readable description of the first parse failure.
 pub fn check_expr(expr: &str) -> Result<(), String> {
-    parse_expr(expr.trim()).map(|_| ()).map_err(|e| e.to_string())
+    parse_expr(expr.trim())
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// Alias prefixes referenced in `alias.field` identifiers within an expression
@@ -324,7 +403,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
             _ if c.is_ascii_alphabetic() || c == '_' || c == ':' || c == '.' || c == '{' => {
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
-                    if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' || ch == '.' || ch == '{' || ch == '}' {
+                    if ch.is_ascii_alphanumeric()
+                        || ch == '_'
+                        || ch == ':'
+                        || ch == '.'
+                        || ch == '{'
+                        || ch == '}'
+                    {
                         ident.push(ch);
                         chars.next();
                     } else {
@@ -584,7 +669,7 @@ fn compare(left: &str, right: &str, op: CmpOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
+    use intermed_doctor_core::facts::{FactStore, kind};
 
     #[test]
     fn referenced_aliases_extracts_idents_and_skips_settings() {

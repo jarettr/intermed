@@ -7,15 +7,15 @@
 
 use std::path::Path;
 
-use duckdb::{params, AccessMode, Config, Connection};
+use duckdb::{AccessMode, Config, Connection, params};
 use intermed_doctor_core::report::DoctorReport;
 use intermed_facts::Fact;
 use thiserror::Error;
 
 use crate::schema::{
-    delete_run_statements, materialize_facts_only, materialize_run, FactAttributeRow, FactRow,
-    FindingAffectsRow, FindingEvidenceRow, FindingRow, FindingTagRow, MaterializedRun, RunRow,
-    SCHEMA_DDL,
+    FactAttributeRow, FactRow, FindingAffectsRow, FindingEvidenceRow, FindingRow, FindingTagRow,
+    MaterializedRun, RunRow, SCHEMA_DDL, delete_run_statements, materialize_facts_only,
+    materialize_run,
 };
 
 /// Query result for `intermed db query`.

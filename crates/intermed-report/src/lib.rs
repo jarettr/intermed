@@ -9,14 +9,15 @@ use intermed_doctor_core::DoctorReport;
 use intermed_facts::Fact;
 
 mod demo;
+pub mod grouping;
 mod html;
 mod sarif;
 mod terminal;
 
 pub use demo::{
-    build_demo_report, render_markdown as render_demo_markdown, render_html as render_demo_html,
-    write_demo_artifacts, DemoArtifacts, DemoReport, DemoReportError, DEMO_REPORT_HTML,
-    DEMO_REPORT_JSON, DEMO_REPORT_SCHEMA, DEMO_SUMMARY_MD,
+    DEMO_REPORT_HTML, DEMO_REPORT_JSON, DEMO_REPORT_SCHEMA, DEMO_SUMMARY_MD, DemoArtifacts,
+    DemoReport, DemoReportError, build_demo_report, render_html as render_demo_html,
+    render_markdown as render_demo_markdown, write_demo_artifacts,
 };
 pub use html::{render_html, render_html_with_facts};
 pub use sarif::{to_sarif, to_sarif_with_facts};
@@ -44,9 +45,7 @@ pub fn render(report: &DoctorReport, format: Format) -> String {
 /// (SARIF physical locations, the HTML provenance/heatmap/explorer tabs).
 pub fn render_with_facts(report: &DoctorReport, facts: &[Fact], format: Format) -> String {
     match format {
-        Format::Terminal { color } => {
-            terminal::render_terminal_with_facts(report, color, facts)
-        }
+        Format::Terminal { color } => terminal::render_terminal_with_facts(report, color, facts),
         Format::Json => serde_json::to_string_pretty(report)
             .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
         Format::Sarif => serde_json::to_string_pretty(&to_sarif_with_facts(report, facts))
@@ -64,7 +63,7 @@ pub fn render_with_facts(report: &DoctorReport, facts: &[Fact], format: Format) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::report::{assemble, RuleStat};
+    use intermed_doctor_core::report::{RuleStat, assemble};
     use intermed_doctor_core::{Target, TargetKind};
     use intermed_evidence::{Category, Finding, Severity};
     use intermed_facts::FactStore;
@@ -77,16 +76,18 @@ mod tests {
             .attr("loader", "fabric")
             .attr("mc_version", "1.20.1")
             .emit();
-        let findings = vec![Finding::builder(
-            "missing-dependency",
-            "missing-dependency:create->fabric-api",
-        )
-        .severity(Severity::Error)
-        .category(Category::Dependency)
-        .title("Missing dependency: fabric-api")
-        .explanation("create requires fabric-api.")
-        .affects("create")
-        .build()];
+        let findings = vec![
+            Finding::builder(
+                "missing-dependency",
+                "missing-dependency:create->fabric-api",
+            )
+            .severity(Severity::Error)
+            .category(Category::Dependency)
+            .title("Missing dependency: fabric-api")
+            .explanation("create requires fabric-api.")
+            .affects("create")
+            .build(),
+        ];
         let target = Target {
             path: "./mods".into(),
             kind: TargetKind::ModsDir,

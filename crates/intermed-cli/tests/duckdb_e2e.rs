@@ -9,22 +9,18 @@ fn doctor_duckdb_logic_finds_duplicate_id() {
     let fixture = Fixture::new("duckdb-logic");
     fixture.write_duplicate_id_mods();
 
-    let output = run([
-        "doctor",
-        fixture.mods_str(),
-        "--logic",
-        "duckdb",
-        "--json",
-    ]);
+    let output = run(["doctor", fixture.mods_str(), "--logic", "duckdb", "--json"]);
     assert_eq!(output.status.code(), Some(2));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let findings = report["findings"].as_array().unwrap();
     assert!(findings.iter().any(|f| f["id"] == "duplicate-id:dupe"));
-    assert!(report["rules"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["id"] == "duckdb-rule-pack"));
+    assert!(
+        report["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == "duckdb-rule-pack")
+    );
 }
 
 #[test]
@@ -64,7 +60,16 @@ fn doctor_db_persist_and_query_round_trip() {
     ]);
     assert_success(&count);
     let stdout = String::from_utf8(count.stdout).unwrap();
-    let n: i64 = stdout.lines().nth(1).unwrap_or("0").trim().parse().unwrap();
+    // `parse().unwrap_or(0)`: the 2nd line may exist but not be a number if the
+    // CLI's output format changes or it emits an error/localized text — degrade
+    // to 0 (which fails the assertion below) instead of panicking on parse.
+    let n: i64 = stdout
+        .lines()
+        .nth(1)
+        .unwrap_or("0")
+        .trim()
+        .parse()
+        .unwrap_or(0);
     assert!(n >= 2, "expected resource_writer facts, got: {stdout}");
 }
 

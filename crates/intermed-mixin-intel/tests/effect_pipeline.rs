@@ -1,7 +1,7 @@
 //! Integration tests for effect modelling + recommendations end-to-end.
 
 use intermed_mixin_intel::fixtures;
-use intermed_mixin_intel::{scan_mods_dir, MixinOperation};
+use intermed_mixin_intel::{MixinOperation, scan_mods_dir};
 
 use std::io::Write;
 use std::path::Path;
@@ -40,14 +40,16 @@ fn scan_emits_effects_and_recommendations_for_hot_overwrite() {
 
     let scan = scan_mods_dir(&mods).unwrap();
     assert!(!scan.mixin_effects.is_empty());
-    assert!(scan
-        .mixin_effects
-        .iter()
-        .any(|e| e.operation == MixinOperation::Overwrite));
-    assert!(scan
-        .recommendations
-        .iter()
-        .any(|r| r.recommendation.title.contains("@Inject")));
+    assert!(
+        scan.mixin_effects
+            .iter()
+            .any(|e| e.operation == MixinOperation::Overwrite)
+    );
+    assert!(
+        scan.recommendations
+            .iter()
+            .any(|r| r.recommendation.title.contains("@Inject"))
+    );
     assert_eq!(scan.high_risk_overwrites.len(), 1);
     assert!(!scan.high_risk_overwrites[0].effect_description.is_empty());
     assert!(
@@ -80,11 +82,16 @@ fn handler_bytecode_fixture_produces_handler_effect_in_scan() {
     let scan = scan_mods_dir(&mods).unwrap();
     assert_eq!(scan.classes.len(), 1);
     let body = &scan.classes[0].handler_bodies;
-    assert!(body.iter().any(|b| b.uses_callback_info && b.handler_local_store));
-    assert!(scan.classes[0]
-        .effects
-        .iter()
-        .any(|e| !e.effect_description.is_empty()));
+    assert!(
+        body.iter()
+            .any(|b| b.uses_callback_info && b.handler_local_store)
+    );
+    assert!(
+        scan.classes[0]
+            .effects
+            .iter()
+            .any(|e| !e.effect_description.is_empty())
+    );
 
     std::fs::remove_dir_all(root).ok();
 }

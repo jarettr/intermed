@@ -15,9 +15,9 @@
 
 use std::collections::BTreeSet;
 
+use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
 use intermed_doctor_core::facts::kind;
-use intermed_doctor_core::RuleCtx;
 
 /// Resolve implicit-dependency candidates into findings.
 pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
@@ -34,20 +34,35 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     // Keep only candidates that are genuinely actionable, low-FP signals:
     // an unconditioned recipe serializer type whose namespace is neither installed,
     // nor an alias provider, nor a platform namespace.
-    let mut missing: Vec<(&str, &str)> = Vec::new(); // (namespace, sample recipe path)
+    // (namespace, sample path, total ref count) for the report's "referenced by" line.
+    let mut missing: Vec<(&str, &str, i64)> = Vec::new();
     // Candidates are already non-platform namespaces (Layer M excludes
-    // minecraft/forge/fabric/… when emitting them), so we only check installation.
+    // minecraft/forge/fabric/… when emitting them), so we only check installation —
+    // allowing for well-known namespace aliases (ae2 ↔ appliedenergistics2) so an
+    // installed mod under a different id is not flagged missing.
     for c in &candidates {
         let ns = c.subject.as_str();
-        if ns.is_empty() || installed.contains(ns) {
+        if ns.is_empty() {
             continue;
         }
-        let via_recipe_type = c.attr_bool("via_recipe_type").unwrap_or(false);
-        let required = c.attr_bool("required").unwrap_or(false);
-        if !via_recipe_type || !required {
+        // Trust the Layer-M resolve model (§18) when present: only a
+        // `required-missing` resolve state is actionable (it already folds in
+        // alias / platform / conditional awareness). Fall back to a local
+        // alias-aware check for candidates from an older Layer-M version.
+        let resolved_required_missing = match c.attr("resolve_state") {
+            Some(state) => state == "required-missing",
+            None => {
+                !intermed_resource_identity::is_satisfied_by(ns, &installed)
+                    && c.attr_bool("required").unwrap_or(false)
+            }
+        };
+        // Scope to recipe serializers — the lowest-false-positive signal (a missing
+        // serializer hard-fails the recipe load).
+        if !resolved_required_missing || !c.attr_bool("via_recipe_type").unwrap_or(false) {
             continue;
         }
-        missing.push((ns, c.attr("from_path").unwrap_or("")));
+        let ref_count = c.attr_int("ref_count").unwrap_or(1);
+        missing.push((ns, c.attr("from_path").unwrap_or(""), ref_count));
     }
     if missing.is_empty() {
         return Vec::new();
@@ -55,7 +70,21 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     missing.sort_unstable();
     missing.dedup();
 
-    let names: Vec<&str> = missing.iter().map(|(ns, _)| *ns).collect();
+    let names: Vec<&str> = missing.iter().map(|(ns, _, _)| *ns).collect();
+    // Per-namespace provenance (roadmap §9.3): "<ns> referenced by <path> as recipe
+    // serializer (+N more)" — so the finding points at concrete files, not just names.
+    let referenced_by: String = missing
+        .iter()
+        .map(|(ns, path, count)| {
+            let more = if *count > 1 {
+                format!(" (+{} more)", count - 1)
+            } else {
+                String::new()
+            };
+            format!("{ns} referenced by {path} as recipe serializer{more}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     // Note, not Warn: a recipe referencing an uninstalled mod is most often an
     // *optional* compat add-on the author shipped unconditionally. It produces log
     // errors and dead recipes, worth surfacing — but it is rarely pack-breaking,
@@ -69,11 +98,10 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         ))
         .explanation(format!(
             "These namespaces are used as recipe serializer `type`s but no installed mod \
-             provides them: {}. A recipe whose serializer mod is absent fails to load (the game \
-             logs a data error), so the affected recipes silently do nothing. This is inferred \
-             from resources, not a declared dependency — if a namespace here is actually shipped \
-             by an installed mod under a different id, it is safe to ignore.",
-            names.join(", ")
+             provides them. {referenced_by}. A recipe whose serializer mod is absent fails to \
+             load (the game logs a data error), so the affected recipes silently do nothing. This \
+             is inferred from resources, not a declared dependency — if a namespace here is \
+             actually shipped by an installed mod under a different id, it is safe to ignore."
         ))
         .fix(FixCandidate::advice(
             "Install the mod that owns each namespace, or remove the data pack / add-on that \
@@ -160,13 +188,21 @@ mod tests {
         let findings = run(&store);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Note);
-        assert!(findings[0].affected_components.iter().any(|c| c == "thermal"));
+        assert!(
+            findings[0]
+                .affected_components
+                .iter()
+                .any(|c| c == "thermal")
+        );
     }
 
     #[test]
     fn installed_mod_namespace_is_not_flagged() {
         let mut store = FactStore::new();
-        store.fact("metadata-scanner", kind::MOD).subject("thermal").emit();
+        store
+            .fact("metadata-scanner", kind::MOD)
+            .subject("thermal")
+            .emit();
         candidate(&mut store, "thermal", true, true);
         assert!(run(&store).is_empty());
     }

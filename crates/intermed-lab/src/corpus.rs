@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{read_json, write_json_atomic, LabError};
+use crate::{LabError, read_json, write_json_atomic};
 
 /// Schema tag for the candidate-pool input.
 pub const CORPUS_CANDIDATES_SCHEMA: &str = "intermed-corpus-candidates-v1";

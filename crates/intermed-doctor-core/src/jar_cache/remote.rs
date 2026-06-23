@@ -67,7 +67,10 @@ mod tests {
         let tier = LocalDirRemoteTier::new(&dir);
         assert!(tier.get("collector\0v1\0abc").is_none());
         tier.put("collector\0v1\0abc", b"{\"payload\":1}");
-        assert_eq!(tier.get("collector\0v1\0abc").as_deref(), Some(&b"{\"payload\":1}"[..]));
+        assert_eq!(
+            tier.get("collector\0v1\0abc").as_deref(),
+            Some(&b"{\"payload\":1}"[..])
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

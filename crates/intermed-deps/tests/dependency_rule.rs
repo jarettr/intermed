@@ -1,5 +1,5 @@
 use intermed_deps::DependencyRule;
-use intermed_doctor_core::facts::{kind, FactStore, SourceRef};
+use intermed_doctor_core::facts::{FactStore, SourceRef, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 
 #[test]
@@ -27,9 +27,9 @@ fn wrong_mc_version_for_two_component_instance() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
@@ -56,16 +56,18 @@ fn missing_dependency_is_error() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DependencyRule.evaluate(&ctx);
-    assert!(findings
-        .iter()
-        .any(|f| f.id == "missing-dependency:alpha->fabric-api"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "missing-dependency:alpha->fabric-api")
+    );
 }
 
 #[test]
@@ -92,16 +94,18 @@ fn wrong_version_with_fabric_space_and_range() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DependencyRule.evaluate(&ctx);
-    assert!(findings
-        .iter()
-        .any(|f| f.id == "wrong-version:alpha->fabric-api"));
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.id == "wrong-version:alpha->fabric-api")
+    );
 }
 
 #[test]
@@ -123,9 +127,9 @@ fn snapshot_mc_version_is_undecidable() {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);

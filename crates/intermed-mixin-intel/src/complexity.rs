@@ -63,7 +63,12 @@ fn score_class(class: &MixinClassRecord) -> MixinClassComplexity {
             .sum();
         (w, class.operations.len() as u32)
     };
-    components.extend(component("injection surface", op_weight, 40, surface_measure));
+    components.extend(component(
+        "injection surface",
+        op_weight,
+        40,
+        surface_measure,
+    ));
 
     // (b) Peak per-handler bytecode complexity (already 0–100 from dataflow).
     let peak_handler = class
@@ -106,7 +111,12 @@ fn score_class(class: &MixinClassRecord) -> MixinClassComplexity {
 
     // (f) Hot-path target — complexity on a hot method costs more in practice.
     if !class.hot_paths.is_empty() {
-        components.extend(component("hot-path target", 6, 6, class.hot_paths.len() as u32));
+        components.extend(component(
+            "hot-path target",
+            6,
+            6,
+            class.hot_paths.len() as u32,
+        ));
     }
 
     let score = components.iter().map(|c| c.points).sum::<u32>().min(100) as u8;
@@ -174,9 +184,24 @@ pub fn compute_complexity(
             40,
             u32::from(peak_class_score),
         ));
-        components.extend(component("mixin class count", class_count * 2, 16, class_count));
-        components.extend(component("distinct targets", target_count, 20, target_count));
-        components.extend(component("injection volume", total_sites / 2, 14, total_sites));
+        components.extend(component(
+            "mixin class count",
+            class_count * 2,
+            16,
+            class_count,
+        ));
+        components.extend(component(
+            "distinct targets",
+            target_count,
+            20,
+            target_count,
+        ));
+        components.extend(component(
+            "injection volume",
+            total_sites / 2,
+            14,
+            total_sites,
+        ));
         components.extend(component(
             "cross-mod conflicts",
             conflict_edges * 4,
@@ -206,7 +231,7 @@ pub fn compute_complexity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MixinConflictEdgeRecord, ConflictEdgeType, ResolvedInjectionPoint};
+    use crate::model::{ConflictEdgeType, MixinConflictEdgeRecord, ResolvedInjectionPoint};
 
     fn class(mod_id: &str, name: &str, targets: &[&str], ops: &[&str]) -> MixinClassRecord {
         MixinClassRecord {
@@ -217,6 +242,7 @@ mod tests {
             class_path: format!("{name}.class"),
             targets: targets.iter().map(|t| t.to_string()).collect(),
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: Vec::new(),
             injected_methods: ops
                 .iter()
@@ -253,6 +279,9 @@ mod tests {
             hot_paths: Vec::new(),
             effects: Vec::new(),
             plugin_gated: false,
+            side: crate::model::Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 
@@ -268,9 +297,19 @@ mod tests {
 
     #[test]
     fn overwrite_multitarget_scores_higher_than_single_inject() {
-        let heavy = score_class(&class("a", "a.Heavy", &["T1", "T2", "T3"], &["overwrite", "redirect"]));
+        let heavy = score_class(&class(
+            "a",
+            "a.Heavy",
+            &["T1", "T2", "T3"],
+            &["overwrite", "redirect"],
+        ));
         let light = score_class(&class("b", "b.Light", &["T1"], &["inject"]));
-        assert!(heavy.score > light.score, "heavy {} vs light {}", heavy.score, light.score);
+        assert!(
+            heavy.score > light.score,
+            "heavy {} vs light {}",
+            heavy.score,
+            light.score
+        );
     }
 
     #[test]
@@ -292,7 +331,14 @@ mod tests {
         let a_before = no_edges.iter().find(|m| m.mod_id == "a").unwrap().score;
         let a_after = with_edges.iter().find(|m| m.mod_id == "a").unwrap().score;
         assert!(a_after > a_before, "{a_after} should exceed {a_before}");
-        assert_eq!(with_edges.iter().find(|m| m.mod_id == "a").unwrap().conflict_edges, 1);
+        assert_eq!(
+            with_edges
+                .iter()
+                .find(|m| m.mod_id == "a")
+                .unwrap()
+                .conflict_edges,
+            1
+        );
     }
 
     #[test]

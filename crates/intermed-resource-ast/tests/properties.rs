@@ -6,7 +6,7 @@
 //! resource can ever panic the parser.
 
 use intermed_resource_ast::model::ResourceSummary;
-use intermed_resource_ast::{parse_resource, ResourceLevel};
+use intermed_resource_ast::{ResourceLevel, parse_resource};
 use proptest::prelude::*;
 
 /// A namespaced id like `ns:path` from constrained chars (valid Minecraft ids).

@@ -1,0 +1,42 @@
+[package]
+name = "intermed-columnar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "In-process columnar (Apache Arrow) query engine over the fact store: relational IR, optimizing planner, FastRow/Vectorized execution. The default --logic backend."
+
+[dependencies]
+intermed-facts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Pinned to the version DuckDB 1.2 bundles, so Arrow batches can later be handed
+# to DuckDB / Souffle zero-copy via the (ABI-stable) Arrow C Data Interface.
+arrow = { version = "58", default-features = false, features = ["ffi"] }
+# Fast hashing for the in-process hash join / hash aggregate operators. Already in
+# the workspace lock (pulled by arrow), so no new offline dependency.
+ahash = "0.8"
+thiserror = { workspace = true }
+
+# ── Optional engines/backends (feature-gated; NOT in the default build) ──
+# Real WASM sandbox for CallExternal (Phase 4.1).
+wasmtime = { version = "45", optional = true }
+wat = { version = "1", optional = true }
+# DataFusion query backend (uses the same arrow 58 — no version duplication; Phase 4.2).
+datafusion = { version = "54", optional = true }
+tokio = { version = "1", optional = true, features = ["rt"] }
+# Polars query backend (carries its own arrow fork; Phase 4.2).
+polars = { version = "0.54", optional = true, default-features = false, features = ["lazy"] }
+# Ascent (Rust Datalog) backend for the recursive fragment (Phase 4.2).
+ascent = { version = "0.8", optional = true }
+
+[features]
+default = []
+# A real Wasmtime sandbox implementing `ExternalFunction` over a JSON ABI.
+wasm = ["dep:wasmtime", "dep:wat"]
+# A `QueryBackend` that runs the IR's SQL form on Apache DataFusion.
+datafusion-backend = ["dep:datafusion", "dep:tokio"]
+# A `QueryBackend` that runs the IR on Polars LazyFrames.
+polars-backend = ["dep:polars"]
+# An `ascent` (Rust Datalog) backend for transitive closure / reachability.
+ascent-backend = ["dep:ascent"]

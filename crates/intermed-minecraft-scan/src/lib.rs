@@ -14,5 +14,5 @@ mod knowledge;
 mod metadata;
 
 pub use env::EnvironmentCollector;
-pub use identity::{detect_from_zip as detect_artifact_identity, mod_id_or_stem, ArtifactIdentity};
+pub use identity::{ArtifactIdentity, detect_from_zip as detect_artifact_identity, mod_id_or_stem};
 pub use metadata::MetadataCollector;

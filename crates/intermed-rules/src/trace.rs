@@ -61,7 +61,11 @@ pub fn trace_pack(pack: &RulePack, ctx: &RuleCtx<'_>) -> Vec<RuleTraceLine> {
 fn count_input_facts(ctx: &RuleCtx<'_>, spec: &crate::RuleSpec) -> usize {
     match spec.kind {
         RuleKind::Join => {
-            let left = spec.left.as_ref().map(|l| ctx.store.by_kind(&l.kind).count()).unwrap_or(0);
+            let left = spec
+                .left
+                .as_ref()
+                .map(|l| ctx.store.by_kind(&l.kind).count())
+                .unwrap_or(0);
             let right = spec
                 .right
                 .as_ref()
@@ -123,9 +127,9 @@ pub fn format_trace(lines: &[RuleTraceLine]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore};
-    use intermed_doctor_core::{Target, TargetKind};
     use crate::pack::default_core_pack_v2;
+    use intermed_doctor_core::facts::{FactStore, kind};
+    use intermed_doctor_core::{Target, TargetKind};
 
     #[test]
     fn trace_runs_without_panic() {

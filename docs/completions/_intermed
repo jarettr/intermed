@@ -15,7 +15,7 @@ _intermed() {
 
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -36,10 +36,9 @@ _intermed() {
             (doctor)
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
-'--logic=[Rule backend selection. Imperative remains the stable fallback]:LOGIC:((imperative\:""
-datalog\:""
-souffle\:""
-duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`)"))' \
+'--logic=[Rule backend. The in-process columnar query engine is the default and only in-process engine; \`souffle\`/\`duckdb\` are optional external backends over the same IR (require their tool / build feature)]:LOGIC:((columnar\:"In-process columnar query engine (\`intermed-columnar\`)\: the default and only in-process engine — optimizing logical/physical planner with hash join/aggregate. Pure Rust, always available"
+souffle\:"Soufflé Datalog backend (requires the \`souffle\` binary). Same IR, external engine"
+duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Same IR"))' \
 '--jobs=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
 '--threads=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
 '(--json --sarif)--html=[Write a self-contained HTML report (\`index.html\` style)]:FILE:_files' \
@@ -62,7 +61,7 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`)"))'
 '--sbom-well-identified-trust=[SBOM trust score (0..=100) for well-identified jars (default\: 60)]:SCORE:_default' \
 '--log-parallel-line-threshold=[Log line count above which scanning uses parallel workers (default\: 4096)]:N:_default' \
 '--security-corroborated-confidence=[Confidence for reflection-corroborated security facts (default\: 0.4)]:SCORE:_default' \
-'--minecraft-jar=[Minecraft client/server jar to index for mixin apply-failure verification. Without it, apply-failure checks cover only mod-targeting mixins]:JAR:_files' \
+'--minecraft-jar=[Minecraft client/server jar to index. Powers two layers\: mixin apply-failure verification against vanilla classes (Layer F), and a vanilla resource index (Layer M) so \`minecraft\:\` references resolve and tags expand against real vanilla data instead of being assumed present]:JAR:_files' \
 '--minecraft-mappings=[Yarn/Mojmap Tiny v2 mappings (\`mappings.tiny\`) for named↔intermediary bridging during mixin apply-failure checks with \`--minecraft-jar\`]:FILE:_files' \
 '--mixin-level=[Mixin analysis preset\: \`normal\` (overlaps/risk only), \`detailed\` (+ recommendations), \`full\` (+ per-handler intelligence findings)]:LEVEL:(normal detailed full)' \
 '--db=[Persist this run to a DuckDB analytics file (requires \`--features duckdb\`)]:FILE:_files' \
@@ -70,7 +69,7 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`)"))'
 '--rule-pack-dir=[Rule pack install directory (default\: XDG \`.../intermed/rule-packs\`)]:DIR:_files' \
 '--rule-pack-trusted-keys=[Trusted publisher keys file for verifying signed rule pack overlays]:FILE:_files' \
 '--rule-pack-registry=[Registry index path or URL for resolving \`--rule-pack\` ids]:FILE|URL:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--mixin-risk[Enable Layer-F Mixin risk scanning during doctor]' \
 '(--sarif --html)--json[Emit the full report as \`intermed-doctor-report-v1\` JSON]' \
 '(--json --html)--sarif[Emit SARIF 2.1.0 (for IDE / CI code-scanning)]' \
@@ -97,7 +96,7 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`)"))'
 ;;
 (vfs)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -118,7 +117,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--path=[Explain a single resource path (e.g. \`data/create/recipes/crushing/tuff.json\`)]:RESOURCE_PATH:_default' \
 '--resource-level=[AST depth used by \`--ast\`\: \`semantic\` (default) or \`full\`]:LEVEL:(basic semantic full)' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--ast[Show the Layer-M typed AST view (domain, semantic diff, references) for \`--path\`. Requires \`--path\`]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
@@ -134,7 +133,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--path=[Explain a single resource path (e.g. \`data/create/recipes/crushing/tuff.json\`)]:RESOURCE_PATH:_default' \
 '--resource-level=[AST depth used by \`--ast\`\: \`semantic\` (default) or \`full\`]:LEVEL:(basic semantic full)' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--ast[Show the Layer-M typed AST view (domain, semantic diff, references) for \`--path\`. Requires \`--path\`]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
@@ -149,7 +148,7 @@ _arguments "${_arguments_options[@]}" : \
 (overlay)
 _arguments "${_arguments_options[@]}" : \
 '--out=[New output directory for the overlay preview]:OUT:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--include-unsafe-winners[Also stage order-dependent collisions by picking a lexical winner. These are previews, NOT safe fixes\: the manifest marks them safe_to_apply=false. By default only deterministic, order-independent merges are written]' \
 '--explain-plan[Print the semantic overlay plan (\`intermed-overlay-plan-v2\`\: safe / review / unsafe buckets) to stdout and exit — read-only, writes nothing]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
@@ -200,7 +199,7 @@ esac
 ;;
 (deps)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -220,7 +219,7 @@ _arguments "${_arguments_options[@]}" : \
             (graph)
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -233,13 +232,74 @@ _arguments "${_arguments_options[@]}" : \
 (resolve)
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '-h[Print help]' \
 '--help[Print help]' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(why)
+_arguments "${_arguments_options[@]}" : \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- The mod id or namespace to explain:_default' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(why-missing)
+_arguments "${_arguments_options[@]}" : \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- The mod id or namespace to explain:_default' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(implicit)
+_arguments "${_arguments_options[@]}" : \
+'--namespace=[The provider namespace to list implicit references for]:NS:_default' \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':from -- Source mod id:_default' \
+':to -- Target mod id / namespace:_default' \
 '::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
 && ret=0
 ;;
@@ -263,6 +323,105 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(why)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(why-missing)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(implicit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(impact)
+_arguments "${_arguments_options[@]}" : \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+":: :_intermed__subcmd__impact_commands" \
+"*::: :->impact" \
+&& ret=0
+
+    case $state in
+    (impact)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:intermed-impact-command-$line[1]:"
+        case $line[1] in
+            (remove)
+_arguments "${_arguments_options[@]}" : \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- The mod id / namespace to remove:_default' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(update)
+_arguments "${_arguments_options[@]}" : \
+'--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--json[Emit machine-readable JSON instead of text]' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':id -- The mod id to update:_default' \
+':from -- Current version (use `-` to omit and only check the target version):_default' \
+':to -- Proposed new version:_default' \
+'::target -- Mods directory or instance/server directory. Defaults to current dir:_files' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_intermed__subcmd__impact__subcmd__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:intermed-impact-help-command-$line[1]:"
+        case $line[1] in
+            (remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(update)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -283,7 +442,7 @@ dot\:""
 graphml\:""
 html\:""))' \
 '--graph-out=[Write graph export to file (stdout when omitted for dot/graphml)]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--no-color[Accepted for script consistency; Mixin Map output currently has no ANSI colour]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
@@ -297,7 +456,7 @@ html\:""))' \
 (spark-map)
 _arguments "${_arguments_options[@]}" : \
 '--spark-report=[Explicit spark report JSON (\`intermed-spark-report-v1\`)]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--no-color[Accepted for script consistency; Spark Map output currently has no ANSI colour]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
@@ -310,7 +469,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (lab)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -330,7 +489,7 @@ _arguments "${_arguments_options[@]}" : \
             (discover)
 _arguments "${_arguments_options[@]}" : \
 '--out=[Output lock path]:OUT:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -345,7 +504,7 @@ _arguments "${_arguments_options[@]}" : \
 '--logs=[Directory of captured smoke outputs (\`intermed-smoke-output-v1\` JSON)]:LOGS:_files' \
 '--out=[Output directory for the run artifact (\`lab-run.json\`)]:OUT:_files' \
 '--lab-excerpt-max=[Maximum characters kept from a failure log excerpt (default\: 280)]:N:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -358,7 +517,7 @@ _arguments "${_arguments_options[@]}" : \
 (report)
 _arguments "${_arguments_options[@]}" : \
 '--out=[Output directory for \`matrix.json\` + \`index.html\`]:OUT:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -375,7 +534,7 @@ _arguments "${_arguments_options[@]}" : \
 '--run=[A single lab run JSON (\`intermed-lab-run-v1\`); use with \`--report\`]:RUN:_files' \
 '--min-severity=[Minimum prediction severity that counts as "flagged"]:MIN_SEVERITY:(note warn error)' \
 '--out=[Output accuracy report path (\`intermed-rule-accuracy-v3\`)]:OUT:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -426,7 +585,7 @@ esac
 ;;
 (rules)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -447,7 +606,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--trusted-keys=[Trusted publisher public keys (one base64 key per line)]:FILE:_files' \
 '--facts=[Fact snapshot JSON for \`--trace\` (from \`doctor --dump-facts\`)]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--require-signature[Require a valid Ed25519 signature on v2 packs]' \
 '--trace[Dry-run\: evaluate each rule against facts JSON and print a trace table]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
@@ -461,15 +620,18 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (generate)
 _arguments "${_arguments_options[@]}" : \
-'--backend=[Output backend\: sql, rust, or datalog]:BACKEND:(sql rust datalog)' \
+'--backend=[Output backend\: sql, rust, or datalog]:BACKEND:((sql\:""
+rust\:""
+datalog\:""
+explain\:"Columnar query-engine \`EXPLAIN\` (logical + physical plan + engines) per rule"))' \
 '--out=[Write to file instead of stdout]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '::pack -- Rule pack JSON/YAML (default\: embedded core v2 when empty or missing):_files' \
 && ret=0
 ;;
@@ -477,7 +639,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--key=[Ed25519 seed file (32 raw bytes or base64 text)]:FILE:_files' \
 '--out=[Output signed pack path (default\: overwrite input)]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -490,7 +652,7 @@ _arguments "${_arguments_options[@]}" : \
 (verify)
 _arguments "${_arguments_options[@]}" : \
 '--trusted-keys=[Trusted publisher public keys (one base64 key per line)]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -506,7 +668,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pack=[Pack id to refresh (default\: intermed-core)]:PACK_ID:_default' \
 '--install-dir=[Install directory (default\: XDG data/intermed/rule-packs)]:DIR:_files' \
 '--trusted-keys=[Trusted publisher public keys (one base64 key per line) to pin signatures against]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries/packs (insecure; HTTPS is required by default)]' \
 '--allow-unsigned-rules[Accept unsigned, or signed-but-unpinned, remote rule packs]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
@@ -520,7 +682,7 @@ _arguments "${_arguments_options[@]}" : \
 (registry)
 _arguments "${_arguments_options[@]}" : \
 '--registry=[Registry index JSON or URL. Defaults to the embedded InterMed registry]:FILE|URL:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries (insecure; HTTPS is required by default)]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
@@ -536,7 +698,7 @@ _arguments "${_arguments_options[@]}" : \
 '--pack=[]:PACK_ID:_default' \
 '--install-dir=[]:DIR:_files' \
 '--trusted-keys=[]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries/packs (insecure; HTTPS is required by default)]' \
 '--allow-unsigned-rules[Accept unsigned, or signed-but-unpinned, remote rule packs]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
@@ -545,6 +707,20 @@ _arguments "${_arguments_options[@]}" : \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '-h[Print help]' \
 '--help[Print help]' \
+&& ret=0
+;;
+(explain)
+_arguments "${_arguments_options[@]}" : \
+'--rule=[Explain only this rule id (default\: every lowerable rule)]:ID:_default' \
+'--facts=[A \`doctor --dump-facts\` JSON file\: enables EXPLAIN ANALYZE on those real facts]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
+'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
+'*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
+'-h[Print help]' \
+'--help[Print help]' \
+'::pack -- Rule pack JSON/YAML (default\: embedded core v2 when empty or missing):_files' \
 && ret=0
 ;;
 (help)
@@ -587,6 +763,10 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(explain)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
 (help)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
@@ -601,7 +781,7 @@ esac
 ;;
 (db)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -621,7 +801,7 @@ _arguments "${_arguments_options[@]}" : \
             (query)
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -661,7 +841,7 @@ esac
 ;;
 (history)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -682,7 +862,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--since=[Relative look-back window (\`30d\`, \`7d\`, \`24h\`). Default\: 30d]:DURATION:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -695,7 +875,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--limit=[Maximum patterns to show (highest severity / most recurring first)]:N:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -709,7 +889,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[]:FILE:_files' \
 '--run-a=[]:RUN_ID:_default' \
 '--run-b=[]:RUN_ID:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit structured JSON (\`intermed-history-diff-v1\`) instead of TSV]' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
@@ -723,7 +903,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[]:FILE:_files' \
 '--keep=[Keep runs within this window (\`90d\`, \`30d\`). Older runs are deleted]:DURATION:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -774,7 +954,7 @@ esac
 ;;
 (trends)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -794,7 +974,7 @@ _arguments "${_arguments_options[@]}" : \
             (mixin-risk)
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -807,7 +987,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--limit=[Number of rows to return (default\: 10)]:LIMIT:_default' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -850,7 +1030,7 @@ esac
 ;;
 (cache)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -870,7 +1050,7 @@ _arguments "${_arguments_options[@]}" : \
             (stats)
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -882,7 +1062,7 @@ _arguments "${_arguments_options[@]}" : \
 (prune)
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -894,7 +1074,7 @@ _arguments "${_arguments_options[@]}" : \
 (clear)
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -941,7 +1121,7 @@ esac
 ;;
 (sbom)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -963,7 +1143,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[]:MODS_DIR:_files' \
 '--format=[]:FORMAT:(spdx-json cyclonedx-json)' \
 '--out=[]:FILE:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1003,7 +1183,7 @@ esac
 ;;
 (demo)
 _arguments "${_arguments_options[@]}" : \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1024,7 +1204,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '-o+[Output directory for \`intermed-atlauncher-demo-summary.md\`, \`intermed-demo-report.html\`, and JSON]:OUT:_files' \
 '--out=[Output directory for \`intermed-atlauncher-demo-summary.md\`, \`intermed-demo-report.html\`, and JSON]:OUT:_files' \
-'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/CONFIG.md]:FILE:_files' \
+'--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1126,6 +1306,46 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
+(why)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(why-missing)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(implicit)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(path)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(impact)
+_arguments "${_arguments_options[@]}" : \
+":: :_intermed__subcmd__help__subcmd__impact_commands" \
+"*::: :->impact" \
+&& ret=0
+
+    case $state in
+    (impact)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:intermed-help-impact-command-$line[1]:"
+        case $line[1] in
+            (remove)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(update)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
         esac
     ;;
 esac
@@ -1207,6 +1427,10 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(explain)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1376,7 +1600,8 @@ _intermed_commands() {
     local commands; commands=(
 'doctor:Diagnose a server, instance, mods directory, or log/crash file' \
 'vfs:Inspect resource/data overrides and generate overlay previews' \
-'deps:Layer-C dependency graph and PubGrub resolution' \
+'deps:Layer-C dependency graph, resolution, and explainable queries' \
+'impact:Blast-radius analysis for removing or updating a mod' \
 'mixin-map:Inspect static Mixin targets, overlaps, and overwrite risks' \
 'spark-map:Import and summarize Spark performance reports' \
 'lab:Compatibility Lab\: corpus locks, smoke-test ingestion, matrices' \
@@ -1513,6 +1738,10 @@ _intermed__subcmd__deps_commands() {
     local commands; commands=(
 'graph:Export the modpack dependency graph (\`intermed-modpack-graph-v1\` JSON)' \
 'resolve:Run PubGrub resolution and emit \`intermed-deps-resolution-v1\` JSON' \
+'why:Explain why a mod/namespace is depended upon (declared + implicit reasons)' \
+'why-missing:Explain why an absent dependency is required (the requiring edges)' \
+'implicit:List implicit references into a namespace (resource-derived dependencies)' \
+'path:Find a dependency chain between two mods (\`deps path <from> <to>\`)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'intermed deps commands' commands "$@"
@@ -1527,6 +1756,10 @@ _intermed__subcmd__deps__subcmd__help_commands() {
     local commands; commands=(
 'graph:Export the modpack dependency graph (\`intermed-modpack-graph-v1\` JSON)' \
 'resolve:Run PubGrub resolution and emit \`intermed-deps-resolution-v1\` JSON' \
+'why:Explain why a mod/namespace is depended upon (declared + implicit reasons)' \
+'why-missing:Explain why an absent dependency is required (the requiring edges)' \
+'implicit:List implicit references into a namespace (resource-derived dependencies)' \
+'path:Find a dependency chain between two mods (\`deps path <from> <to>\`)' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'intermed deps help commands' commands "$@"
@@ -1541,15 +1774,55 @@ _intermed__subcmd__deps__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'intermed deps help help commands' commands "$@"
 }
+(( $+functions[_intermed__subcmd__deps__subcmd__help__subcmd__implicit_commands] )) ||
+_intermed__subcmd__deps__subcmd__help__subcmd__implicit_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps help implicit commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__help__subcmd__path_commands] )) ||
+_intermed__subcmd__deps__subcmd__help__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps help path commands' commands "$@"
+}
 (( $+functions[_intermed__subcmd__deps__subcmd__help__subcmd__resolve_commands] )) ||
 _intermed__subcmd__deps__subcmd__help__subcmd__resolve_commands() {
     local commands; commands=()
     _describe -t commands 'intermed deps help resolve commands' commands "$@"
 }
+(( $+functions[_intermed__subcmd__deps__subcmd__help__subcmd__why_commands] )) ||
+_intermed__subcmd__deps__subcmd__help__subcmd__why_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps help why commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__help__subcmd__why-missing_commands] )) ||
+_intermed__subcmd__deps__subcmd__help__subcmd__why-missing_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps help why-missing commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__implicit_commands] )) ||
+_intermed__subcmd__deps__subcmd__implicit_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps implicit commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__path_commands] )) ||
+_intermed__subcmd__deps__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps path commands' commands "$@"
+}
 (( $+functions[_intermed__subcmd__deps__subcmd__resolve_commands] )) ||
 _intermed__subcmd__deps__subcmd__resolve_commands() {
     local commands; commands=()
     _describe -t commands 'intermed deps resolve commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__why_commands] )) ||
+_intermed__subcmd__deps__subcmd__why_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps why commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__deps__subcmd__why-missing_commands] )) ||
+_intermed__subcmd__deps__subcmd__why-missing_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed deps why-missing commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__doctor_commands] )) ||
 _intermed__subcmd__doctor_commands() {
@@ -1561,7 +1834,8 @@ _intermed__subcmd__help_commands() {
     local commands; commands=(
 'doctor:Diagnose a server, instance, mods directory, or log/crash file' \
 'vfs:Inspect resource/data overrides and generate overlay previews' \
-'deps:Layer-C dependency graph and PubGrub resolution' \
+'deps:Layer-C dependency graph, resolution, and explainable queries' \
+'impact:Blast-radius analysis for removing or updating a mod' \
 'mixin-map:Inspect static Mixin targets, overlaps, and overwrite risks' \
 'spark-map:Import and summarize Spark performance reports' \
 'lab:Compatibility Lab\: corpus locks, smoke-test ingestion, matrices' \
@@ -1629,6 +1903,10 @@ _intermed__subcmd__help__subcmd__deps_commands() {
     local commands; commands=(
 'graph:Export the modpack dependency graph (\`intermed-modpack-graph-v1\` JSON)' \
 'resolve:Run PubGrub resolution and emit \`intermed-deps-resolution-v1\` JSON' \
+'why:Explain why a mod/namespace is depended upon (declared + implicit reasons)' \
+'why-missing:Explain why an absent dependency is required (the requiring edges)' \
+'implicit:List implicit references into a namespace (resource-derived dependencies)' \
+'path:Find a dependency chain between two mods (\`deps path <from> <to>\`)' \
     )
     _describe -t commands 'intermed help deps commands' commands "$@"
 }
@@ -1637,10 +1915,30 @@ _intermed__subcmd__help__subcmd__deps__subcmd__graph_commands() {
     local commands; commands=()
     _describe -t commands 'intermed help deps graph commands' commands "$@"
 }
+(( $+functions[_intermed__subcmd__help__subcmd__deps__subcmd__implicit_commands] )) ||
+_intermed__subcmd__help__subcmd__deps__subcmd__implicit_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help deps implicit commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__deps__subcmd__path_commands] )) ||
+_intermed__subcmd__help__subcmd__deps__subcmd__path_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help deps path commands' commands "$@"
+}
 (( $+functions[_intermed__subcmd__help__subcmd__deps__subcmd__resolve_commands] )) ||
 _intermed__subcmd__help__subcmd__deps__subcmd__resolve_commands() {
     local commands; commands=()
     _describe -t commands 'intermed help deps resolve commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__deps__subcmd__why_commands] )) ||
+_intermed__subcmd__help__subcmd__deps__subcmd__why_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help deps why commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__deps__subcmd__why-missing_commands] )) ||
+_intermed__subcmd__help__subcmd__deps__subcmd__why-missing_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help deps why-missing commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__help__subcmd__doctor_commands] )) ||
 _intermed__subcmd__help__subcmd__doctor_commands() {
@@ -1681,6 +1979,24 @@ _intermed__subcmd__help__subcmd__history__subcmd__patterns_commands() {
 _intermed__subcmd__help__subcmd__history__subcmd__prune_commands() {
     local commands; commands=()
     _describe -t commands 'intermed help history prune commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__impact_commands] )) ||
+_intermed__subcmd__help__subcmd__impact_commands() {
+    local commands; commands=(
+'remove:Blast radius of removing a mod (reverse resource graph + dependents)' \
+'update:Blast radius of bumping a mod'\''s version (which declared ranges reject it)' \
+    )
+    _describe -t commands 'intermed help impact commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__impact__subcmd__remove_commands] )) ||
+_intermed__subcmd__help__subcmd__impact__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help impact remove commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__impact__subcmd__update_commands] )) ||
+_intermed__subcmd__help__subcmd__impact__subcmd__update_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help impact update commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__help__subcmd__lab_commands] )) ||
 _intermed__subcmd__help__subcmd__lab_commands() {
@@ -1727,6 +2043,7 @@ _intermed__subcmd__help__subcmd__rules_commands() {
 'update:Refresh an installed pack from the registry (embedded core by default)' \
 'registry:List packs in a registry index (embedded default if omitted)' \
 'install:Install a pack and its registry dependencies into XDG rule-packs' \
+'explain:Show the query-engine plan (EXPLAIN, and EXPLAIN ANALYZE with \`--facts\`) per rule' \
     )
     _describe -t commands 'intermed help rules commands' commands "$@"
 }
@@ -1734,6 +2051,11 @@ _intermed__subcmd__help__subcmd__rules_commands() {
 _intermed__subcmd__help__subcmd__rules__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'intermed help rules check commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__help__subcmd__rules__subcmd__explain_commands] )) ||
+_intermed__subcmd__help__subcmd__rules__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed help rules explain commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__help__subcmd__rules__subcmd__generate_commands] )) ||
 _intermed__subcmd__help__subcmd__rules__subcmd__generate_commands() {
@@ -1891,6 +2213,49 @@ _intermed__subcmd__history__subcmd__prune_commands() {
     local commands; commands=()
     _describe -t commands 'intermed history prune commands' commands "$@"
 }
+(( $+functions[_intermed__subcmd__impact_commands] )) ||
+_intermed__subcmd__impact_commands() {
+    local commands; commands=(
+'remove:Blast radius of removing a mod (reverse resource graph + dependents)' \
+'update:Blast radius of bumping a mod'\''s version (which declared ranges reject it)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'intermed impact commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__help_commands] )) ||
+_intermed__subcmd__impact__subcmd__help_commands() {
+    local commands; commands=(
+'remove:Blast radius of removing a mod (reverse resource graph + dependents)' \
+'update:Blast radius of bumping a mod'\''s version (which declared ranges reject it)' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'intermed impact help commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__help__subcmd__help_commands] )) ||
+_intermed__subcmd__impact__subcmd__help__subcmd__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed impact help help commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__help__subcmd__remove_commands] )) ||
+_intermed__subcmd__impact__subcmd__help__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed impact help remove commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__help__subcmd__update_commands] )) ||
+_intermed__subcmd__impact__subcmd__help__subcmd__update_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed impact help update commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__remove_commands] )) ||
+_intermed__subcmd__impact__subcmd__remove_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed impact remove commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__impact__subcmd__update_commands] )) ||
+_intermed__subcmd__impact__subcmd__update_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed impact update commands' commands "$@"
+}
 (( $+functions[_intermed__subcmd__lab_commands] )) ||
 _intermed__subcmd__lab_commands() {
     local commands; commands=(
@@ -1973,6 +2338,7 @@ _intermed__subcmd__rules_commands() {
 'update:Refresh an installed pack from the registry (embedded core by default)' \
 'registry:List packs in a registry index (embedded default if omitted)' \
 'install:Install a pack and its registry dependencies into XDG rule-packs' \
+'explain:Show the query-engine plan (EXPLAIN, and EXPLAIN ANALYZE with \`--facts\`) per rule' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'intermed rules commands' commands "$@"
@@ -1981,6 +2347,11 @@ _intermed__subcmd__rules_commands() {
 _intermed__subcmd__rules__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'intermed rules check commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__rules__subcmd__explain_commands] )) ||
+_intermed__subcmd__rules__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed rules explain commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__rules__subcmd__generate_commands] )) ||
 _intermed__subcmd__rules__subcmd__generate_commands() {
@@ -1997,6 +2368,7 @@ _intermed__subcmd__rules__subcmd__help_commands() {
 'update:Refresh an installed pack from the registry (embedded core by default)' \
 'registry:List packs in a registry index (embedded default if omitted)' \
 'install:Install a pack and its registry dependencies into XDG rule-packs' \
+'explain:Show the query-engine plan (EXPLAIN, and EXPLAIN ANALYZE with \`--facts\`) per rule' \
 'help:Print this message or the help of the given subcommand(s)' \
     )
     _describe -t commands 'intermed rules help commands' commands "$@"
@@ -2005,6 +2377,11 @@ _intermed__subcmd__rules__subcmd__help_commands() {
 _intermed__subcmd__rules__subcmd__help__subcmd__check_commands() {
     local commands; commands=()
     _describe -t commands 'intermed rules help check commands' commands "$@"
+}
+(( $+functions[_intermed__subcmd__rules__subcmd__help__subcmd__explain_commands] )) ||
+_intermed__subcmd__rules__subcmd__help__subcmd__explain_commands() {
+    local commands; commands=()
+    _describe -t commands 'intermed rules help explain commands' commands "$@"
 }
 (( $+functions[_intermed__subcmd__rules__subcmd__help__subcmd__generate_commands] )) ||
 _intermed__subcmd__rules__subcmd__help__subcmd__generate_commands() {

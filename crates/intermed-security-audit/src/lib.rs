@@ -17,12 +17,11 @@ mod detect;
 pub mod fixtures;
 
 pub use collapse::collapse_per_capability;
-pub use cp::{is_class_file, ClassEvidence, CLASS_MAGIC};
+pub use cp::{CLASS_MAGIC, ClassEvidence, is_class_file};
 pub use detect::{
-    combined_severity, corroborate_with_strings, detect_signals, security_finding_confidence,
-    should_emit_finding, should_emit_finding_with, structural_signals, DetectedSignal,
-    EvidenceStrength, SecuritySignal, SignalProvenance, CORROBORATED_CONFIDENCE,
-    MIN_NOTE_SIGNALS_FOR_FINDING,
+    CORROBORATED_CONFIDENCE, DetectedSignal, EvidenceStrength, MIN_NOTE_SIGNALS_FOR_FINDING,
+    SecuritySignal, SignalProvenance, combined_severity, corroborate_with_strings, detect_signals,
+    security_finding_confidence, should_emit_finding, should_emit_finding_with, structural_signals,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,7 +31,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
 };
@@ -291,8 +290,7 @@ impl SecurityModDraft {
                 .and_modify(|cur| *cur = (*cur).max(n as usize))
                 .or_insert(n as usize);
         }
-        let corroborated =
-            provenance == Some(SignalProvenance::ReflectionCorroborated.as_str());
+        let corroborated = provenance == Some(SignalProvenance::ReflectionCorroborated.as_str());
         if corroborated {
             self.corroborated_only.insert(signal);
         } else {
@@ -412,21 +410,22 @@ pub fn security_findings_from_drafts(
             draft.classes_scanned,
         );
 
-        let mut builder = Finding::builder("security-api-risk", format!("security-api-risk:{mod_id}"))
-            .severity(severity)
-            .category(Category::Security)
-            .confidence(confidence)
-            .title(format!(
-                "Mod `{mod_id}` — {} security API signal(s) in {} of {} class(es)",
-                draft.signals.len(),
-                draft.dangerous_classes,
-                draft.classes_scanned,
-            ))
-            .explanation(explanation)
-            .affects(&mod_id)
-            .fix(FixCandidate::advice(finding_advice(severity)))
-            .tag("security")
-            .tag("grouped");
+        let mut builder =
+            Finding::builder("security-api-risk", format!("security-api-risk:{mod_id}"))
+                .severity(severity)
+                .category(Category::Security)
+                .confidence(confidence)
+                .title(format!(
+                    "Mod `{mod_id}` — {} security API signal(s) in {} of {} class(es)",
+                    draft.signals.len(),
+                    draft.dangerous_classes,
+                    draft.classes_scanned,
+                ))
+                .explanation(explanation)
+                .affects(&mod_id)
+                .fix(FixCandidate::advice(finding_advice(severity)))
+                .tag("security")
+                .tag("grouped");
 
         if !draft.corroborated_only.is_empty() {
             builder = builder.tag("reflection-corroborated");
@@ -636,7 +635,9 @@ fn scan_jar(jar: &Path) -> Result<CachedSecurityPartial, SecurityScanError> {
             continue;
         }
         if classes_scanned >= MAX_CLASSES {
-            truncations.push(format!("stopped after {MAX_CLASSES} classes (archive has more)"));
+            truncations.push(format!(
+                "stopped after {MAX_CLASSES} classes (archive has more)"
+            ));
             break;
         }
         if entry.size() > MAX_CLASS_BYTES {
@@ -784,9 +785,18 @@ mod tests {
             .expect("one signal fact");
         // The DuckDB backend selects these via `val_int`; they MUST be typed Int,
         // not Str, or SQL aggregation silently reads NULL.
-        assert_eq!(fact.attributes.get("classes_scanned"), Some(&AttrValue::Int(42)));
-        assert_eq!(fact.attributes.get("dangerous_classes"), Some(&AttrValue::Int(7)));
-        assert_eq!(fact.attributes.get("affected_classes"), Some(&AttrValue::Int(3)));
+        assert_eq!(
+            fact.attributes.get("classes_scanned"),
+            Some(&AttrValue::Int(42))
+        );
+        assert_eq!(
+            fact.attributes.get("dangerous_classes"),
+            Some(&AttrValue::Int(7))
+        );
+        assert_eq!(
+            fact.attributes.get("affected_classes"),
+            Some(&AttrValue::Int(3))
+        );
     }
 
     #[test]

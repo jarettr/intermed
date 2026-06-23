@@ -7,16 +7,17 @@
 //! * [`sql_codegen`] / [`datalog_codegen`] — generate backend artifacts from the pack.
 //! * Imperative wrappers ([`DuplicateIdRule`], …) delegate to the same pack.
 
+mod columnar;
 mod convert;
-mod datalog_codegen;
 mod declarative;
 mod distribution;
-mod merge;
 mod expr;
-mod join_plan;
 mod generate;
 mod imperative;
 mod interpreter;
+mod ir_lowering;
+mod join_plan;
+mod merge;
 mod model;
 mod pack;
 mod signing;
@@ -27,45 +28,49 @@ mod trace;
 mod tsv;
 mod validate;
 
+pub use columnar::ColumnarRulePack;
 pub use convert::{convert_v1_to_v2, upgrade_pack_to_v2};
-pub use datalog_codegen::{
-    generate_pack_datalog, generate_pack_datalog_rules, GeneratedDatalogRule,
-};
-pub use declarative::{DeclarativeRulePack, DatalogRulePack};
+pub use declarative::{DatalogRulePack, DeclarativeRulePack};
 pub use distribution::{
-    install_pack_with_dependencies, list_installed_pack_paths, load_effective_registry,
-    merged_default_registry, resolve_doctor_packs, PackTrust, ResolvedRulePacks, RulePackSelection,
+    PackTrust, ResolvedRulePacks, RulePackSelection, install_pack_with_dependencies,
+    list_installed_pack_paths, load_effective_registry, merged_default_registry,
+    resolve_doctor_packs,
 };
-pub use merge::merge_rule_packs;
-pub use generate::{generate_rule_datalog_list, generate_rule_sql, generate_rules, GenerateBackend};
+pub use generate::{
+    GenerateBackend, explain_plans, generate_rule_datalog_list, generate_rule_sql, generate_rules,
+};
 pub use imperative::{
-    default_rules, DuplicateIdRule, LoaderMismatchRule, MixedLoaderPackRule, SideMismatchRule,
+    DuplicateIdRule, LoaderMismatchRule, MixedLoaderPackRule, SideMismatchRule, default_rules,
 };
-pub use interpreter::{dedupe_by_subject, evaluate_pack};
+pub use interpreter::{
+    EvidenceCache, dedupe_by_subject, evaluate_pack, fact_finding_findings,
+    group_distinct_findings, join_findings, matches_where_v1, matching_fact_ids,
+};
+pub use ir_lowering::{Lowering, rule_to_ir};
+pub use merge::merge_rule_packs;
 pub use model::{
-    FactSource, FindingTemplate, RelatedEvidenceSpec, RuleKind, RulePack, RuleSpec,
-    RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA,
+    FactSource, FindingTemplate, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA,
+    RelatedEvidenceSpec, RuleKind, RulePack, RuleSpec,
 };
 pub use pack::{
-    check_rule_packs, default_core_pack, default_core_pack_v2, default_core_pack_without_mixin,
-    load_rule_pack, normalize_pack,
-    parse_rule_pack, RulePackCheck,
+    RulePackCheck, check_rule_packs, default_core_pack, default_core_pack_v2,
+    default_core_pack_without_mixin, load_rule_pack, normalize_pack, parse_rule_pack,
 };
 pub use signing::{
-    canonical_digest, default_registry, default_rule_pack_install_dir, fetch_pack_for_entry,
-    fetch_url_limited, install_pack_from_registry, load_registry_from_source, load_signing_key,
-    load_trusted_keys, registry_to_json, sign_rule_pack, sign_rule_pack_now,
-    trusted_keys_for_publisher, trusted_keys_from_registry, verify_rule_pack_signature,
-    verify_rule_pack_trust, PackOrigin, PublisherInfo, RegistryPackEntry, RulePackSignature,
-    RuleRegistry, SigningError, TrustLevel, TrustPolicy, SIGNATURE_ALGORITHM,
+    PackOrigin, PublisherInfo, RegistryPackEntry, RulePackSignature, RuleRegistry,
+    SIGNATURE_ALGORITHM, SigningError, TrustLevel, TrustPolicy, canonical_digest, default_registry,
+    default_rule_pack_install_dir, fetch_pack_for_entry, fetch_url_limited,
+    install_pack_from_registry, load_registry_from_source, load_signing_key, load_trusted_keys,
+    registry_to_json, sign_rule_pack, sign_rule_pack_now, trusted_keys_for_publisher,
+    trusted_keys_from_registry, verify_rule_pack_signature, verify_rule_pack_trust,
 };
-pub use souffle::{souffle_available, souffle_program, SouffleRulePack};
+pub use souffle::{SouffleRulePack, souffle_available, souffle_program};
 pub use sql_codegen::{
-    generate_analytics_bundle, generate_pack_sql, prepare_analytics_views, prepare_sql, rule_to_sql,
-    GeneratedSqlRule, ANALYTICS_VIEW_DDL, HOT_PATH_EXPR,
+    ANALYTICS_VIEW_DDL, HOT_PATH_EXPR, generate_analytics_bundle, prepare_analytics_views,
+    prepare_sql,
 };
 pub use template::{parse_category, parse_severity, render_template};
-pub use trace::{format_trace, trace_pack, RuleTraceLine};
+pub use trace::{RuleTraceLine, format_trace, trace_pack};
 pub use tsv::{escape_souffle_symbol, escape_tsv_field};
 pub use validate::validate_rule_pack;
 
@@ -83,7 +88,7 @@ impl RulePackError {
 #[cfg(test)]
 mod logic_tests {
     use super::*;
-    use intermed_doctor_core::facts::{kind, FactStore, SourceRef};
+    use intermed_doctor_core::facts::{FactStore, SourceRef, kind};
     use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 
     #[test]
@@ -218,11 +223,15 @@ mod logic_tests {
 
     #[test]
     fn generated_souffle_program_declares_real_relations() {
+        // The generic IR-driven program declares the flat fact relations and emits
+        // an output relation per lowerable FactFinding rule.
         let program = souffle_program();
-        assert!(program.contains(".decl mod_decl"));
-        assert!(program.contains(".output duplicate_id"));
-        assert!(program.contains(".decl mixin_overlap_out"));
-        assert!(program.contains(".decl mixin_overwrite_out"));
+        assert!(program.contains(".decl fact(id:number, kind:symbol, subject:symbol)"));
+        assert!(program.contains(".decl fact_attr(id:number, key:symbol, val:symbol)"));
+        assert!(program.contains(".input fact"));
+        // At least one rule clause selecting matching ids.
+        assert!(program.contains(":- fact(id,"));
+        assert!(program.contains(".output r"));
     }
 
     #[test]

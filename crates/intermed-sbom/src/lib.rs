@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
 };
@@ -20,7 +20,7 @@ use thiserror::Error;
 
 mod export;
 
-pub use export::{export_scan, SbomExportFormat};
+pub use export::{SbomExportFormat, export_scan};
 
 const EXTRACTOR: &str = "sbom-generator";
 /// Cache key version for this collector's payload. The crate version invalidates
@@ -218,12 +218,7 @@ impl Collector for SbomCollector {
             .and_then(|p| p.parent())
             .or_else(|| ctx.target.path.parent());
         let corpus_ids = load_corpus_mod_ids(instance_root);
-        match scan_mods_dir_inner(
-            &dir,
-            ctx.jar_cache,
-            &ctx.settings.scan,
-            corpus_ids.as_ref(),
-        ) {
+        match scan_mods_dir_inner(&dir, ctx.jar_cache, &ctx.settings.scan, corpus_ids.as_ref()) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);
                 CollectorOutcome::active(
@@ -376,23 +371,26 @@ impl Rule for SbomProvenanceRule {
             }
             let archive = f.subject.as_str();
             out.push(
-                Finding::builder(self.id(), format!("unsigned-jar:{archive}"))
-                    .severity(Severity::Note)
-                    .category(Category::Security)
-                    .confidence(0.95)
-                    .title(format!("Jar is not JAR-signed: {archive}"))
-                    .explanation(
-                        "No META-INF/*.SF signature manifest was found. \
+                Finding::builder(
+                    self.id(),
+                    format!("artifact-signature-status:unsigned:{archive}"),
+                )
+                .severity(Severity::Note)
+                .category(Category::Security)
+                .confidence(0.95)
+                .title(format!("Jar is not JAR-signed: {archive}"))
+                .explanation(
+                    "No META-INF/*.SF signature manifest was found. \
                          Most Fabric/Forge mods ship unsigned; this is informational only.",
-                    )
-                    .evidence(EvidenceEdge::subject(f.id))
-                    .affects(archive)
-                    .fix(FixCandidate::advice(
-                        "Verify mod source manually if supply-chain trust matters.",
-                    ))
-                    .tag("sbom")
-                    .tag("signature")
-                    .build(),
+                )
+                .evidence(EvidenceEdge::subject(f.id))
+                .affects(archive)
+                .fix(FixCandidate::advice(
+                    "Verify mod source manually if supply-chain trust matters.",
+                ))
+                .tag("sbom")
+                .tag("signature")
+                .build(),
             );
         }
         out
@@ -747,12 +745,15 @@ fn json_loader_identity(v: &serde_json::Value, loader: &str) -> JarIdentity {
         .and_then(|x| x.as_str())
         .map(str::to_string);
     let platform = platform_from_json(v);
-    let has_contact = v.get("contact").and_then(|c| c.as_object()).is_some_and(|c| {
-        c.get("homepage")
-            .or_else(|| c.get("sources"))
-            .and_then(|x| x.as_str())
-            .is_some_and(|url| !url.is_empty())
-    });
+    let has_contact = v
+        .get("contact")
+        .and_then(|c| c.as_object())
+        .is_some_and(|c| {
+            c.get("homepage")
+                .or_else(|| c.get("sources"))
+                .and_then(|x| x.as_str())
+                .is_some_and(|url| !url.is_empty())
+        });
     JarIdentity {
         mod_id,
         version,

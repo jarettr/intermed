@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use intermed_doctor_core::{Target, TargetKind};
-use intermed_spark_bridge::{import_file, import_target, SPARK_REPORT_SCHEMA};
+use intermed_spark_bridge::{SPARK_REPORT_SCHEMA, import_file, import_target};
 
 #[test]
 fn import_file_validates_schema() {
@@ -34,9 +34,9 @@ fn import_target_reads_explicit_spark_report() {
         path: root.clone(),
         kind: TargetKind::Server,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: Some(report),
     };
     let import = import_target(&target).unwrap();

@@ -30,10 +30,7 @@ pub(crate) struct AccessDirective {
 
 /// Strip a trailing `#`/`//` comment and surrounding whitespace from one line.
 fn strip_comment(line: &str) -> &str {
-    let line = line
-        .split_once('#')
-        .map(|(head, _)| head)
-        .unwrap_or(line);
+    let line = line.split_once('#').map(|(head, _)| head).unwrap_or(line);
     let line = line.split_once("//").map(|(head, _)| head).unwrap_or(line);
     line.trim()
 }

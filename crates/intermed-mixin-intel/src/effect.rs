@@ -141,9 +141,7 @@ fn classify_effect_kinds(
         MixinOperation::ModifyReceiver => kinds.push(EffectiveEffectKind::ArgumentMutation),
         // `@WrapWithCondition` can skip the wrapped call entirely — semantically a
         // call-site seizure, like a conditional `@Redirect`.
-        MixinOperation::WrapWithCondition => {
-            kinds.push(EffectiveEffectKind::CallSiteReplacement)
-        }
+        MixinOperation::WrapWithCondition => kinds.push(EffectiveEffectKind::CallSiteReplacement),
         MixinOperation::Shadow
         | MixinOperation::Accessor
         | MixinOperation::Invoker
@@ -229,9 +227,13 @@ pub fn describe_effect(
             // Disposition by how many times the wrapped original is invoked —
             // the distinction Mak flags as "huge for compatibility".
             let disposition = match handler_effect.map(|h| h.original_call_count) {
-                Some(0) => " It never calls the original — behaves like a full @Redirect replacement.",
+                Some(0) => {
+                    " It never calls the original — behaves like a full @Redirect replacement."
+                }
                 Some(1) => " It calls the original exactly once (composable wrapper).",
-                Some(n) if n >= 2 => " It calls the original more than once — may duplicate side effects.",
+                Some(n) if n >= 2 => {
+                    " It calls the original more than once — may duplicate side effects."
+                }
                 _ => "",
             };
             parts.push(format!(
@@ -460,7 +462,10 @@ mod tests {
         he.cancels = true;
         he.conditional_control = true;
         let s = describe_control_flow(&he).unwrap();
-        assert!(s.contains("conditionally cancels the target method"), "got: {s}");
+        assert!(
+            s.contains("conditionally cancels the target method"),
+            "got: {s}"
+        );
 
         // Nothing proven → fall back to the heuristic (None).
         let quiet = handler_effect();
@@ -476,6 +481,7 @@ mod tests {
             class_path: "alpha/Mixin.class".into(),
             targets: vec!["net.minecraft.server.MinecraftServer".into()],
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: vec![MixinOperation::Inject],
             injected_methods: vec![ResolvedInjectionPoint {
                 target: "net.minecraft.server.MinecraftServer".into(),
@@ -509,7 +515,7 @@ mod tests {
                 return_count: 1,
                 exception_handlers: 0,
                 uses_reflection: false,
-                string_literals: Vec::new(),
+                reflective_targets: Vec::new(),
                 modifies_return_value: modifies_return,
                 throws_exception: false,
                 accesses_target_fields: Vec::new(),
@@ -526,6 +532,9 @@ mod tests {
             hot_paths: vec!["server-tick".into()],
             effects: Vec::new(),
             plugin_gated: false,
+            side: crate::model::Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 
@@ -535,9 +544,11 @@ mod tests {
         let mut record = inject_record("HEAD", false);
         record.injected_methods[0].mutates_target_local = true;
         let effects = compute_class_effects(&record);
-        assert!(effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::LocalMutation));
+        assert!(
+            effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::LocalMutation)
+        );
     }
 
     #[test]
@@ -547,9 +558,11 @@ mod tests {
         record.injected_methods[0].local_index = Some(3);
         record.injected_methods[0].mutates_target_local = false;
         let effects = compute_class_effects(&record);
-        assert!(!effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::LocalMutation));
+        assert!(
+            !effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::LocalMutation)
+        );
     }
 
     #[test]
@@ -560,12 +573,16 @@ mod tests {
         // Calls Operation.call → composable wrapper.
         record.handler_bodies[0].calls_original_operation = true;
         let effects = compute_class_effects(&record);
-        assert!(!effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::CallSiteReplacement));
-        assert!(effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::EntryModification));
+        assert!(
+            !effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::CallSiteReplacement)
+        );
+        assert!(
+            effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::EntryModification)
+        );
     }
 
     #[test]
@@ -586,7 +603,11 @@ mod tests {
         record.handler_bodies[0].calls_original_operation = false;
         record.handler_bodies[0].original_call_count = 0;
         let effects = compute_class_effects(&record);
-        assert!(effects[0].effect_description.contains("never calls the original"));
+        assert!(
+            effects[0]
+                .effect_description
+                .contains("never calls the original")
+        );
     }
 
     #[test]
@@ -596,9 +617,11 @@ mod tests {
         record.injected_methods[0].injection_type = "wrap-operation".into();
         record.handler_bodies[0].calls_original_operation = false;
         let effects = compute_class_effects(&record);
-        assert!(effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::CallSiteReplacement));
+        assert!(
+            effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::CallSiteReplacement)
+        );
     }
 
     #[test]
@@ -638,18 +661,22 @@ mod tests {
             .iter()
             .find(|e| e.site_key == "tick()V@HEAD#b")
             .unwrap();
-        assert!(second
-            .handler_effect
-            .as_ref()
-            .is_some_and(|h| h.modifies_return));
+        assert!(
+            second
+                .handler_effect
+                .as_ref()
+                .is_some_and(|h| h.modifies_return)
+        );
         let first = effects
             .iter()
             .find(|e| e.site_key == "tick()V@HEAD#a")
             .unwrap();
-        assert!(first
-            .handler_effect
-            .as_ref()
-            .is_some_and(|h| !h.modifies_return));
+        assert!(
+            first
+                .handler_effect
+                .as_ref()
+                .is_some_and(|h| !h.modifies_return)
+        );
     }
 
     #[test]
@@ -657,12 +684,16 @@ mod tests {
         let record = inject_record("RETURN", true);
         let effects = compute_class_effects(&record);
         let effect = &effects[0];
-        assert!(effect
-            .effect_kinds
-            .contains(&EffectiveEffectKind::ExitModification));
-        assert!(effect.effect_description.contains("return value")
-            || effect.effect_description.contains("CallbackInfo")
-            || effect.effect_description.contains("RETURN"));
+        assert!(
+            effect
+                .effect_kinds
+                .contains(&EffectiveEffectKind::ExitModification)
+        );
+        assert!(
+            effect.effect_description.contains("return value")
+                || effect.effect_description.contains("CallbackInfo")
+                || effect.effect_description.contains("RETURN")
+        );
     }
 
     #[test]
@@ -690,9 +721,11 @@ mod tests {
         record.injected_methods[0].local_index = Some(2);
         record.injected_methods[0].mutates_target_local = true;
         let effects = compute_class_effects(&record);
-        assert!(effects[0]
-            .effect_kinds
-            .contains(&EffectiveEffectKind::LocalMutation));
+        assert!(
+            effects[0]
+                .effect_kinds
+                .contains(&EffectiveEffectKind::LocalMutation)
+        );
     }
 
     #[test]
@@ -731,8 +764,10 @@ mod tests {
         record.injected_methods[0].injection_type = "overwrite".into();
         let effects = compute_class_effects(&record);
         let effect = &effects[0];
-        assert!(effect
-            .effect_kinds
-            .contains(&EffectiveEffectKind::FullMethodReplacement));
+        assert!(
+            effect
+                .effect_kinds
+                .contains(&EffectiveEffectKind::FullMethodReplacement)
+        );
     }
 }

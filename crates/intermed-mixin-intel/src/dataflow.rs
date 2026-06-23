@@ -40,7 +40,9 @@ use cafebabe::bytecode::Opcode;
 use cafebabe::constant_pool::MemberRef;
 use cafebabe::descriptors::{FieldType, MethodDescriptor};
 
-use crate::model::{HandlerDataflow, TargetFieldWrite, ValueSource};
+use crate::model::{
+    HandlerDataflow, ImpreciseReason, PrecisionLevel, TargetFieldWrite, ValueSource,
+};
 
 const CALLBACK_INFO: &str = "org/spongepowered/asm/mixin/injection/callback/CallbackInfo";
 const CALLBACK_INFO_RETURNABLE: &str =
@@ -83,10 +85,18 @@ impl AbstractValue {
     /// predecessors of a control-flow merge agree on survive the join with its
     /// provenance intact, instead of every merge resetting to `Unknown`.
     fn join(self, other: AbstractValue) -> AbstractValue {
+        use AbstractValue::*;
         if self == other {
-            self
-        } else {
-            AbstractValue::Unknown
+            return self;
+        }
+        // Refined lattice (still sound — the join is the *least upper bound*):
+        // a compile-time constant is a degenerate computed value, so
+        // `Constant ⊔ Computed = Computed` instead of collapsing to `Unknown`.
+        // This keeps `if (c) return 5; else return x+1;` resolving to a
+        // (non-tainted, non-target) `Computed` source rather than `Unknown`.
+        match (self, other) {
+            (Constant, Computed) | (Computed, Constant) => Computed,
+            _ => Unknown,
         }
     }
 
@@ -116,7 +126,7 @@ impl AbstractValue {
 
 /// Slot-accurate abstract operand stack. Category-2 values occupy two words: the
 /// value in the lower slot and an [`AbstractValue::Top`] filler above it.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Stack {
     words: Vec<AbstractValue>,
 }
@@ -124,9 +134,6 @@ struct Stack {
 impl Stack {
     fn new() -> Self {
         Self { words: Vec::new() }
-    }
-    fn clear(&mut self) {
-        self.words.clear();
     }
     fn push1(&mut self, v: AbstractValue) {
         self.words.push(v);
@@ -169,27 +176,26 @@ impl Stack {
 
 /// Local variable array. Category-2 values set the lower slot to the value and
 /// the upper slot to `Top`.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Locals {
     slots: Vec<AbstractValue>,
 }
 
 impl Locals {
     fn get(&self, index: usize) -> AbstractValue {
-        self.slots.get(index).copied().unwrap_or(AbstractValue::Unknown)
+        self.slots
+            .get(index)
+            .copied()
+            .unwrap_or(AbstractValue::Unknown)
     }
     fn set(&mut self, index: usize, v: AbstractValue, width: u8) {
         if index >= self.slots.len() {
-            self.slots.resize(index + width as usize, AbstractValue::Unknown);
+            self.slots
+                .resize(index + width as usize, AbstractValue::Unknown);
         }
         self.slots[index] = v;
         if width == 2 && index + 1 < self.slots.len() {
             self.slots[index + 1] = AbstractValue::Top;
-        }
-    }
-    fn reset_unknown(&mut self) {
-        for s in &mut self.slots {
-            *s = AbstractValue::Unknown;
         }
     }
     /// Element-wise lattice join with another local array, padding the shorter
@@ -199,7 +205,11 @@ impl Locals {
         let slots = (0..len)
             .map(|i| {
                 let a = self.slots.get(i).copied().unwrap_or(AbstractValue::Unknown);
-                let b = other.slots.get(i).copied().unwrap_or(AbstractValue::Unknown);
+                let b = other
+                    .slots
+                    .get(i)
+                    .copied()
+                    .unwrap_or(AbstractValue::Unknown);
                 a.join(b)
             })
             .collect();
@@ -207,30 +217,66 @@ impl Locals {
     }
 }
 
-/// Abstract machine state (operand stack + locals) at one program point, carried
-/// along control-flow edges and merged at join points.
-#[derive(Clone)]
+/// Abstract machine state (operand stack + locals + control-dependence) at one
+/// program point, carried along control-flow edges and merged at join points.
+#[derive(Clone, PartialEq)]
 struct State {
     stack: Stack,
     locals: Locals,
+    /// Control-dependent on a conditional branch: any cancel / `setReturnValue`
+    /// reached here is *conditional*, not unconditional. Joined with OR — a point
+    /// is unguarded only if *every* path to it is unguarded (sound: we never claim
+    /// "unconditional" unless it provably always executes).
+    guarded: bool,
 }
 
 impl State {
-    /// Join a non-empty set of predecessor states. Returns `None` (degrade) if any
-    /// pair has mismatched stack heights.
-    fn join_all(states: &[State]) -> Option<State> {
-        let mut iter = states.iter();
-        let first = iter.next()?.clone();
-        let mut acc_stack = first.stack;
-        let mut acc_locals = first.locals;
-        for s in iter {
-            acc_stack = acc_stack.join(&s.stack)?;
-            acc_locals = acc_locals.join(&s.locals);
-        }
+    /// Lattice join of two states. Returns `None` when operand-stack heights differ
+    /// (an irreducible merge — should not occur in verifier-valid bytecode, but is
+    /// handled conservatively if it does).
+    fn join(&self, other: &State) -> Option<State> {
         Some(State {
-            stack: acc_stack,
-            locals: acc_locals,
+            stack: self.stack.join(&other.stack)?,
+            locals: self.locals.join(&other.locals),
+            guarded: self.guarded || other.guarded,
         })
+    }
+
+    /// Widen to the conservative top: every word/local becomes `Unknown` (keeping
+    /// category-2 `Top` fillers and stack height). Forces fixpoint convergence as a
+    /// backstop when a point is revisited too many times.
+    fn widen(&self) -> State {
+        State {
+            stack: Stack {
+                words: self
+                    .stack
+                    .words
+                    .iter()
+                    .map(|w| {
+                        if *w == AbstractValue::Top {
+                            AbstractValue::Top
+                        } else {
+                            AbstractValue::Unknown
+                        }
+                    })
+                    .collect(),
+            },
+            locals: Locals {
+                slots: self
+                    .locals
+                    .slots
+                    .iter()
+                    .map(|s| {
+                        if *s == AbstractValue::Top {
+                            AbstractValue::Top
+                        } else {
+                            AbstractValue::Unknown
+                        }
+                    })
+                    .collect(),
+            },
+            guarded: self.guarded,
+        }
     }
 }
 
@@ -247,61 +293,38 @@ pub fn analyze_handler_dataflow(
     let bytecode = code.bytecode.as_ref()?;
 
     let mut df = HandlerDataflow::default();
-    let mut stack = Stack::new();
-    let mut locals = Locals {
-        slots: init_locals(descriptor, is_static),
-    };
     let opcodes = &bytecode.opcodes;
-    let jump_targets = collect_jump_targets(opcodes);
-    let loop_headers = collect_loop_headers(opcodes);
+    if opcodes.is_empty() {
+        return Some(df);
+    }
 
+    // Phase 2: a proper **worklist fixpoint**. We compute the abstract state
+    // *entering* each instruction by iterating control-flow edges (including loop
+    // back-edges and switch successors) to a fixpoint, then extract effects in a
+    // single pass using those converged states. Loops and switches therefore
+    // converge instead of degrading; the small finite-height lattice guarantees
+    // termination, and a per-offset visit cap widens to conservative as a backstop.
+    let entry = State {
+        stack: Stack::new(),
+        locals: Locals {
+            slots: init_locals(descriptor, is_static),
+        },
+        guarded: false,
+    };
+    let in_states = run_fixpoint(opcodes, entry, code, target_internal_names, &mut df);
+
+    // Extraction pass: apply each reachable instruction once, in its converged
+    // entry state, accumulating the handler's effects.
     let mut branch_seen = false;
-    // `guarded` = the current point is control-dependent on a conditional branch,
-    // so any cancel / setReturnValue here is *conditional*, not unconditional. It
-    // becomes (stickily) true right after the first conditional branch — including
-    // its fall-through path, which the old "set at the join target" logic missed.
-    let mut guarded = false;
-    // Abstract states arriving at an offset via a *forward* branch, merged when the
-    // offset is reached. This is what turns the old "reset to Unknown at every
-    // join" into a real lattice join: a value both predecessors agree on survives.
-    let mut incoming: BTreeMap<usize, Vec<State>> = BTreeMap::new();
-    let mut prev_falls_through = true;
     let mut cir_return: Option<ValueSource> = None;
     let mut typed_return: Option<ValueSource> = None;
     let mut writes: BTreeMap<String, ValueSource> = BTreeMap::new();
-
-    for (idx, (offset, opcode)) in opcodes.iter().enumerate() {
-        if idx > 0 {
-            if jump_targets.contains(offset) {
-                let mut preds = incoming.remove(offset).unwrap_or_default();
-                if prev_falls_through {
-                    preds.push(State {
-                        stack: stack.clone(),
-                        locals: locals.clone(),
-                    });
-                }
-                // A loop header's back-edge state is unknown on a single forward
-                // pass; an empty predecessor set means the point is reachable only
-                // via an edge we don't model. Either way, degrade conservatively.
-                match (loop_headers.contains(offset), State::join_all(&preds)) {
-                    (false, Some(merged)) => {
-                        stack = merged.stack;
-                        locals = merged.locals;
-                    }
-                    _ => {
-                        stack.clear();
-                        locals.reset_unknown();
-                        df.imprecise = true;
-                    }
-                }
-            } else if !prev_falls_through {
-                // Unreachable on fall-through and not a branch target (dead code
-                // after a goto/return/throw): drop stale state, don't leak it.
-                stack.clear();
-                locals.reset_unknown();
-            }
-        }
-
+    for (offset, opcode) in opcodes.iter() {
+        let Some(state) = in_states.get(offset) else {
+            continue; // unreachable instruction — no effect
+        };
+        let mut stack = state.stack.clone();
+        let mut locals = state.locals.clone();
         apply_opcode(
             opcode,
             &mut stack,
@@ -312,24 +335,8 @@ pub fn analyze_handler_dataflow(
             &mut cir_return,
             &mut typed_return,
             &mut writes,
-            guarded,
+            state.guarded,
         );
-
-        if is_conditional_branch(opcode) {
-            guarded = true;
-        }
-        // Record the post-instruction state on every forward branch edge so the
-        // target can merge it. Back-edges are handled by `loop_headers`.
-        if let Some(rel) = branch_offset(opcode) {
-            let dest = *offset as i64 + rel as i64;
-            if dest > *offset as i64 {
-                incoming.entry(dest as usize).or_default().push(State {
-                    stack: stack.clone(),
-                    locals: locals.clone(),
-                });
-            }
-        }
-        prev_falls_through = falls_through(opcode);
     }
 
     df.return_value_source = cir_return.or(typed_return).unwrap_or(ValueSource::Unknown);
@@ -357,7 +364,207 @@ pub fn analyze_handler_dataflow(
         && !df.forwards_args_to_target
         && !df.unconditional_throw;
 
+    // The abstract interpreter ran, so provenance is resolved; value sources are
+    // trustworthy only where the analysis did not degrade. Later passes (pattern
+    // matching, cross-layer) raise this further.
+    df.precision = if df.imprecise {
+        PrecisionLevel::Provenance
+    } else {
+        PrecisionLevel::ValueSource
+    };
+    df.confidence = if df.imprecise { 55 } else { 85 };
+
+    // Pass 4 — pattern refinement: recognise high-reliability handler shapes and
+    // raise confidence (precision only ever increases). Sound: it never adds a
+    // precise claim, only scores how well-understood the resolved shape is.
+    refine_with_patterns(&mut df);
+
     Some(df)
+}
+
+/// Lightweight post-pass over the resolved dataflow. Bumps confidence for handler
+/// shapes whose behaviour is well-understood, so the report can rank "we are sure
+/// this is benign/decisive" above a merely-resolved result (plan §1 Pass 4).
+fn refine_with_patterns(df: &mut HandlerDataflow) {
+    // A pure diagnostic injection: nothing observable but a log call. The safest
+    // shape there is — high confidence regardless of branch structure.
+    if df.logs_only {
+        df.confidence = df.confidence.max(95);
+        return;
+    }
+    // A guard read from config / mod-loaded is a recognised, intentional gate;
+    // the conditional effect is exactly what the author meant.
+    if (df.config_guarded || df.mod_loaded_guarded) && df.conditional_control {
+        df.confidence = df.confidence.max(90);
+    }
+    // A fully-resolved decisive short-circuit (cancel / set-return with a concrete
+    // value source, no degradation) is a high-certainty behavioural claim.
+    if !df.imprecise
+        && (df.cancels || df.sets_return_value)
+        && df.return_value_source != ValueSource::Unknown
+    {
+        df.confidence = df.confidence.max(92);
+    }
+}
+
+/// Maximum times a single program point is re-entered before its incoming state
+/// is widened to conservative — a termination backstop. The lattice is already
+/// finite-height (`Constant ⊑ Computed ⊑ Unknown`, fixed stack height), so
+/// well-behaved methods converge in 1–3 visits; this only guards pathological CFGs.
+const MAX_VISITS_PER_OFFSET: u32 = 24;
+
+/// Worklist fixpoint: compute the abstract state *entering* each reachable
+/// instruction, iterating control-flow edges (forward, back, and switch) until
+/// nothing changes. Exception-handler entries are seeded conservatively so their
+/// bodies are analysed soundly rather than dropped as unreachable.
+fn run_fixpoint(
+    opcodes: &[(usize, Opcode<'_>)],
+    entry: State,
+    code: &CodeData<'_>,
+    targets: &BTreeSet<String>,
+    df: &mut HandlerDataflow,
+) -> BTreeMap<usize, State> {
+    use std::collections::VecDeque;
+
+    let offset_to_idx: BTreeMap<usize, usize> = opcodes
+        .iter()
+        .enumerate()
+        .map(|(i, (o, _))| (*o, i))
+        .collect();
+
+    let mut in_states: BTreeMap<usize, State> = BTreeMap::new();
+    let mut visits: BTreeMap<usize, u32> = BTreeMap::new();
+    let mut worklist: VecDeque<usize> = VecDeque::new();
+
+    let seed = |off: usize,
+                st: State,
+                in_states: &mut BTreeMap<usize, State>,
+                worklist: &mut VecDeque<usize>| {
+        if !offset_to_idx.contains_key(&off) {
+            return;
+        }
+        let merged = match in_states.get(&off) {
+            Some(existing) => existing.join(&st).unwrap_or_else(|| st.clone()),
+            None => st,
+        };
+        if in_states.get(&off) != Some(&merged) {
+            in_states.insert(off, merged);
+            if !worklist.contains(&off) {
+                worklist.push_back(off);
+            }
+        }
+    };
+
+    seed(opcodes[0].0, entry, &mut in_states, &mut worklist);
+
+    // Conservative seeds for exception-handler entries (basic exception handling).
+    let local_count = code.max_locals as usize;
+    for h in &code.exception_table {
+        let handler = State {
+            stack: Stack {
+                words: vec![AbstractValue::Unknown], // the caught throwable
+            },
+            locals: Locals {
+                slots: vec![AbstractValue::Unknown; local_count],
+            },
+            guarded: true, // a handler runs only on the exceptional path
+        };
+        seed(
+            h.handler_pc as usize,
+            handler,
+            &mut in_states,
+            &mut worklist,
+        );
+    }
+
+    while let Some(off) = worklist.pop_front() {
+        let Some(&idx) = offset_to_idx.get(&off) else {
+            continue;
+        };
+        let (_, opcode) = &opcodes[idx];
+        // Transfer: apply the opcode to the entering state to get the out-state.
+        // A scratch `df` discards effects here — they are extracted later, once.
+        let mut state = in_states[&off].clone();
+        let mut scratch = HandlerDataflow::default();
+        apply_opcode(
+            opcode,
+            &mut state.stack,
+            &mut state.locals,
+            targets,
+            &mut scratch,
+            &mut false,
+            &mut None,
+            &mut None,
+            &mut BTreeMap::new(),
+            state.guarded,
+        );
+        let branch = is_conditional_branch(opcode);
+        for succ in successors(idx, off, opcode, opcodes) {
+            let mut succ_state = state.clone();
+            if branch {
+                succ_state.guarded = true;
+            }
+            let v = visits.entry(succ).or_insert(0);
+            *v += 1;
+            if *v > MAX_VISITS_PER_OFFSET {
+                df.degrade(ImpreciseReason::WideningCap);
+                succ_state = succ_state.widen();
+            }
+            seed(succ, succ_state, &mut in_states, &mut worklist);
+        }
+    }
+
+    in_states
+}
+
+/// The successor program-point offsets of an instruction: branch / switch targets
+/// and (unless control cannot fall through) the next instruction.
+fn successors(
+    idx: usize,
+    offset: usize,
+    opcode: &Opcode<'_>,
+    opcodes: &[(usize, Opcode<'_>)],
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    match opcode {
+        Opcode::Tableswitch(_) | Opcode::Lookupswitch(_) => {
+            out.extend(switch_targets(offset, opcode));
+        }
+        _ => {
+            if let Some(rel) = branch_offset(opcode) {
+                let dest = offset as i64 + rel as i64;
+                if dest >= 0 {
+                    out.push(dest as usize);
+                }
+            }
+        }
+    }
+    if falls_through(opcode) {
+        if let Some((next_off, _)) = opcodes.get(idx + 1) {
+            out.push(*next_off);
+        }
+    }
+    out
+}
+
+/// Absolute offsets of every arm of a `tableswitch` / `lookupswitch` (default +
+/// cases), so the fixpoint reaches switch successors instead of degrading.
+fn switch_targets(offset: usize, opcode: &Opcode<'_>) -> Vec<usize> {
+    let rels: Vec<i32> = match opcode {
+        Opcode::Lookupswitch(t) => std::iter::once(t.default)
+            .chain(t.match_offsets.iter().map(|(_, o)| *o))
+            .collect(),
+        Opcode::Tableswitch(t) => std::iter::once(t.default)
+            .chain(t.jumps.iter().copied())
+            .collect(),
+        _ => Vec::new(),
+    };
+    rels.into_iter()
+        .filter_map(|rel| {
+            let dest = offset as i64 + rel as i64;
+            (dest >= 0).then_some(dest as usize)
+        })
+        .collect()
 }
 
 /// Seed the local array with parameter provenance: slot 0 is `this` for instance
@@ -394,38 +601,6 @@ fn is_category_two(ty: &FieldType<'_>) -> bool {
     matches!(ty, FieldType::Long | FieldType::Double)
 }
 
-/// Offsets that are the destination of some jump (`if*`, `goto`, `jsr`) — the
-/// control-flow join points. Switch targets are not enumerated; a switch instead
-/// trips the conservative path via [`apply_opcode`].
-fn collect_jump_targets(opcodes: &[(usize, Opcode<'_>)]) -> BTreeSet<usize> {
-    let mut targets = BTreeSet::new();
-    for (offset, opcode) in opcodes {
-        if let Some(jump) = branch_offset(opcode) {
-            let dest = *offset as i64 + jump as i64;
-            if dest >= 0 {
-                targets.insert(dest as usize);
-            }
-        }
-    }
-    targets
-}
-
-/// Offsets that are the destination of a *back* edge (a branch whose target is at
-/// or before the branch itself) — i.e. loop headers. A single forward pass cannot
-/// know the loop-carried state, so these merge points degrade conservatively.
-fn collect_loop_headers(opcodes: &[(usize, Opcode<'_>)]) -> BTreeSet<usize> {
-    let mut headers = BTreeSet::new();
-    for (offset, opcode) in opcodes {
-        if let Some(rel) = branch_offset(opcode) {
-            let dest = *offset as i64 + rel as i64;
-            if dest >= 0 && dest <= *offset as i64 {
-                headers.insert(dest as usize);
-            }
-        }
-    }
-    headers
-}
-
 /// Whether an opcode lets control fall through to the next instruction. `goto`,
 /// `return`/`athrow`, switches and `ret` do not.
 fn falls_through(opcode: &Opcode<'_>) -> bool {
@@ -449,9 +624,13 @@ fn falls_through(opcode: &Opcode<'_>) -> bool {
 /// Lattice join of return-value provenance across multiple return sites: agreeing
 /// sources are preserved, disagreement rises to `Unknown`.
 fn join_source(acc: Option<ValueSource>, v: ValueSource) -> Option<ValueSource> {
+    use ValueSource::{Computed, Constant};
     Some(match acc {
         None => v,
         Some(a) if a == v => a,
+        // Mirror the operand lattice: a constant is a degenerate computed value.
+        Some(Constant) if v == Computed => Computed,
+        Some(Computed) if v == Constant => Computed,
         Some(_) => ValueSource::Unknown,
     })
 }
@@ -549,7 +728,11 @@ fn apply_opcode(
             stack.push_value(locals.get(*i as usize), 1)
         }
         Opcode::Lload(i) | Opcode::Dload(i) => stack.push_value(locals.get(*i as usize), 2),
-        Opcode::Iaload | Opcode::Faload | Opcode::Aaload | Opcode::Baload | Opcode::Caload
+        Opcode::Iaload
+        | Opcode::Faload
+        | Opcode::Aaload
+        | Opcode::Baload
+        | Opcode::Caload
         | Opcode::Saload => {
             stack.pop_value(); // index
             stack.pop_value(); // arrayref
@@ -570,8 +753,12 @@ fn apply_opcode(
             let v = stack.pop_value();
             locals.set(*i as usize, v, 2);
         }
-        Opcode::Iastore | Opcode::Fastore | Opcode::Aastore | Opcode::Bastore
-        | Opcode::Castore | Opcode::Sastore => {
+        Opcode::Iastore
+        | Opcode::Fastore
+        | Opcode::Aastore
+        | Opcode::Bastore
+        | Opcode::Castore
+        | Opcode::Sastore => {
             stack.pop_value();
             stack.pop_value();
             stack.pop_value();
@@ -650,9 +837,22 @@ fn apply_opcode(
         }
 
         // ── arithmetic / logic (narrow) ────────────────────────────────────
-        Opcode::Iadd | Opcode::Isub | Opcode::Imul | Opcode::Idiv | Opcode::Irem | Opcode::Iand
-        | Opcode::Ior | Opcode::Ixor | Opcode::Ishl | Opcode::Ishr | Opcode::Iushr
-        | Opcode::Fadd | Opcode::Fsub | Opcode::Fmul | Opcode::Fdiv | Opcode::Frem => {
+        Opcode::Iadd
+        | Opcode::Isub
+        | Opcode::Imul
+        | Opcode::Idiv
+        | Opcode::Irem
+        | Opcode::Iand
+        | Opcode::Ior
+        | Opcode::Ixor
+        | Opcode::Ishl
+        | Opcode::Ishr
+        | Opcode::Iushr
+        | Opcode::Fadd
+        | Opcode::Fsub
+        | Opcode::Fmul
+        | Opcode::Fdiv
+        | Opcode::Frem => {
             stack.pop_value();
             stack.pop_value();
             stack.push_value(V::Computed, 1);
@@ -662,9 +862,19 @@ fn apply_opcode(
             stack.push_value(V::Computed, 1);
         }
         // ── arithmetic / logic (wide) ──────────────────────────────────────
-        Opcode::Ladd | Opcode::Lsub | Opcode::Lmul | Opcode::Ldiv | Opcode::Lrem | Opcode::Land
-        | Opcode::Lor | Opcode::Lxor | Opcode::Dadd | Opcode::Dsub | Opcode::Dmul
-        | Opcode::Ddiv | Opcode::Drem => {
+        Opcode::Ladd
+        | Opcode::Lsub
+        | Opcode::Lmul
+        | Opcode::Ldiv
+        | Opcode::Lrem
+        | Opcode::Land
+        | Opcode::Lor
+        | Opcode::Lxor
+        | Opcode::Dadd
+        | Opcode::Dsub
+        | Opcode::Dmul
+        | Opcode::Ddiv
+        | Opcode::Drem => {
             stack.pop_value();
             stack.pop_value();
             stack.push_value(V::Computed, 2);
@@ -738,16 +948,20 @@ fn apply_opcode(
             stack.pop_value();
         }
         Opcode::Tableswitch(_) | Opcode::Lookupswitch(_) => {
+            // The fixpoint enumerates switch successors via the CFG, so the body of
+            // every arm is analysed — no conservative degradation needed here.
             stack.pop_value();
-            // A switch's successors are joins we do not enumerate: be conservative.
-            df.imprecise = true;
         }
-        Opcode::Goto(_) | Opcode::Jsr(_) | Opcode::Ret(_) | Opcode::Nop | Opcode::Breakpoint
-        | Opcode::Impdep1 | Opcode::Impdep2 => {}
+        Opcode::Goto(_)
+        | Opcode::Jsr(_)
+        | Opcode::Ret(_)
+        | Opcode::Nop
+        | Opcode::Breakpoint
+        | Opcode::Impdep1
+        | Opcode::Impdep2 => {}
 
         // ── returns ────────────────────────────────────────────────────────
-        Opcode::Ireturn | Opcode::Freturn | Opcode::Areturn | Opcode::Lreturn
-        | Opcode::Dreturn => {
+        Opcode::Ireturn | Opcode::Freturn | Opcode::Areturn | Opcode::Lreturn | Opcode::Dreturn => {
             let v = stack.pop_value();
             *typed_return = join_source(*typed_return, v.to_source());
         }
@@ -855,7 +1069,11 @@ fn apply_invoke(
     // Arguments are popped innermost-last; collect in declaration order.
     let mut args: Vec<AbstractValue> = (0..param_count).map(|_| stack.pop_value()).collect();
     args.reverse();
-    let receiver = if is_static { None } else { Some(stack.pop_value()) };
+    let receiver = if is_static {
+        None
+    } else {
+        Some(stack.pop_value())
+    };
 
     let is_callback_owner = owner == CALLBACK_INFO || owner == CALLBACK_INFO_RETURNABLE;
     if is_callback_owner {
@@ -869,6 +1087,14 @@ fn apply_invoke(
                 df.conditional_control |= guarded;
                 let source = args.first().map_or(ValueSource::Unknown, |v| v.to_source());
                 *cir_return = join_source(*cir_return, source);
+            }
+            // `getReturnValue()` reads the value the target method would have
+            // returned — provenance is the *target's own result*. Modeling it lets
+            // `setReturnValue(getReturnValue() + …)` resolve to a target-derived
+            // value instead of `Unknown`.
+            "getReturnValue" => {
+                push_return(stack, ret, V::TargetCall);
+                return;
             }
             _ => {}
         }
@@ -899,7 +1125,11 @@ fn apply_invoke(
         InvokeCategory::Logging | InvokeCategory::Other => {}
     }
 
-    let result = if into_target { V::TargetCall } else { V::Computed };
+    let result = if into_target {
+        V::TargetCall
+    } else {
+        V::Computed
+    };
     push_return(stack, ret, result);
 }
 
@@ -940,9 +1170,14 @@ fn classify_invoke(owner: &str, name: &str) -> InvokeCategory {
     // Async scheduling / background work.
     if owner.starts_with("java/util/concurrent/")
         || owner == "java/util/concurrent/CompletableFuture"
-        || (owner.ends_with("/Util") && (name.contains("ExecutorService") || name.contains("backgroundExecutor") || name.contains("ioPool")))
-        || matches!(name, "submit" | "execute" | "scheduleAtFixedRate" | "schedule")
-            && owner.contains("Executor")
+        || (owner.ends_with("/Util")
+            && (name.contains("ExecutorService")
+                || name.contains("backgroundExecutor")
+                || name.contains("ioPool")))
+        || matches!(
+            name,
+            "submit" | "execute" | "scheduleAtFixedRate" | "schedule"
+        ) && owner.contains("Executor")
         || name == "supplyAsync"
         || name == "runAsync"
         || name == "thenRunAsync"
@@ -1098,24 +1333,96 @@ mod tests {
         // …disagreement rises to the conservative top.
         assert_eq!(Constant.join(Argument), Unknown);
         assert_eq!(TargetField.join(Unknown), Unknown);
+        // Refined: a constant is a degenerate computed value (still the LUB, sound).
+        assert_eq!(Constant.join(Computed), Computed);
+        assert_eq!(Computed.join(Constant), Computed);
+        // But a target-derived value never silently merges with handler data.
+        assert_eq!(TargetField.join(Argument), Unknown);
+    }
+
+    #[test]
+    fn join_source_merges_constant_and_computed() {
+        use ValueSource::*;
+        assert_eq!(join_source(Some(Constant), Computed), Some(Computed));
+        assert_eq!(join_source(Some(Computed), Constant), Some(Computed));
+        assert_eq!(join_source(Some(Constant), Argument), Some(Unknown));
+        assert_eq!(join_source(None, Constant), Some(Constant));
+    }
+
+    #[test]
+    fn degrade_records_reason_and_sets_flag() {
+        let mut df = HandlerDataflow::default();
+        df.degrade(ImpreciseReason::Switch);
+        df.degrade(ImpreciseReason::Switch); // de-duplicated
+        df.degrade(ImpreciseReason::LoopBackEdge);
+        assert!(df.imprecise);
+        assert_eq!(df.imprecise_reasons.len(), 2);
+        assert!(
+            df.imprecise_reasons
+                .contains(&ImpreciseReason::LoopBackEdge)
+        );
+    }
+
+    #[test]
+    fn pattern_pass_raises_confidence_for_known_shapes() {
+        // logs-only is the safest shape → high confidence.
+        let mut logs = HandlerDataflow {
+            logs_only: true,
+            confidence: 85,
+            ..Default::default()
+        };
+        refine_with_patterns(&mut logs);
+        assert!(logs.confidence >= 95);
+
+        // A fully-resolved decisive set-return with a concrete source.
+        let mut decisive = HandlerDataflow {
+            sets_return_value: true,
+            return_value_source: ValueSource::Constant,
+            imprecise: false,
+            confidence: 85,
+            ..Default::default()
+        };
+        refine_with_patterns(&mut decisive);
+        assert!(decisive.confidence >= 92);
+
+        // An imprecise handler is not boosted by the decisive rule.
+        let mut imprecise = HandlerDataflow {
+            sets_return_value: true,
+            return_value_source: ValueSource::Constant,
+            imprecise: true,
+            confidence: 55,
+            ..Default::default()
+        };
+        refine_with_patterns(&mut imprecise);
+        assert_eq!(imprecise.confidence, 55);
     }
 
     #[test]
     fn stack_join_requires_equal_height_and_merges_elementwise() {
-        let a = Stack { words: vec![AbstractValue::Constant, AbstractValue::Argument] };
-        let b = Stack { words: vec![AbstractValue::Constant, AbstractValue::This] };
+        let a = Stack {
+            words: vec![AbstractValue::Constant, AbstractValue::Argument],
+        };
+        let b = Stack {
+            words: vec![AbstractValue::Constant, AbstractValue::This],
+        };
         let merged = a.join(&b).expect("equal heights merge");
         assert_eq!(merged.words[0], AbstractValue::Constant); // agreed
         assert_eq!(merged.words[1], AbstractValue::Unknown); // disagreed
         // Mismatched heights are an irreducible merge → degrade.
-        let tall = Stack { words: vec![AbstractValue::Constant] };
+        let tall = Stack {
+            words: vec![AbstractValue::Constant],
+        };
         assert!(a.join(&tall).is_none());
     }
 
     #[test]
     fn locals_join_pads_shorter_side_with_unknown() {
-        let a = Locals { slots: vec![AbstractValue::Constant, AbstractValue::Argument] };
-        let b = Locals { slots: vec![AbstractValue::Constant] };
+        let a = Locals {
+            slots: vec![AbstractValue::Constant, AbstractValue::Argument],
+        };
+        let b = Locals {
+            slots: vec![AbstractValue::Constant],
+        };
         let merged = a.join(&b);
         assert_eq!(merged.slots.len(), 2);
         assert_eq!(merged.slots[0], AbstractValue::Constant);
@@ -1123,36 +1430,73 @@ mod tests {
     }
 
     #[test]
-    fn state_join_all_folds_predecessors() {
-        let mk = |v: AbstractValue| State {
+    fn state_join_folds_predecessors_and_propagates_guard() {
+        let mk = |v: AbstractValue, guarded: bool| State {
             stack: Stack { words: vec![v] },
             locals: Locals { slots: vec![] },
+            guarded,
         };
-        // Three branches that all return a constant keep `Constant` after the merge.
-        let merged = State::join_all(&[
-            mk(AbstractValue::Constant),
-            mk(AbstractValue::Constant),
-            mk(AbstractValue::Constant),
-        ])
-        .unwrap();
+        // Both branches return a constant → `Constant` survives the merge.
+        let merged = mk(AbstractValue::Constant, false)
+            .join(&mk(AbstractValue::Constant, false))
+            .unwrap();
         assert_eq!(merged.stack.words[0], AbstractValue::Constant);
-        // One dissenter collapses the merge to `Unknown`.
-        let mixed = State::join_all(&[
-            mk(AbstractValue::Constant),
-            mk(AbstractValue::Argument),
-        ])
-        .unwrap();
+        assert!(!merged.guarded);
+        // A dissenter collapses to `Unknown`; a guarded predecessor makes the merge
+        // guarded (OR-join — sound: never claims unconditional unless all paths are).
+        let mixed = mk(AbstractValue::Constant, false)
+            .join(&mk(AbstractValue::Argument, true))
+            .unwrap();
         assert_eq!(mixed.stack.words[0], AbstractValue::Unknown);
+        assert!(mixed.guarded);
+        // Mismatched stack heights → no merge.
+        let tall = State {
+            stack: Stack {
+                words: vec![AbstractValue::Constant, AbstractValue::Constant],
+            },
+            locals: Locals { slots: vec![] },
+            guarded: false,
+        };
+        assert!(mk(AbstractValue::Constant, false).join(&tall).is_none());
+    }
+
+    #[test]
+    fn widen_collapses_to_unknown_keeping_height() {
+        let s = State {
+            stack: Stack {
+                words: vec![
+                    AbstractValue::Constant,
+                    AbstractValue::Top,
+                    AbstractValue::Argument,
+                ],
+            },
+            locals: Locals {
+                slots: vec![AbstractValue::This],
+            },
+            guarded: true,
+        };
+        let w = s.widen();
+        assert_eq!(w.stack.words.len(), 3);
+        assert_eq!(w.stack.words[0], AbstractValue::Unknown);
+        assert_eq!(w.stack.words[1], AbstractValue::Top); // category-2 filler kept
+        assert_eq!(w.locals.slots[0], AbstractValue::Unknown);
+        assert!(w.guarded);
     }
 
     #[test]
     fn return_source_join_agrees_or_degrades() {
         // Both return sites agree → precise.
         let acc = join_source(None, ValueSource::Constant);
-        assert_eq!(join_source(acc, ValueSource::Constant), Some(ValueSource::Constant));
+        assert_eq!(
+            join_source(acc, ValueSource::Constant),
+            Some(ValueSource::Constant)
+        );
         // Disagreement → Unknown.
         let acc = join_source(None, ValueSource::Constant);
-        assert_eq!(join_source(acc, ValueSource::Argument), Some(ValueSource::Unknown));
+        assert_eq!(
+            join_source(acc, ValueSource::Argument),
+            Some(ValueSource::Unknown)
+        );
     }
 
     #[test]

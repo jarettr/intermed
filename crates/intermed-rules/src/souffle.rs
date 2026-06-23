@@ -1,32 +1,46 @@
-//! Optional external Souffle backend (generated Datalog from the core pack).
+//! External Soufflé backend — runs the declarative pack as Datalog.
+//!
+//! Generic, IR-driven (replaces the old 3-rule hand-coded `datalog_codegen`): facts
+//! are written in the flat foreign-key shape (`fact` / `fact_attr`), every
+//! `FactFinding` rule is lowered via [`rule_to_ir`](crate::rule_to_ir) →
+//! [`to_datalog`](intermed_columnar::to_datalog) into one clause, Soufflé computes
+//! the matching, and findings are emitted by the interpreter's
+//! [`fact_finding_findings`](crate::fact_finding_findings) (so they are identical
+//! across backends by construction). Rule kinds the IR doesn't lower yet
+//! (Join/Aggregate/Correlation/GroupDistinct) fall back to the interpreter, so the
+//! souffle backend is now *complete*, not a 3-rule proof of concept.
 
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, Fact, FactId};
+use intermed_columnar::{FACT_SCHEMA, to_datalog};
+use intermed_doctor_core::evidence::Finding;
+use intermed_doctor_core::facts::{AttrValue, Fact};
 use intermed_doctor_core::{Rule, RuleCtx};
 
-use crate::datalog_codegen::generate_pack_datalog;
+use crate::model::{RuleKind, RulePack};
 use crate::pack::default_core_pack_v2;
 use crate::tsv::escape_souffle_symbol;
-use crate::RulePackError;
+use crate::{Lowering, RulePackError, evaluate_pack, fact_finding_findings, rule_to_ir};
 
-/// Optional external Souffle backend.
-pub struct SouffleRulePack;
+/// Optional external Souffle backend. Holds the **resolved** rule pack (honoring
+/// `--mixin-risk`'s without-mixin selection + installed overlays), like the other
+/// backends — not a hardcoded default.
+pub struct SouffleRulePack {
+    pack: RulePack,
+}
 
 impl SouffleRulePack {
-    pub const fn new() -> Self {
-        Self
+    pub fn new(pack: RulePack) -> Self {
+        Self { pack }
     }
 }
 
 impl Default for SouffleRulePack {
     fn default() -> Self {
-        Self::new()
+        Self::new(default_core_pack_v2())
     }
 }
 
@@ -36,17 +50,20 @@ impl Rule for SouffleRulePack {
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        match run_souffle(ctx) {
+        match run_souffle(&self.pack, ctx) {
             Ok(findings) => findings,
             Err(e) => vec![
-                Finding::builder("souffle-rule-pack", "souffle-backend-failed")
-                    .severity(Severity::Fatal)
-                    .category(Category::Runtime)
-                    .title("Souffle backend failed")
-                    .explanation(e.to_string())
-                    .tag("logic")
-                    .tag("souffle")
-                    .build(),
+                intermed_doctor_core::evidence::Finding::builder(
+                    "souffle-rule-pack",
+                    "souffle-backend-failed",
+                )
+                .severity(intermed_doctor_core::evidence::Severity::Fatal)
+                .category(intermed_doctor_core::evidence::Category::Runtime)
+                .title("Souffle backend failed")
+                .explanation(e.to_string())
+                .tag("logic")
+                .tag("souffle")
+                .build(),
             ],
         }
     }
@@ -59,12 +76,64 @@ pub fn souffle_available() -> bool {
         .is_ok_and(|out| out.status.success())
 }
 
-/// Soufflé program generated from the embedded core pack.
+/// The generated Soufflé program for the embedded core pack (schema + one clause per
+/// IR-lowerable FactFinding rule). Exposed for `rules generate --backend datalog`.
 pub fn souffle_program() -> String {
-    generate_pack_datalog(&default_core_pack_v2())
+    let pack = default_core_pack_v2();
+    let mut out = String::from(FACT_SCHEMA);
+    for (i, rule) in pack.rules.iter().enumerate() {
+        if let Lowering::Ir(ir) = rule_to_ir(rule) {
+            if let Some(clause) = to_datalog(&ir, &rel_name(i)) {
+                out.push_str(&clause);
+            }
+        }
+    }
+    out
 }
 
-fn run_souffle(ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RulePackError> {
+fn rel_name(i: usize) -> String {
+    format!("r{i}")
+}
+
+fn attr_str(v: &AttrValue) -> String {
+    match v {
+        AttrValue::Str(s) => s.clone(),
+        AttrValue::Int(i) => i.to_string(),
+        AttrValue::Float(f) => f.to_string(),
+        AttrValue::Bool(b) => b.to_string(),
+    }
+}
+
+/// Write the generic `fact` / `fact_attr` relations (one write covers every rule).
+fn write_generic_facts(ctx: &RuleCtx<'_>, facts_dir: &Path) -> Result<(), RulePackError> {
+    let mut fact = std::fs::File::create(facts_dir.join("fact.facts"))
+        .map_err(|e| RulePackError(format!("write fact.facts: {e}")))?;
+    let mut attr = std::fs::File::create(facts_dir.join("fact_attr.facts"))
+        .map_err(|e| RulePackError(format!("write fact_attr.facts: {e}")))?;
+    for f in ctx.store.all() {
+        writeln!(
+            fact,
+            "{}\t{}\t{}",
+            f.id.0,
+            escape_souffle_symbol(&f.kind),
+            escape_souffle_symbol(&f.subject)
+        )
+        .map_err(|e| RulePackError(format!("write fact.facts: {e}")))?;
+        for (k, v) in &f.attributes {
+            writeln!(
+                attr,
+                "{}\t{}\t{}",
+                f.id.0,
+                escape_souffle_symbol(k),
+                escape_souffle_symbol(&attr_str(v))
+            )
+            .map_err(|e| RulePackError(format!("write fact_attr.facts: {e}")))?;
+        }
+    }
+    Ok(())
+}
+
+fn run_souffle(pack: &RulePack, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RulePackError> {
     let root = temp_souffle_dir();
     let facts_dir = root.join("facts");
     let out_dir = root.join("out");
@@ -74,13 +143,39 @@ fn run_souffle(ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RulePackError> {
         .map_err(|e| RulePackError(format!("create {}: {e}", out_dir.display())))?;
 
     let result = (|| {
-        write_souffle_facts(ctx, &facts_dir)?;
-        let program = root.join("intermed_core.dl");
-        std::fs::write(&program, souffle_program())
-            .map_err(|e| RulePackError(format!("write {}: {e}", program.display())))?;
+        // Partition: IR-lowerable FactFinding rules run through Souffle; the rest fall
+        // back to the interpreter (so coverage is complete).
+        let mut souffle_rules: Vec<(usize, &crate::model::RuleSpec)> = Vec::new();
+        let mut fallback = RulePack {
+            rules: Vec::new(),
+            ..pack.clone()
+        };
+        for (i, rule) in pack.rules.iter().enumerate() {
+            match rule_to_ir(rule) {
+                Lowering::Ir(_) if rule.kind == RuleKind::FactFinding => {
+                    souffle_rules.push((i, rule));
+                }
+                _ => fallback.rules.push(rule.clone()),
+            }
+        }
+
+        write_generic_facts(ctx, &facts_dir)?;
+
+        // Build + run one program with a relation per Souffle rule.
+        let mut program = String::from(FACT_SCHEMA);
+        for (i, rule) in &souffle_rules {
+            if let Lowering::Ir(ir) = rule_to_ir(rule) {
+                if let Some(clause) = to_datalog(&ir, &rel_name(*i)) {
+                    program.push_str(&clause);
+                }
+            }
+        }
+        let program_path = root.join("intermed_core.dl");
+        std::fs::write(&program_path, &program)
+            .map_err(|e| RulePackError(format!("write {}: {e}", program_path.display())))?;
 
         let output = Command::new("souffle")
-            .arg(&program)
+            .arg(&program_path)
             .arg("-F")
             .arg(&facts_dir)
             .arg("-D")
@@ -94,156 +189,33 @@ fn run_souffle(ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RulePackError> {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-        Ok(read_souffle_findings(ctx, &out_dir))
+
+        // Souffle-matched FactFinding findings (emission reused from the interpreter).
+        let evidence_cache = crate::EvidenceCache::new();
+        let mut findings = Vec::new();
+        for (i, rule) in &souffle_rules {
+            let matched: Vec<&Fact> = read_relation(&out_dir, &rel_name(*i))
+                .iter()
+                .filter_map(|row| row.first())
+                .filter_map(|id| id.parse::<u64>().ok())
+                .filter_map(|n| ctx.store.get(intermed_doctor_core::facts::FactId(n)))
+                .collect();
+            findings.extend(fact_finding_findings(rule, &matched, ctx, &evidence_cache));
+        }
+
+        // Interpreter fallback for the rule kinds the IR does not lower yet.
+        findings.extend(evaluate_pack(&fallback, ctx));
+
+        for f in &mut findings {
+            if !f.machine_tags.iter().any(|t| t == "souffle") {
+                f.machine_tags.push("souffle".to_string());
+            }
+        }
+        Ok(findings)
     })();
 
     let _ = std::fs::remove_dir_all(&root);
     result
-}
-
-fn write_souffle_facts(ctx: &RuleCtx<'_>, facts_dir: &Path) -> Result<(), RulePackError> {
-    let mut mod_decl = std::fs::File::create(facts_dir.join("mod_decl.facts"))
-        .map_err(|e| RulePackError(format!("write mod_decl.facts: {e}")))?;
-    for fact in ctx
-        .store
-        .by_kind(kind::MOD)
-        .chain(ctx.store.by_kind(kind::PLUGIN))
-    {
-        let file = fact.attr("file").unwrap_or(&fact.source.locator);
-        writeln!(
-            mod_decl,
-            "{}\t{}\t{}",
-            escape_souffle_symbol(&fact.subject),
-            escape_souffle_symbol(file),
-            fact.id
-        )
-        .map_err(|e| RulePackError(format!("write mod_decl.facts: {e}")))?;
-    }
-
-    let mut overlap = std::fs::File::create(facts_dir.join("mixin_overlap_input.facts"))
-        .map_err(|e| RulePackError(format!("write mixin_overlap_input.facts: {e}")))?;
-    for fact in ctx.store.by_kind(kind::MIXIN_OVERLAP) {
-        writeln!(
-            overlap,
-            "{}\t{}\t{}\t{}\t{}",
-            escape_souffle_symbol(&fact.subject),
-            escape_souffle_symbol(fact.attr("mods").unwrap_or("")),
-            escape_souffle_symbol(fact.attr("operations").unwrap_or("")),
-            escape_souffle_symbol(fact.attr("hot_path").unwrap_or("false")),
-            fact.id
-        )
-        .map_err(|e| RulePackError(format!("write mixin_overlap_input.facts: {e}")))?;
-    }
-
-    let mut overwrite = std::fs::File::create(facts_dir.join("mixin_overwrite_input.facts"))
-        .map_err(|e| RulePackError(format!("write mixin_overwrite_input.facts: {e}")))?;
-    for fact in ctx.store.by_kind(kind::HIGH_RISK_OVERWRITE) {
-        writeln!(
-            overwrite,
-            "{}\t{}\t{}\t{}",
-            escape_souffle_symbol(&fact.subject),
-            escape_souffle_symbol(fact.attr("target").unwrap_or("")),
-            escape_souffle_symbol(fact.attr("hot_path").unwrap_or("false")),
-            fact.id
-        )
-        .map_err(|e| RulePackError(format!("write mixin_overwrite_input.facts: {e}")))?;
-    }
-    Ok(())
-}
-
-fn read_souffle_findings(ctx: &RuleCtx<'_>, out_dir: &Path) -> Vec<Finding> {
-    let mut findings = Vec::new();
-
-    for row in read_relation(out_dir, "duplicate_id") {
-        let Some(id) = row.first() else {
-            continue;
-        };
-        let facts: Vec<&Fact> = ctx
-            .store
-            .by_kind(kind::MOD)
-            .chain(ctx.store.by_kind(kind::PLUGIN))
-            .filter(|fact| fact.subject == *id)
-            .collect();
-        let files: BTreeSet<String> = facts
-            .iter()
-            .filter_map(|fact| fact.attr("file").map(str::to_string))
-            .collect();
-        let mut b = Finding::builder("duplicate-id", format!("duplicate-id:{id}"))
-            .severity(Severity::Error)
-            .category(Category::Metadata)
-            .title(format!("Duplicate id '{id}' in {} files", files.len()))
-            .explanation(format!(
-                "The id '{id}' is declared by multiple archives: {}. Only one can load.",
-                files.into_iter().collect::<Vec<_>>().join(", ")
-            ))
-            .fix(FixCandidate::advice("Remove the duplicate/older jar."))
-            .tag("metadata")
-            .tag("duplicate")
-            .tag("souffle");
-        for fact in facts {
-            b = b.evidence(EvidenceEdge::subject(fact.id));
-        }
-        findings.push(b.build());
-    }
-
-    for row in read_relation(out_dir, "mixin_overlap_out") {
-        if row.len() < 5 {
-            continue;
-        }
-        let target = &row[0];
-        let hot = row[3] == "true";
-        let fact = fact_by_display(ctx, &row[4]);
-        let mut b = Finding::builder("mixin-overlap", format!("mixin-overlap:{target}"))
-            .severity(if hot { Severity::Error } else { Severity::Warn })
-            .category(Category::Mixin)
-            .title(format!("Mixin target overlap: {target}"))
-            .explanation(format!(
-                "Multiple mods target {target}: {}. Operations: {}.",
-                row[1], row[2]
-            ))
-            .fix(FixCandidate::advice(
-                "Check mod compatibility notes and prefer versions known to share this target.",
-            ))
-            .tag("mixin")
-            .tag("overlap")
-            .tag("souffle");
-        if let Some(fact) = fact {
-            b = b.evidence(EvidenceEdge::subject(fact.id));
-        }
-        findings.push(b.build());
-    }
-
-    for row in read_relation(out_dir, "mixin_overwrite_out") {
-        if row.len() < 4 {
-            continue;
-        }
-        let mod_id = &row[0];
-        let target = &row[1];
-        let hot = row[2] == "true";
-        let fact = fact_by_display(ctx, &row[3]);
-        let mut b = Finding::builder(
-            "mixin-overwrite",
-            format!("mixin-overwrite:{mod_id}->{target}"),
-        )
-        .severity(if hot { Severity::Error } else { Severity::Warn })
-        .category(Category::Mixin)
-        .title(format!("High-risk @Overwrite mixin: {target}"))
-        .explanation(format!(
-            "{mod_id} overwrites code in {target}. @Overwrite has a high compatibility risk because it replaces target behavior."
-        ))
-        .fix(FixCandidate::advice(
-            "Prefer versions without competing overwrites, or remove one conflicting mod.",
-        ))
-        .tag("mixin")
-        .tag("overwrite")
-        .tag("souffle");
-        if let Some(fact) = fact {
-            b = b.evidence(EvidenceEdge::subject(fact.id));
-        }
-        findings.push(b.build());
-    }
-
-    findings
 }
 
 fn read_relation(out_dir: &Path, relation: &str) -> Vec<Vec<String>> {
@@ -261,12 +233,6 @@ fn read_relation(out_dir: &Path, relation: &str) -> Vec<Vec<String>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| line.split('\t').map(str::to_string).collect())
         .collect()
-}
-
-fn fact_by_display<'a>(ctx: &'a RuleCtx<'_>, id: &str) -> Option<&'a Fact> {
-    let raw = id.strip_prefix('f')?;
-    let n = raw.parse::<u64>().ok()?;
-    ctx.store.get(FactId(n))
 }
 
 fn temp_souffle_dir() -> PathBuf {

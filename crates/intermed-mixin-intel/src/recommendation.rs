@@ -4,20 +4,35 @@
 //! [`MixinRecommendationRecord`] rows consumed by fact emission, mixin-map, and rules.
 //! Each [`Recommendation`] may include a concrete code snippet and an authoritative
 //! documentation link so `--explain` output is immediately actionable.
+//!
+//! ## Layer-M / Resource cross-layer enrichment
+//!
+//! When a mixin targets a data-loader subsystem (RecipeManager, LootManager, …),
+//! and Layer M has already found a static conflict in that resource domain,
+//! [`recommend_for_resource_context`] upgrades the recommendation with cross-layer
+//! evidence and a concrete before/after code example.
+//!
+//! ## Subsystem-aware advice
+//!
+//! [`recommend_for_subsystem`] generates advice tuned to the target subsystem:
+//! render / tick / data-loading / network, including Minecraft-version awareness.
 
 use std::collections::BTreeMap;
 
-use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::RuleCtx;
+use intermed_doctor_core::facts::kind;
 
 use crate::model::{
     EffectiveEffectKind, MixinClassRecord, MixinEffect, MixinOperation, MixinRecommendationRecord,
     Recommendation,
 };
+use crate::resource_bridge::ResourceSubsystem;
+use crate::subsystem::Subsystem;
 
 const MIXIN_INJECT_WIKI: &str =
     "https://github.com/SpongePowered/Mixin/wiki/Injection-Point-Selection";
-const MIXIN_OVERWRITE_WIKI: &str = "https://github.com/SpongePowered/Mixin/wiki/Introduction-to-Mixins---The-Overwrite-Annotation";
+const MIXIN_OVERWRITE_WIKI: &str =
+    "https://github.com/SpongePowered/Mixin/wiki/Introduction-to-Mixins---The-Overwrite-Annotation";
 const MIXIN_REDIRECT_WIKI: &str =
     "https://github.com/SpongePowered/Mixin/wiki/Injection-Point-Selection#redirector";
 const MIXINEXTRAS_MODIFY_RETURN: &str =
@@ -38,9 +53,15 @@ pub fn recommend_for_effect(
     // composable alternatives; the hot-path case just raises confidence.
     if effect.operation == MixinOperation::Overwrite {
         let (confidence, why) = if effect.hot_path {
-            (0.85, " on a hot path — full replacement breaks more often across updates")
+            (
+                0.85,
+                " on a hot path — full replacement breaks more often across updates",
+            )
         } else {
-            (0.65, " — full replacement is the most fragile mixin form across game/mod updates")
+            (
+                0.65,
+                " — full replacement is the most fragile mixin form across game/mod updates",
+            )
         };
         let method_simple = effect.method.split('(').next().unwrap_or(&effect.method);
         out.push(Recommendation {
@@ -276,7 +297,9 @@ pub fn recommend_for_effect(
 }
 
 /// Count @Redirect / @WrapOperation handlers per (target, method) across a modpack scan.
-pub fn redirect_counts_by_method(classes: &[MixinClassRecord]) -> BTreeMap<(String, String), usize> {
+pub fn redirect_counts_by_method(
+    classes: &[MixinClassRecord],
+) -> BTreeMap<(String, String), usize> {
     let mut counts = BTreeMap::new();
     for class in classes {
         for inj in &class.injected_methods {
@@ -293,17 +316,38 @@ pub fn redirect_counts_by_method(classes: &[MixinClassRecord]) -> BTreeMap<(Stri
 
 /// Build scan-level recommendation records for every mixin effect, plus
 /// conflict-taxonomy and apply-failure advice.
+///
+/// `static_conflicts_by_domain` maps a Layer-M resource domain ("recipe",
+/// "loot-table", …) to whether a static semantic conflict was found there.
+/// When `Some`, cross-layer recommendations are emitted for data-loader mixins.
 pub fn recommend_for_scan(
     classes: &[MixinClassRecord],
     effects: &[MixinEffect],
     conflict_edges: &[crate::model::MixinConflictEdgeRecord],
     apply_failures: &[crate::apply_failure::ApplyFailure],
 ) -> Vec<MixinRecommendationRecord> {
+    recommend_for_scan_with_context(classes, effects, conflict_edges, apply_failures, &[])
+}
+
+/// Full version of [`recommend_for_scan`] that accepts Layer-M resource domain
+/// conflict data and emits cross-layer enriched recommendations.
+///
+/// `layer_m_conflicted_domains`: Domains where Layer-M found a static semantic
+/// conflict (e.g. `["recipe"]`). Pass `&[]` if Layer-M data is unavailable.
+pub fn recommend_for_scan_with_context(
+    classes: &[MixinClassRecord],
+    effects: &[MixinEffect],
+    conflict_edges: &[crate::model::MixinConflictEdgeRecord],
+    apply_failures: &[crate::apply_failure::ApplyFailure],
+    layer_m_conflicted_domains: &[&str],
+) -> Vec<MixinRecommendationRecord> {
     let redirect_counts = redirect_counts_by_method(classes);
-    let class_by_name: BTreeMap<_, _> = classes
-        .iter()
-        .map(|c| (c.class_name.as_str(), c))
-        .collect();
+    let class_by_name: BTreeMap<_, _> =
+        classes.iter().map(|c| (c.class_name.as_str(), c)).collect();
+    // Count WrapOperation chains: (target, method) → count of all wrap/redirect ops.
+    let wrap_counts = wrap_chain_counts(classes);
+    // Count how many effects on the same method combine ModifyExpressionValue+ModifyReturnValue.
+    let combo_sites = modifier_combo_sites(effects);
     let mut out = Vec::new();
 
     for effect in effects {
@@ -311,6 +355,10 @@ pub fn recommend_for_scan(
             continue;
         };
         let redirect_count = redirect_counts
+            .get(&(effect.target.clone(), effect.method.clone()))
+            .copied()
+            .unwrap_or(0);
+        let wrap_depth = wrap_counts
             .get(&(effect.target.clone(), effect.method.clone()))
             .copied()
             .unwrap_or(0);
@@ -323,10 +371,93 @@ pub fn recommend_for_scan(
                 recommendation: rec,
             });
         }
+        // WrapOperation chain depth advice (deep stacks are fragile).
+        for rec in recommend_for_wrap_chain(effect, wrap_depth) {
+            out.push(MixinRecommendationRecord {
+                mod_id: effect.mod_id.clone(),
+                mixin_class: effect.mixin_class.clone(),
+                target: effect.target.clone(),
+                site_key: effect.site_key.clone(),
+                recommendation: rec,
+            });
+        }
+        // ModifyExpressionValue + ModifyReturnValue combination warning.
+        if combo_sites.contains(&(effect.target.clone(), effect.method.clone())) {
+            if let Some(rec) = recommend_for_modifier_combo(effect) {
+                out.push(MixinRecommendationRecord {
+                    mod_id: effect.mod_id.clone(),
+                    mixin_class: effect.mixin_class.clone(),
+                    target: effect.target.clone(),
+                    site_key: effect.site_key.clone(),
+                    recommendation: rec,
+                });
+            }
+        }
+        // Subsystem-aware advice.
+        for rec in recommend_for_subsystem(effect) {
+            out.push(MixinRecommendationRecord {
+                mod_id: effect.mod_id.clone(),
+                mixin_class: effect.mixin_class.clone(),
+                target: effect.target.clone(),
+                site_key: effect.site_key.clone(),
+                recommendation: rec,
+            });
+        }
+        // Layer-M cross-layer resource enrichment.
+        for rec in recommend_for_resource_context(effect, layer_m_conflicted_domains) {
+            out.push(MixinRecommendationRecord {
+                mod_id: effect.mod_id.clone(),
+                mixin_class: effect.mixin_class.clone(),
+                target: effect.target.clone(),
+                site_key: effect.site_key.clone(),
+                recommendation: rec,
+            });
+        }
     }
     out.extend(recommend_for_conflicts(conflict_edges));
     out.extend(recommend_for_apply_failures(apply_failures));
     out
+}
+
+// ── internal helpers ──────────────────────────────────────────────────────────
+
+/// Count WrapOperation + Redirect chains per (target, method) across the pack.
+/// A chain depth > 3 is fragile: the middle wrappers must forward `original.call()`
+/// correctly or the whole chain silently breaks.
+fn wrap_chain_counts(classes: &[MixinClassRecord]) -> BTreeMap<(String, String), usize> {
+    let mut counts: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for class in classes {
+        for inj in &class.injected_methods {
+            if matches!(inj.injection_type.as_str(), "wrap-operation" | "redirect") {
+                let key = (inj.target.clone(), inj.resolved.clone());
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Return the set of (target, method) pairs where BOTH ModifyExpressionValue and
+/// ModifyReturnValue are present — a combination that silently fights over the
+/// intermediate and final value of the same expression.
+fn modifier_combo_sites(effects: &[MixinEffect]) -> std::collections::BTreeSet<(String, String)> {
+    let mut has_mev: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    let mut has_mrv: std::collections::BTreeSet<(String, String)> =
+        std::collections::BTreeSet::new();
+    for e in effects {
+        let key = (e.target.clone(), e.method.clone());
+        match e.operation {
+            MixinOperation::ModifyExpressionValue => {
+                has_mev.insert(key);
+            }
+            MixinOperation::ModifyReturnValue => {
+                has_mrv.insert(key);
+            }
+            _ => {}
+        }
+    }
+    has_mev.intersection(&has_mrv).cloned().collect()
 }
 
 /// Conflict-taxonomy recommendations (5.4): targeted advice for the precise edge
@@ -347,7 +478,10 @@ pub fn recommend_for_conflicts(
                      @Overwrite to @Inject / @ModifyReturnValue / @WrapOperation so both survive.",
                     edge.source_mod, edge.target_mod
                 ),
-                rationale: format!("Overwrite vs injector on `{}` ({}).", edge.target_class, edge.site),
+                rationale: format!(
+                    "Overwrite vs injector on `{}` ({}).",
+                    edge.target_class, edge.site
+                ),
                 confidence: 0.85,
                 example: None,
                 doc_url: Some(MIXINEXTRAS_MODIFY_RETURN.to_string()),
@@ -374,7 +508,10 @@ pub fn recommend_for_conflicts(
                      @WrapOperation on both sides (composable) and order by priority.",
                     edge.source_mod, edge.target_mod
                 ),
-                rationale: format!("Redirect vs WrapOperation on `{}` ({}).", edge.target_class, edge.site),
+                rationale: format!(
+                    "Redirect vs WrapOperation on `{}` ({}).",
+                    edge.target_class, edge.site
+                ),
                 confidence: 0.78,
                 example: None,
                 doc_url: Some(MIXINEXTRAS_WRAP.to_string()),
@@ -388,7 +525,10 @@ pub fn recommend_for_conflicts(
                      Confirm the condition is intended to gate the other mod too.",
                     edge.source_mod, edge.target_mod
                 ),
-                rationale: format!("WrapWithCondition suppresses a call on `{}`.", edge.target_class),
+                rationale: format!(
+                    "WrapWithCondition suppresses a call on `{}`.",
+                    edge.target_class
+                ),
                 confidence: 0.7,
                 example: None,
                 doc_url: Some(MIXINEXTRAS_WRAP.to_string()),
@@ -401,7 +541,10 @@ pub fn recommend_for_conflicts(
                      collide. Mark added members @Unique (or prefix with your mod id) to prevent the clash.",
                     edge.source_mod, edge.target_mod, edge.target_class
                 ),
-                rationale: format!("Unique-less member collision on `{}` ({}).", edge.target_class, edge.site),
+                rationale: format!(
+                    "Unique-less member collision on `{}` ({}).",
+                    edge.target_class, edge.site
+                ),
                 confidence: 0.8,
                 example: Some(
                     "@Unique\nprivate int myMod$counter; // unique-prefixed and @Unique-marked"
@@ -490,12 +633,350 @@ pub fn recommendations_by_site(
 ) -> BTreeMap<String, Vec<Recommendation>> {
     let mut out: BTreeMap<String, Vec<Recommendation>> = BTreeMap::new();
     for row in records {
-        out
-            .entry(row.site_key.clone())
+        out.entry(row.site_key.clone())
             .or_default()
             .push(row.recommendation.clone());
     }
     out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: WrapOperation chain-depth recommendations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Advise on WrapOperation chains that are too deep (> 3 levels). Each wrapper
+/// must correctly forward `original.call()` — one stale wrapper breaks the
+/// entire downstream chain without a compile error.
+fn recommend_for_wrap_chain(effect: &MixinEffect, chain_depth: usize) -> Vec<Recommendation> {
+    if chain_depth < 4 {
+        return Vec::new();
+    }
+    if !matches!(
+        effect.operation,
+        MixinOperation::WrapOperation | MixinOperation::Redirect
+    ) {
+        return Vec::new();
+    }
+    let method_simple = effect.method.split('(').next().unwrap_or(&effect.method);
+    vec![Recommendation {
+        id: format!("wrap-chain-depth:{}:{}", effect.site_key, chain_depth),
+        title: format!("Deep WrapOperation chain ({chain_depth} wrappers) — fragile ordering"),
+        description: format!(
+            "`{}#{}` is wrapped by {chain_depth} handlers across multiple mods. Each wrapper \
+             must forward `original.call()` correctly; if any mid-chain wrapper conditionally \
+             skips the call, every downstream wrapper and the original method body are silently \
+             suppressed. Coordinate with the other mod authors or extract to a shared API.",
+            effect.target, method_simple
+        ),
+        rationale: format!(
+            "{chain_depth} @WrapOperation/@Redirect handlers stack on `{}#{}`.",
+            effect.target, method_simple
+        ),
+        confidence: 0.82,
+        example: Some(format!(
+            "// Bad — mid-chain wrapper that sometimes skips original.call():\n\
+             @WrapOperation(method = \"{method_simple}\", at = @At(\"INVOKE\", ...))\n\
+             private T {method_simple}$wrap(Operation<T> original) {{\n\
+             \x20   if (MY_CONDITION) return DEFAULT; // BUG: downstream chains never run\n\
+             \x20   return original.call();\n\
+             }}\n\n\
+             // Good — always call original; apply guard inside:\n\
+             @WrapOperation(method = \"{method_simple}\", at = @At(\"INVOKE\", ...))\n\
+             private T {method_simple}$wrap(Operation<T> original) {{\n\
+             \x20   T result = original.call(); // downstream still runs\n\
+             \x20   return MY_CONDITION ? DEFAULT : result;\n\
+             }}",
+            method_simple = method_simple
+        )),
+        doc_url: Some(MIXINEXTRAS_WRAP.to_string()),
+    }]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: ModifyExpressionValue + ModifyReturnValue combination detector
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// When both ModifyExpressionValue and ModifyReturnValue are present on the same
+/// method, they fight over intermediate vs final values — the ordering between
+/// them is non-obvious and version-sensitive.
+fn recommend_for_modifier_combo(effect: &MixinEffect) -> Option<Recommendation> {
+    if !matches!(
+        effect.operation,
+        MixinOperation::ModifyExpressionValue | MixinOperation::ModifyReturnValue
+    ) {
+        return None;
+    }
+    let method_simple = effect.method.split('(').next().unwrap_or(&effect.method);
+    Some(Recommendation {
+        id: format!("modifier-combo:{}", effect.site_key),
+        title: "ModifyExpressionValue + ModifyReturnValue on the same method — ordering hazard"
+            .into(),
+        description: format!(
+            "Both @ModifyExpressionValue and @ModifyReturnValue are in use on `{}#{}`. \
+             The expression modifier rewrites an intermediate value before the method exits; \
+             the return modifier rewrites the final return value. If two mods each use one \
+             pattern, the one applied first may be overridden silently. Use MixinExtras \
+             @WrapOperation so both can read and compose the result in a defined order.",
+            effect.target, method_simple
+        ),
+        rationale: format!(
+            "Detected MEV+MRV combination on `{}#{}`.",
+            effect.target, method_simple
+        ),
+        confidence: 0.78,
+        example: Some(format!(
+            "// Instead of mixing MEV and MRV, use WrapOperation to compose both:\n\
+             @WrapOperation(method = \"{method_simple}\", at = @At(\"INVOKE\", ...))\n\
+             private ReturnType {method_simple}$compose(Operation<ReturnType> original) {{\n\
+             \x20   ReturnType result = original.call();\n\
+             \x20   // Apply MEV-style transform on intermediate state here\n\
+             \x20   return transformReturn(result); // MRV-style final rewrite\n\
+             }}",
+            method_simple = method_simple
+        )),
+        doc_url: Some(MIXINEXTRAS_WRAP.to_string()),
+    })
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Subsystem-aware recommendations
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Emit advice tuned to the target subsystem (render loop, tick, data loading,
+/// networking). Knowing *where* the mixin lives makes the recommendation
+/// immediately actionable — a render-loop allocation note means something
+/// different from a networking one.
+fn recommend_for_subsystem(effect: &MixinEffect) -> Vec<Recommendation> {
+    use crate::subsystem::classify_subsystem;
+    let Some(subsystem) = classify_subsystem(&effect.target) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let method_simple = effect.method.split('(').next().unwrap_or(&effect.method);
+    let target_simple = effect.target.rsplit('.').next().unwrap_or(&effect.target);
+
+    match subsystem {
+        Subsystem::Rendering => {
+            // Overwrites or heavy redirects in the render loop are the #1 FPS risk.
+            if matches!(
+                effect.operation,
+                MixinOperation::Overwrite
+                    | MixinOperation::Redirect
+                    | MixinOperation::WrapOperation
+            ) {
+                out.push(Recommendation {
+                    id: format!("render-subsystem:{}", effect.site_key),
+                    title: format!("Render-loop mixin on `{target_simple}#{method_simple}` — FPS risk"),
+                    description: format!(
+                        "This mixin weaves into `{}` which is on the render critical path. \
+                         Overwrites and redirects in render classes block multi-mod composition \
+                         and can introduce frame stutter. Prefer @Inject at specific INVOKE points \
+                         or @WrapOperation over @Redirect so other render mods can still layer \
+                         their own changes.",
+                        effect.target
+                    ),
+                    rationale: format!(
+                        "`{}` `{}` on rendering subsystem class `{}`.",
+                        effect.operation.as_str(), method_simple, effect.target
+                    ),
+                    confidence: 0.77,
+                    example: Some(format!(
+                        "// Before — @Redirect blocks all other render mods:\n\
+                         @Redirect(method = \"{method_simple}\", at = @At(...))\n\
+                         private ReturnType {target_simple}$redirect(...) {{ ... }}\n\n\
+                         // After — @WrapOperation composes cleanly:\n\
+                         @WrapOperation(method = \"{method_simple}\", at = @At(...))\n\
+                         private ReturnType {target_simple}$wrap(Operation<ReturnType> original) {{\n\
+                         \x20   ReturnType result = original.call(); // other mods still run\n\
+                         \x20   return transform(result);\n\
+                         }}",
+                        method_simple = method_simple,
+                        target_simple = target_simple
+                    )),
+                    doc_url: Some(MIXINEXTRAS_WRAP.to_string()),
+                });
+            }
+        }
+        // Overwrites in the tick loop risk TPS degradation and ordering issues.
+        Subsystem::ServerTick if effect.operation == MixinOperation::Overwrite => {
+            out.push(Recommendation {
+                id: format!("server-tick-overwrite:{}", effect.site_key),
+                title: format!("@Overwrite on tick-loop method `{target_simple}#{method_simple}` — TPS risk"),
+                description: format!(
+                    "Overwriting a method in `{}` (server tick path) replaces all \
+                     other mods' injectors on that method. Tick-loop overwrites are \
+                     a common cause of TPS drops when the replacement body is heavier \
+                     than the original, and they block performance monitoring hooks. \
+                     Prefer @Inject(HEAD, cancellable=true) with a narrow guard.",
+                    effect.target
+                ),
+                rationale: format!(
+                    "@Overwrite on tick-class `{}#{}` blocks downstream tick hooks.",
+                    effect.target, method_simple
+                ),
+                confidence: 0.80,
+                example: Some(format!(
+                    "// Before — @Overwrite blocks other tick hooks:\n\
+                     @Overwrite\n\
+                     public void {method_simple}() {{ /* heavy body */ }}\n\n\
+                     // After — @Inject with guard; other mods still observe the method:\n\
+                     @Inject(method = \"{method_simple}\", at = @At(\"HEAD\"), cancellable = true)\n\
+                     private void {target_simple}$guard(CallbackInfo ci) {{\n\
+                     \x20   if (shouldSkip()) ci.cancel(); // narrow guard\n\
+                     }}",
+                    method_simple = method_simple,
+                    target_simple = target_simple
+                )),
+                doc_url: Some(MIXIN_INJECT_WIKI.to_string()),
+            });
+        }
+        Subsystem::Networking => {
+            // Security-sensitive: heavy redirects in network handlers are audit targets.
+            if matches!(
+                effect.operation,
+                MixinOperation::Redirect | MixinOperation::Overwrite
+            ) {
+                out.push(Recommendation {
+                    id: format!("networking-redirect:{}", effect.site_key),
+                    title: format!(
+                        "Network-handler mixin `{target_simple}#{method_simple}` — security audit"
+                    ),
+                    description: format!(
+                        "`{}` is in the networking subsystem. Redirects and overwrites in \
+                         network handlers are an elevated security surface: they intercept \
+                         packet data before validation and can alter client↔server state. \
+                         Ensure the woven handler is audited; prefer @Inject so the \
+                         original handler still runs and performs its own validation.",
+                        effect.target
+                    ),
+                    rationale: format!(
+                        "`{}` `{}` weaves into network handling code.",
+                        effect.operation.as_str(),
+                        method_simple
+                    ),
+                    confidence: 0.75,
+                    example: Some(
+                        "// Audit checklist for network-handler mixins:\n\
+                         // 1. Does original.call() / the unmodified handler still run?\n\
+                         // 2. Is packet data validated before the mixin acts on it?\n\
+                         // 3. Does the mixin have server-side effects triggered by client data?"
+                            .to_string(),
+                    ),
+                    doc_url: Some(MIXIN_REDIRECT_WIKI.to_string()),
+                });
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW: Layer-M resource cross-layer enrichment
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Emit a recommendation when a mixin targets a data-loader subsystem AND Layer M
+/// has already found a static semantic conflict in that resource domain. The advice
+/// is upgraded with cross-layer context: the mixin is the likely *cause* or
+/// *mask* of the static conflict, so the developer needs to look at both layers.
+pub fn recommend_for_resource_context(
+    effect: &MixinEffect,
+    layer_m_conflicted_domains: &[&str],
+) -> Vec<Recommendation> {
+    use crate::resource_bridge::classify_resource_loader;
+    let Some(subsystem) = classify_resource_loader(&effect.target) else {
+        return Vec::new();
+    };
+    let domain = subsystem.domain();
+    if !layer_m_conflicted_domains.contains(&domain) {
+        return Vec::new();
+    }
+
+    let method_simple = effect.method.split('(').next().unwrap_or(&effect.method);
+    let target_simple = effect.target.rsplit('.').next().unwrap_or(&effect.target);
+    let subsystem_label = subsystem_label(subsystem);
+    let op = effect.operation.clone();
+    let strength_label = operation_strength_label(op.clone());
+
+    vec![Recommendation {
+        id: format!("layer-m-resource-conflict:{domain}:{}", effect.site_key),
+        title: format!(
+            "Mixin {} the `{domain}` loader while Layer M found a static {domain} conflict",
+            strength_label
+        ),
+        description: format!(
+            "Layer M (static resource analysis) found a semantic conflict in the `{domain}` domain, \
+             AND `{}` {} `{target_simple}#{method_simple}`. The mixin rewrites the very data Layer M \
+             reads as static JSON, so the static conflict may be *caused*, *masked*, or *compounded* \
+             by this mixin. The runtime {domain} state may differ from what datapack files show. \
+             Investigate whether the mixin intentionally overrides the conflicting {subsystem_label} \
+             entries, or whether it creates a second conflict layer on top of the static one.",
+            effect.mod_id, strength_label
+        ),
+        rationale: format!(
+            "Layer M static {domain} conflict + `{}` `{}` on `{}`.",
+            effect.mod_id,
+            effect.operation.as_str(),
+            effect.target
+        ),
+        confidence: operation_layer_m_confidence(op),
+        example: Some(format!(
+            "// Scenario: Layer M sees two datapacks define the same recipe `foo:bar`.\n\
+             // Your mixin {strength_label} RecipeManager — so at runtime *your code* produces\n\
+             // the final recipe set, not the datapacks. Layer M's verdict may be wrong.\n\n\
+             // Before — opaque @Redirect that hides which recipes survive:\n\
+             @Redirect(method = \"{method_simple}\", at = @At(\"INVOKE\", ...))\n\
+             private void {target_simple}$applyRecipes(...) {{\n\
+             \x20   // filters / replaces recipes silently\n\
+             }}\n\n\
+             // After — @Inject with explicit logging so other layers can observe:\n\
+             @Inject(method = \"{method_simple}\", at = @At(\"RETURN\"))\n\
+             private void {target_simple}$afterApply(CallbackInfo ci) {{\n\
+             \x20   LOGGER.debug(\"[{mod_id}] {domain} loader post-apply: {{}} entries\",\n\
+             \x20               this.recipes.size()); // observable audit trail\n\
+             }}",
+            method_simple = method_simple,
+            target_simple = target_simple,
+            mod_id = effect.mod_id,
+        )),
+        doc_url: Some(MIXIN_INJECT_WIKI.to_string()),
+    }]
+}
+
+fn subsystem_label(s: ResourceSubsystem) -> &'static str {
+    match s {
+        ResourceSubsystem::Recipe => "recipe",
+        ResourceSubsystem::LootTable => "loot-table",
+        ResourceSubsystem::Tag => "tag",
+        ResourceSubsystem::Advancement => "advancement",
+        ResourceSubsystem::Predicate => "predicate",
+        ResourceSubsystem::ItemModifier => "item-modifier",
+        ResourceSubsystem::Structure => "structure",
+        ResourceSubsystem::Function => "datapack-function",
+        ResourceSubsystem::Registry => "registry",
+    }
+}
+
+fn operation_strength_label(op: MixinOperation) -> &'static str {
+    match op {
+        MixinOperation::Overwrite => "replaces",
+        MixinOperation::Redirect | MixinOperation::WrapOperation => "rewrites",
+        MixinOperation::ModifyReturnValue | MixinOperation::ModifyExpressionValue => {
+            "rewrites the result of"
+        }
+        MixinOperation::Inject => "hooks into",
+        _ => "hooks into",
+    }
+}
+
+fn operation_layer_m_confidence(op: MixinOperation) -> f32 {
+    match op {
+        MixinOperation::Overwrite => 0.88,
+        MixinOperation::Redirect | MixinOperation::WrapOperation => 0.85,
+        MixinOperation::ModifyReturnValue | MixinOperation::ModifyExpressionValue => 0.80,
+        MixinOperation::Inject => 0.70,
+        _ => 0.65,
+    }
 }
 
 /// Historical runtime correlation boost when log facts report similar patterns.
@@ -514,7 +995,8 @@ pub fn historical_severity_boost(ctx: &RuleCtx<'_>, effect: &MixinEffect) -> u8 
     // Layer-I Spark hot-method correlation on the same target class.
     for f in ctx.store.by_kind(kind::HOT_METHOD) {
         let class = f.attr("class").unwrap_or(&f.subject);
-        if class == effect.target.as_str() || class.rsplit('.').next() == effect.target.rsplit('.').next()
+        if class == effect.target.as_str()
+            || class.rsplit('.').next() == effect.target.rsplit('.').next()
         {
             let percent = f.attr_f64("percent").unwrap_or(0.0);
             if percent >= 5.0 {
@@ -572,6 +1054,7 @@ mod tests {
             class_path: "a.class".into(),
             targets: vec!["T".into()],
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: ops,
             injected_methods: Vec::new(),
             shadows: Vec::new(),
@@ -584,6 +1067,9 @@ mod tests {
             hot_paths: if hot { vec!["tick".into()] } else { Vec::new() },
             effects: Vec::new(),
             plugin_gated: false,
+            side: crate::model::Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 
@@ -622,7 +1108,10 @@ mod tests {
         let class = sample_class(vec![MixinOperation::Overwrite], true);
         let effect = sample_effect(MixinOperation::Overwrite, true);
         let recs = recommend_for_effect(&effect, &class, 0);
-        let rec = recs.iter().find(|r| r.title.contains("@Inject")).expect("inject advice");
+        let rec = recs
+            .iter()
+            .find(|r| r.title.contains("@Inject"))
+            .expect("inject advice");
         assert!(rec.example.as_ref().is_some_and(|e| e.contains("@Inject")));
         assert!(rec.doc_url.is_some());
     }
@@ -663,8 +1152,14 @@ mod tests {
             edge(ConflictEdgeType::OverwriteVsInjector),
             edge(ConflictEdgeType::UniqueMemberConflict),
         ]);
-        assert!(recs.iter().any(|r| r.recommendation.id.starts_with("overwrite-locks-out")));
-        assert!(recs.iter().any(|r| r.recommendation.id.starts_with("unique-member")));
+        assert!(
+            recs.iter()
+                .any(|r| r.recommendation.id.starts_with("overwrite-locks-out"))
+        );
+        assert!(
+            recs.iter()
+                .any(|r| r.recommendation.id.starts_with("unique-member"))
+        );
     }
 
     #[test]
@@ -802,6 +1297,9 @@ mod tests {
             },
         ];
         let counts = redirect_counts_by_method(&[class]);
-        assert_eq!(counts.get(&("T".into(), "tick()V".into())).copied(), Some(2));
+        assert_eq!(
+            counts.get(&("T".into(), "tick()V".into())).copied(),
+            Some(2)
+        );
     }
 }

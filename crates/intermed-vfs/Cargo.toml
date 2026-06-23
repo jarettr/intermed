@@ -8,6 +8,7 @@ description = "Layer E — resource/data conflict analyzer (VFS)."
 
 [dependencies]
 intermed-doctor-core.workspace = true
+intermed-resource-identity.workspace = true
 intermed-rules.workspace = true
 rayon.workspace = true
 serde.workspace = true

@@ -12,10 +12,10 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
-    list_jar_archives, CollectCtx, Collector, CollectorOutcome, Layer, Loader, MetadataLevel,
-    Target,
+    CollectCtx, Collector, CollectorOutcome, Layer, Loader, MetadataLevel, Target,
+    list_jar_archives,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,7 @@ use crate::forge_annotation;
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan/parse logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r12");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r13");
 
 pub struct MetadataCollector;
 
@@ -56,24 +56,23 @@ impl Collector for MetadataCollector {
         let collector_id = self.id();
         let metadata_level = ctx.settings.metadata.level;
         let cache_version = format!("{CACHE_VERSION}-{}", metadata_level_name(metadata_level));
-        let scanned: Vec<(PathBuf, String, CachedJarOutcome)> =
-            jars.par_iter()
-                .map(|jar| {
-                    let name = jar
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    let outcome = match cache {
-                        Some(cache) => cache
-                            .get_or_scan(collector_id, &cache_version, jar, || {
-                                scan_jar_cached(jar, metadata_level)
-                            }),
-                        None => scan_jar_cached(jar, metadata_level),
-                    };
-                    (jar.clone(), name, outcome)
-                })
-                .collect();
+        let scanned: Vec<(PathBuf, String, CachedJarOutcome)> = jars
+            .par_iter()
+            .map(|jar| {
+                let name = jar
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let outcome = match cache {
+                    Some(cache) => cache.get_or_scan(collector_id, &cache_version, jar, || {
+                        scan_jar_cached(jar, metadata_level)
+                    }),
+                    None => scan_jar_cached(jar, metadata_level),
+                };
+                (jar.clone(), name, outcome)
+            })
+            .collect();
 
         for (jar, name, outcome) in scanned {
             match outcome {
@@ -163,10 +162,30 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
     builder.emit();
     emitted += 1;
 
+    // Frame-to-jar ownership: the class-package roots this mod ships. A crash stack
+    // frame under an exclusively-owned root is attributed to this mod by the
+    // `crash-blame` rule. Only for a real (non-synthetic) id — ownership must name a
+    // mod, not an `unknown:file` placeholder.
+    if !id_missing {
+        for root in &m.package_roots {
+            ctx.store
+                .fact("metadata-scanner", kind::PACKAGE_OWNER)
+                .subject(m.id.clone())
+                .attr("package", root.clone())
+                .attr("file", file)
+                .source(SourceRef::file(file))
+                .confidence(0.9)
+                .emit();
+            emitted += 1;
+        }
+    }
+
     // A hybrid jar's second role (e.g. a Bukkit plugin that also carries a Fabric
     // mod manifest) — informational, so no rule mistakes it for a separate mod.
     if let Some(secondary) = &m.secondary {
-        let (role, sid) = secondary.split_once(':').unwrap_or(("mod", secondary.as_str()));
+        let (role, sid) = secondary
+            .split_once(':')
+            .unwrap_or(("mod", secondary.as_str()));
         ctx.store
             .fact("metadata-scanner", kind::SECONDARY_IDENTITY)
             .subject(m.id.clone())
@@ -203,7 +222,10 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
                     m.side.unwrap_or("both")
                 },
             )
-            .attr("authors", serde_json::to_string(&m.authors).unwrap_or_else(|_| "[]".into()))
+            .attr(
+                "authors",
+                serde_json::to_string(&m.authors).unwrap_or_else(|_| "[]".into()),
+            )
             .source(SourceRef::inside(file, m.manifest_name));
         for (key, value) in [
             ("name", m.name.as_deref()),
@@ -257,7 +279,12 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
                 // finding. `known_incompatible` is reserved for the curated KB.
                 "breaks" => Some("declared_breaks"),
                 "recommends" | "suggests" => Some("recommended_together"),
-                "depends" if !matches!(dep.id.as_str(), "minecraft" | "java" | "fabricloader" | "forge" | "neoforge") => {
+                "depends"
+                    if !matches!(
+                        dep.id.as_str(),
+                        "minecraft" | "java" | "fabricloader" | "forge" | "neoforge"
+                    ) =>
+                {
                     Some("consumes_api")
                 }
                 _ => None,
@@ -353,7 +380,8 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
             .emit();
         emitted += 1;
         if ctx.settings.metadata.level != MetadataLevel::Basic {
-            let mut detail = ctx.store
+            let mut detail = ctx
+                .store
                 .fact("metadata-scanner", kind::ENTRYPOINT_DETAIL)
                 .subject(m.id.clone())
                 .attr("phase", ep.phase.clone())
@@ -363,7 +391,10 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
                 .confidence(if ep.events.is_empty() { 0.65 } else { 0.85 });
             if ctx.settings.metadata.level == MetadataLevel::Full {
                 detail = detail
-                    .attr("events", serde_json::to_string(&ep.events).unwrap_or_else(|_| "[]".into()))
+                    .attr(
+                        "events",
+                        serde_json::to_string(&ep.events).unwrap_or_else(|_| "[]".into()),
+                    )
                     .attr("priority", ep.priority);
             }
             detail.emit();
@@ -379,7 +410,10 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
             .attr("mechanism", at.mechanism.clone())
             .attr("access", at.access.clone())
             .attr("target_class", at.target_class.clone())
-            .attr("target_key", access::target_key_owned(&at.target_class, at.member.as_deref()))
+            .attr(
+                "target_key",
+                access::target_key_owned(&at.target_class, at.member.as_deref()),
+            )
             .source(SourceRef::inside(file, m.manifest_name));
         if !at.qualifier.is_empty() {
             builder = builder.attr("qualifier", at.qualifier.clone());
@@ -510,6 +544,8 @@ struct CachedArtifact {
     bytecode: BytecodeSignals,
     #[serde(default)]
     secondary: Option<String>,
+    #[serde(default)]
+    package_roots: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -565,6 +601,7 @@ fn artifact_to_cached(m: &Artifact) -> CachedArtifact {
         data_signals: m.data_signals,
         bytecode: m.bytecode.clone(),
         secondary: m.secondary.clone(),
+        package_roots: m.package_roots.clone(),
     }
 }
 
@@ -605,6 +642,7 @@ fn cached_to_artifact(c: CachedArtifact) -> Artifact {
         data_signals: c.data_signals,
         bytecode: c.bytecode,
         secondary: c.secondary,
+        package_roots: c.package_roots,
     }
 }
 
@@ -822,6 +860,10 @@ pub(crate) struct Artifact {
     /// Emitted as an informational `secondary_identity` fact, never as a competing
     /// `mod`/`plugin` fact (that would reintroduce loader-mismatch false positives).
     pub(crate) secondary: Option<String>,
+    /// Distinctive class-package roots this jar ships (dotted, e.g. `com.foo.mymod`),
+    /// excluding vanilla/JDK packages — the frame-to-jar ownership index. Filled in
+    /// `parse_jar` (Standard+ level); emitted as `package_owner` facts.
+    pub(crate) package_roots: Vec<String>,
 }
 
 /// Whole-jar bytecode intelligence (Full level): events subscribed/registered
@@ -868,7 +910,10 @@ fn read_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> O
     Some(s)
 }
 
-fn read_entry_bytes<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
+fn read_entry_bytes<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    name: &str,
+) -> Option<Vec<u8>> {
     let mut f = archive.by_name(name).ok()?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).ok()?;
@@ -877,7 +922,9 @@ fn read_entry_bytes<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str
 
 /// Dispatch on whichever manifest an archive carries. Generic over the reader so
 /// it works on both on-disk jars and in-memory nested jars.
-fn parse_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Result<Vec<Artifact>, ParseErr> {
+fn parse_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<Vec<Artifact>, ParseErr> {
     // Universal server plugins (e.g. ViaVersion) may bundle a mod manifest for
     // proxy-side hooks; the Bukkit/Paper plugin descriptor stays the *primary*
     // identity (a mod fact for the bundled manifest would re-introduce the
@@ -977,9 +1024,10 @@ fn parse_jar(path: &Path, metadata_level: MetadataLevel) -> Result<Vec<Artifact>
     let mut artifacts = parse_archive(&mut archive)?;
     if artifacts.is_empty() {
         artifacts = forge_annotation::discover_mods_from_jar(&mut archive);
-    } else if artifacts.iter().any(|a| {
-        matches!(a.loader, Loader::Forge | Loader::NeoForge) && a.entrypoints.is_empty()
-    }) {
+    } else if artifacts
+        .iter()
+        .any(|a| matches!(a.loader, Loader::Forge | Loader::NeoForge) && a.entrypoints.is_empty())
+    {
         // A `mods.toml` names the mod but not its entry class; scan `@Mod` classes
         // so Forge/NeoForge mods still get an `entrypoint` (phase = mod).
         let entrypoints = forge_annotation::discover_mod_entrypoints(&mut archive);
@@ -1032,7 +1080,70 @@ fn parse_jar(path: &Path, metadata_level: MetadataLevel) -> Result<Vec<Artifact>
         artifact.data_signals = signals;
     }
 
+    // Frame-to-jar ownership index: the distinctive class-package roots this jar
+    // ships, attached to the primary artifact (Enriched+ level — it enumerates
+    // every class entry). A crash frame under one of these roots is owned by this
+    // mod. Shared with all artifacts so a hybrid jar's roots are not lost.
+    if metadata_level != MetadataLevel::Basic && !artifacts.is_empty() {
+        let roots = collect_package_roots(&mut archive);
+        if let Some(primary) = artifacts.first_mut() {
+            primary.package_roots = roots;
+        }
+    }
+
     Ok(artifacts)
+}
+
+/// Distinctive class-package roots a jar ships, for frame-to-jar ownership. Returns
+/// dotted 3-segment roots (e.g. `com.foo.mymod`) with ≥2 classes, excluding vanilla
+/// and JDK packages a mod jar never legitimately owns. Shaded libraries (kotlin,
+/// apache, …) are deliberately *not* excluded — the blame rule treats a package
+/// owned by ≥2 mods as ambiguous, so a shared shaded lib yields no wrong blame.
+fn collect_package_roots<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for i in 0..archive.len() {
+        let Ok(entry) = archive.by_index(i) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name();
+        if !name.ends_with(".class") {
+            continue;
+        }
+        let Some(slash) = name.rfind('/') else {
+            continue; // default-package class — no useful root
+        };
+        let dir = &name[..slash];
+        let root: String = dir.split('/').take(3).collect::<Vec<_>>().join("/");
+        if root.is_empty() || is_excluded_owner_package(&root) {
+            continue;
+        }
+        *counts.entry(root).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(r, _)| r.replace('/', "."))
+        .collect()
+}
+
+/// Packages a mod jar never legitimately *owns* — vanilla and the JDK. Returned
+/// roots are slash-form, 3 segments deep.
+fn is_excluded_owner_package(root: &str) -> bool {
+    const EXCLUDED: &[&str] = &[
+        "net/minecraft",
+        "com/mojang",
+        "java/",
+        "javax/",
+        "jdk/",
+        "sun/",
+    ];
+    EXCLUDED
+        .iter()
+        .any(|p| root == p.trim_end_matches('/') || root.starts_with(p))
 }
 
 /// Scan the jar's data-pack tree for content signals. `data/<ns>/worldgen/…`,
@@ -1056,8 +1167,7 @@ fn collect_data_signals<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Dat
         if category_path.starts_with("worldgen/") {
             s.worldgen = true;
         }
-        if category_path.starts_with("dimension/") || category_path.starts_with("dimension_type/")
-        {
+        if category_path.starts_with("dimension/") || category_path.starts_with("dimension_type/") {
             s.dimension = true;
         }
         if category_path.starts_with("recipes/")
@@ -1125,12 +1235,17 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
     // entrypoint class (drives `entrypoint_detail`).
     for artifact in artifacts.iter_mut() {
         for entrypoint in &mut artifact.entrypoints {
-            let class_name = entrypoint.class.split("::").next().unwrap_or(&entrypoint.class);
+            let class_name = entrypoint
+                .class
+                .split("::")
+                .next()
+                .unwrap_or(&entrypoint.class);
             let path = format!("{}.class", class_name.replace('.', "/"));
             let Some(bytes) = read_entry_bytes(archive, &path) else {
                 continue;
             };
-            let Some(analysis) = crate::entrypoint_analysis::analyze_entrypoint_class(&bytes) else {
+            let Some(analysis) = crate::entrypoint_analysis::analyze_entrypoint_class(&bytes)
+            else {
                 continue;
             };
             if let Some(ty) = analysis.entrypoint_type {
@@ -1160,7 +1275,6 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
         artifact.bytecode.capabilities = intel.capabilities.clone();
     }
 }
-
 
 fn directive_to_transform(d: &access::AccessDirective) -> AccessTransform {
     AccessTransform {
@@ -1254,6 +1368,7 @@ fn parse_fabric(text: &str) -> Result<Artifact, ParseErr> {
         data_signals: DataSignals::default(),
         bytecode: BytecodeSignals::default(),
         secondary: None,
+        package_roots: Vec::new(),
     })
 }
 
@@ -1369,6 +1484,7 @@ fn parse_quilt(text: &str) -> Result<Artifact, ParseErr> {
         data_signals: DataSignals::default(),
         bytecode: BytecodeSignals::default(),
         secondary: None,
+        package_roots: Vec::new(),
     })
 }
 
@@ -1531,19 +1647,35 @@ fn parse_forge_toml(text: &str, loader: Loader) -> Result<Vec<Artifact>, ParseEr
             access_transforms: Vec::new(),
             coremods: Vec::new(),
             mixin_configs: Vec::new(),
-            name: entry.get("displayName").and_then(|x| x.as_str()).map(str::to_string),
-            description: entry.get("description").and_then(|x| x.as_str()).map(str::to_string),
+            name: entry
+                .get("displayName")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            description: entry
+                .get("description")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
             authors: entry
                 .get("authors")
                 .and_then(|x| x.as_str())
                 .map(split_people)
                 .unwrap_or_default(),
-            license: v.get("license").and_then(|x| x.as_str()).map(str::to_string),
-            icon: entry.get("logoFile").and_then(|x| x.as_str()).map(str::to_string),
-            update_json: entry.get("updateJSONURL").and_then(|x| x.as_str()).map(str::to_string),
+            license: v
+                .get("license")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            icon: entry
+                .get("logoFile")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            update_json: entry
+                .get("updateJSONURL")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
             data_signals: DataSignals::default(),
             bytecode: BytecodeSignals::default(),
             secondary: None,
+            package_roots: Vec::new(),
         });
     }
     Ok(out)
@@ -1684,6 +1816,7 @@ fn parse_plugin_yml(
         data_signals: DataSignals::default(),
         bytecode: BytecodeSignals::default(),
         secondary: None,
+        package_roots: Vec::new(),
     })
 }
 
@@ -1781,7 +1914,9 @@ fn json_people(v: Option<&serde_json::Value>) -> Vec<String> {
             .iter()
             .filter_map(|x| {
                 x.as_str().map(str::to_string).or_else(|| {
-                    x.get("name").and_then(|name| name.as_str()).map(str::to_string)
+                    x.get("name")
+                        .and_then(|name| name.as_str())
+                        .map(str::to_string)
                 })
             })
             .collect(),
@@ -1797,7 +1932,9 @@ fn json_paths(v: Option<&serde_json::Value>) -> Vec<String> {
             .iter()
             .filter_map(|x| {
                 x.as_str().map(str::to_string).or_else(|| {
-                    x.get("config").and_then(|path| path.as_str()).map(str::to_string)
+                    x.get("config")
+                        .and_then(|path| path.as_str())
+                        .map(str::to_string)
                 })
             })
             .collect(),
@@ -1808,9 +1945,10 @@ fn json_paths(v: Option<&serde_json::Value>) -> Vec<String> {
 fn yaml_people(v: Option<&serde_yaml::Value>) -> Vec<String> {
     match v {
         Some(serde_yaml::Value::String(s)) => split_people(s),
-        Some(serde_yaml::Value::Sequence(values)) => {
-            values.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()
-        }
+        Some(serde_yaml::Value::Sequence(values)) => values
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1857,13 +1995,15 @@ fn normalize_version(raw: &str) -> String {
         .unwrap_or(trimmed)
         .trim();
     let num = |s: &str| -> Option<u64> { s.parse::<u64>().ok() };
-    let parts: Vec<u64> = core
-        .split('.')
-        .map(|p| num(p).unwrap_or(0))
-        .collect();
+    let parts: Vec<u64> = core.split('.').map(|p| num(p).unwrap_or(0)).collect();
     // Require at least one genuinely-numeric component, else keep the original.
     if core.split('.').next().and_then(num).is_none() {
-        return trimmed.split('+').next().unwrap_or(trimmed).trim().to_string();
+        return trimmed
+            .split('+')
+            .next()
+            .unwrap_or(trimmed)
+            .trim()
+            .to_string();
     }
     let major = parts.first().copied().unwrap_or(0);
     let minor = parts.get(1).copied().unwrap_or(0);
@@ -1959,21 +2099,41 @@ fn infer_capabilities(m: &Artifact) -> Vec<(&'static str, &'static str, f32)> {
     if m.data_signals.worldgen {
         add("has_worldgen", "ships data/<ns>/worldgen content", 0.9);
     } else if entry_class_hint("worldgen") || entry_class_hint("dimension") {
-        add("has_worldgen", "worldgen/dimension entrypoint class path", 0.55);
+        add(
+            "has_worldgen",
+            "worldgen/dimension entrypoint class path",
+            0.55,
+        );
     }
     if m.data_signals.dimension {
-        add("adds_custom_dimension", "ships data/<ns>/dimension content", 0.9);
+        add(
+            "adds_custom_dimension",
+            "ships data/<ns>/dimension content",
+            0.9,
+        );
         add("has_worldgen", "ships custom dimension data", 0.8);
     }
 
     // ── Rendering: a render event subscription, an AT into a render class, or an
     //    author-declared render/client entrypoint class path ──
     if event_has("render") || event_has("camera") || event_has("hud") || event_has("gui") {
-        add("modifies_rendering", "subscribes to a render/HUD event", 0.85);
+        add(
+            "modifies_rendering",
+            "subscribes to a render/HUD event",
+            0.85,
+        );
     } else if at_touches("client/render") || at_touches("client/gui") || at_touches("/render/") {
-        add("modifies_rendering", "access transform on a render class", 0.8);
+        add(
+            "modifies_rendering",
+            "access transform on a render class",
+            0.8,
+        );
     } else if entry_class_hint("render") || entry_class_hint("shader") || entry_class_hint("gui") {
-        add("modifies_rendering", "render/shader entrypoint class path", 0.6);
+        add(
+            "modifies_rendering",
+            "render/shader entrypoint class path",
+            0.6,
+        );
     }
 
     // ── Lifecycle / tick / world: from the real subscribed event types ──
@@ -1981,10 +2141,18 @@ fn infer_capabilities(m: &Artifact) -> Vec<(&'static str, &'static str, f32)> {
         add("hooks_game_tick", "subscribes to a tick event", 0.85);
     }
     if event_has("serverstart") || event_has("serverstopp") || event_has("serverlifecycle") {
-        add("hooks_server_lifecycle", "subscribes to a server-lifecycle event", 0.85);
+        add(
+            "hooks_server_lifecycle",
+            "subscribes to a server-lifecycle event",
+            0.85,
+        );
     }
     if event_has("world") || event_has("level") || event_has("chunk") {
-        add("hooks_world_events", "subscribes to a world/chunk event", 0.8);
+        add(
+            "hooks_world_events",
+            "subscribes to a world/chunk event",
+            0.8,
+        );
     }
 
     // ── Code-transformation footprint ──
@@ -1992,7 +2160,11 @@ fn infer_capabilities(m: &Artifact) -> Vec<(&'static str, &'static str, f32)> {
         add("modifies_game_code", "declares mixin configuration", 0.9);
     }
     if !m.access_transforms.is_empty() || !m.coremods.is_empty() {
-        add("deep_runtime_integration", "declares access transforms / coremods", 0.9);
+        add(
+            "deep_runtime_integration",
+            "declares access transforms / coremods",
+            0.9,
+        );
     }
 
     // ── Whole-jar bytecode evidence: framework references prove content
@@ -2004,7 +2176,11 @@ fn infer_capabilities(m: &Artifact) -> Vec<(&'static str, &'static str, f32)> {
             add(name, "bytecode: framework class reference", 0.8);
         }
     }
-    let registers_content = m.bytecode.capabilities.iter().any(|c| c == "registers_content")
+    let registers_content = m
+        .bytecode
+        .capabilities
+        .iter()
+        .any(|c| c == "registers_content")
         || m.data_signals.content;
 
     // ── Performance-oriented: a *behavioural* mod (transforms code, registers no

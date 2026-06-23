@@ -344,13 +344,17 @@ pub fn parse_local_captures(annotation: &Annotation<'_>) -> Vec<LocalCaptureDesc
         }
         match &element.value {
             AnnotationElementValue::EnumConstant { const_name, .. } => {
-                out.push(LocalCaptureDescriptor::from_capture_enum(const_name.as_ref()));
+                out.push(LocalCaptureDescriptor::from_capture_enum(
+                    const_name.as_ref(),
+                ));
             }
             // Defensive: an array of enum constants.
             AnnotationElementValue::ArrayValue(values) => {
                 for v in values {
                     if let AnnotationElementValue::EnumConstant { const_name, .. } = v {
-                        out.push(LocalCaptureDescriptor::from_capture_enum(const_name.as_ref()));
+                        out.push(LocalCaptureDescriptor::from_capture_enum(
+                            const_name.as_ref(),
+                        ));
                     }
                 }
             }
@@ -496,10 +500,7 @@ pub fn build_site_key(
         canonical_method
     };
     let mut key = format!("{method_part}@{}", at.key_fragment());
-    if let Some(pl) = param_locals
-        .iter()
-        .find_map(|p| p.index.or(p.ordinal))
-    {
+    if let Some(pl) = param_locals.iter().find_map(|p| p.index.or(p.ordinal)) {
         key.push_str(&format!(":plocal{pl}"));
     } else if let Some(local) = locals.iter().find_map(|l| l.local_index) {
         key.push_str(&format!(":local{local}"));

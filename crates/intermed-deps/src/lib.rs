@@ -22,7 +22,10 @@
 //! with a derivation-tree explanation when the installed catalog is jointly
 //! inconsistent.
 
+mod effective;
+mod explain;
 mod graph;
+mod impact;
 mod implicit;
 mod ordering;
 mod pairwise;
@@ -33,15 +36,24 @@ mod resolver;
 mod rule;
 mod semver;
 
-pub use graph::{
-    build_graph, ModDependencyEdge, ModPackage, ModpackGraph, ProvidedAlias, SkipReason,
-    SkippedPackage, MODPACK_ROOT_ID, PLATFORM_IDS,
+pub use effective::{DeclaredDep, EffectiveModel, ImplicitDep};
+pub use explain::{
+    DepEdge, DependencyIndex, EdgeKind, ImplicitRef, WhyReport, implicit_for_namespace,
+    path as dependency_path, why, why_missing,
 };
-pub use provider::{build_provider, ModpackProvider, ProviderError};
-pub use ranges::{parse_mod_range, ModRange};
+pub use graph::{
+    MODPACK_ROOT_ID, ModDependencyEdge, ModPackage, ModpackGraph, PLATFORM_IDS, ProvidedAlias,
+    SkipReason, SkippedPackage, build_graph,
+};
+pub use impact::{
+    BreakingDep, ImplicitDependent, RemoveImpact, ReverseResourceImpact, UpdateImpact,
+    remove_impact, update_impact,
+};
+pub use provider::{ModpackProvider, ProviderError, build_provider};
+pub use ranges::{ModRange, parse_mod_range};
 pub use report::{format_derivation_tree, format_unsat_tree};
 pub use resolver::{
-    resolve_graph, resolve_store, ResolutionOutcome, ResolutionSkipReason, ResolverError,
+    ResolutionOutcome, ResolutionSkipReason, ResolverError, resolve_graph, resolve_store,
 };
 pub use rule::DependencyRule;
 pub use semver::{parse_lenient, parse_mod_version, parse_version_reqs, version_in_range};

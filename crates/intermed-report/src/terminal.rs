@@ -5,9 +5,9 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use intermed_doctor_core::facts::{kind, Fact};
 use intermed_doctor_core::DoctorReport;
-use intermed_evidence::Severity;
+use intermed_doctor_core::facts::{Fact, kind};
+use intermed_evidence::{FindingVisibility, Severity};
 
 struct Palette {
     on: bool,
@@ -93,36 +93,58 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     }
     out.push('\n');
 
-    // Findings
-    if report.findings.is_empty() {
-        let _ = writeln!(out, "{}", p.paint("1;32", "✓ No findings."));
-    } else {
-        for f in &report.findings {
-            let _ = writeln!(out, "{} {}", p.sev(f.severity), p.bold(&f.title));
-            if !f.explanation.is_empty() {
-                let _ = writeln!(out, "      {}", f.explanation);
-            }
-            if !f.affected_components.is_empty() {
-                let _ = writeln!(
-                    out,
-                    "      {} {}",
-                    p.dim("affects:"),
-                    f.affected_components.join(", ")
-                );
-            }
-            for fix in &f.fix_candidates {
-                let _ = writeln!(out, "      {} {}", p.paint("32", "→ fix:"), fix.description);
-                if let Some(cmd) = &fix.command {
-                    let _ = writeln!(out, "             {}", p.dim(cmd));
-                }
-            }
-            let _ = writeln!(
-                out,
-                "      {}",
-                p.dim(&format!("[{}] rule={}", f.id, f.rule_id))
-            );
-            out.push('\n');
+    // Findings. "Normal state" findings (safe merges, pack.mcmeta overrides) are
+    // collapsed to a one-line summary; the rest are grouped by family so a pack
+    // with many similar findings prints one stanza per family, not per finding.
+    let mut safe_merges = 0usize;
+    let mut overlay_only = 0usize;
+    let mut visible_findings: Vec<&intermed_evidence::Finding> = Vec::new();
+    for f in &report.findings {
+        match f.visibility {
+            FindingVisibility::ExplainOnly => safe_merges += 1,
+            FindingVisibility::OverlayOnly => overlay_only += 1,
+            // `Verbose` is reserved for a future --verbose gate; until then it is
+            // shown like a default finding rather than silently dropped.
+            FindingVisibility::Default | FindingVisibility::Verbose => visible_findings.push(f),
         }
+    }
+
+    let groups = crate::grouping::group_findings(&visible_findings);
+    // A family with this many members collapses to a group summary; smaller
+    // families print full per-finding detail so individual issues stay readable.
+    const GROUP_THRESHOLD: usize = 3;
+    for group in &groups {
+        if group.len() >= GROUP_THRESHOLD {
+            render_group(&mut out, &p, group);
+        } else {
+            for f in &group.members {
+                render_finding(&mut out, &p, f);
+            }
+        }
+    }
+    if visible_findings.is_empty() {
+        let _ = writeln!(out, "{}", p.paint("1;32", "✓ No actionable findings."));
+    }
+    if safe_merges > 0 {
+        let _ = writeln!(
+            out,
+            "{} {} are safe set-union merges (normal). {}",
+            p.dim("note:"),
+            p.bold(&format!("{safe_merges} resource collision(s)")),
+            p.dim("Use --vfs-explain-safe to inspect them.")
+        );
+    }
+    if overlay_only > 0 {
+        let _ = writeln!(
+            out,
+            "{} {} are pack.mcmeta overrides (expected; an overlay carries its own). {}",
+            p.dim("note:"),
+            p.bold(&format!("{overlay_only} metadata file(s)")),
+            p.dim("Use --vfs-explain-safe to inspect them.")
+        );
+    }
+    if safe_merges > 0 || overlay_only > 0 {
+        out.push('\n');
     }
 
     // Resource Semantics (Layer M) — a compact summary of the typed-AST evidence.
@@ -155,10 +177,16 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     } else {
         p.paint("1;31", "PROBLEMS")
     };
+    // Lead with the signal/noise split — `actionable` (fatal+error+warn) is what
+    // needs attention; the rest is informational (safe merges, effect notes).
+    let actionable = s.fatal + s.error + s.warn;
+    let informational = s.note + s.info;
     let _ = writeln!(
         out,
-        "{}  {} fatal, {} error, {} warn, {} note, {} info  ({} facts)",
+        "{}  {} actionable, {} informational  ({} fatal, {} error, {} warn, {} note, {} info · {} facts)",
         verdict,
+        actionable,
+        informational,
         s.fatal,
         s.error,
         s.warn,
@@ -170,18 +198,81 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     out
 }
 
+/// Render one finding as a full stanza (title, explanation, affects, fixes, id).
+fn render_finding(out: &mut String, p: &Palette, f: &intermed_evidence::Finding) {
+    let _ = writeln!(out, "{} {}", p.sev(f.severity), p.bold(&f.title));
+    if !f.explanation.is_empty() {
+        let _ = writeln!(out, "      {}", f.explanation);
+    }
+    if !f.affected_components.is_empty() {
+        let _ = writeln!(
+            out,
+            "      {} {}",
+            p.dim("affects:"),
+            f.affected_components.join(", ")
+        );
+    }
+    for fix in &f.fix_candidates {
+        let _ = writeln!(out, "      {} {}", p.paint("32", "→ fix:"), fix.description);
+        if let Some(cmd) = &fix.command {
+            let _ = writeln!(out, "             {}", p.dim(cmd));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "      {}",
+        p.dim(&format!("[{}] rule={}", f.id, f.rule_id))
+    );
+    out.push('\n');
+}
+
+/// Render a collapsed family of findings: one header line + a bounded sample of
+/// affected subjects, instead of one stanza per finding.
+fn render_group(out: &mut String, p: &Palette, group: &crate::grouping::FindingGroup<'_>) {
+    const SAMPLE: usize = 8;
+    let _ = writeln!(
+        out,
+        "{} {}",
+        p.sev(group.severity),
+        p.bold(&format!("{}: {} path(s)", group.title, group.len()))
+    );
+    // A representative explanation/fix from the first member (they share a family).
+    if let Some(first) = group.members.first() {
+        if !first.explanation.is_empty() {
+            let _ = writeln!(out, "      {}", p.dim(&first.explanation));
+        }
+        if let Some(fix) = first.fix_candidates.first() {
+            let _ = writeln!(out, "      {} {}", p.paint("32", "→ fix:"), fix.description);
+        }
+    }
+    let (sample, extra) = group.sample_subjects(SAMPLE);
+    let suffix = if extra > 0 {
+        format!("  (+{extra} more)")
+    } else {
+        String::new()
+    };
+    let _ = writeln!(out, "      {}{}", p.dim(&sample.join(", ")), p.dim(&suffix));
+    out.push('\n');
+}
+
 /// A compact "Resource Semantics" block from Layer-M facts, or `None` when the
 /// layer did not run / found nothing. Summary only — the detail lives in the
 /// findings list above and in `vfs explain --path <p> --ast`.
 fn resource_semantics_section(facts: &[Fact], p: &Palette) -> Option<String> {
-    let parsed = facts.iter().filter(|f| f.kind == kind::RESOURCE_AST_PARSED).count();
+    let parsed = facts
+        .iter()
+        .filter(|f| f.kind == kind::RESOURCE_AST_PARSED)
+        .count();
     if parsed == 0 {
         return None;
     }
 
     let mut recipe_overrides = 0usize;
     let mut lang_conflicts = 0usize;
-    for f in facts.iter().filter(|f| f.kind == kind::RESOURCE_SEMANTIC_DIFF) {
+    for f in facts
+        .iter()
+        .filter(|f| f.kind == kind::RESOURCE_SEMANTIC_DIFF)
+    {
         match f.attr("diff_kind") {
             Some("recipe-output-override") => recipe_overrides += 1,
             Some("lang-key-conflict") => lang_conflicts += 1,

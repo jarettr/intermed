@@ -76,9 +76,7 @@ pub fn classify_impact(operation: &MixinOperation, at: Option<&AtDescriptor>) ->
         MixinOperation::ModifyConstant
         | MixinOperation::ModifyExpressionValue
         | MixinOperation::ModifyReturnValue
-        | MixinOperation::ModifyReceiver => {
-            InjectionImpact::ConstantMutation
-        }
+        | MixinOperation::ModifyReceiver => InjectionImpact::ConstantMutation,
         MixinOperation::Inject => classify_inject_at(at),
         MixinOperation::Shadow
         | MixinOperation::Accessor

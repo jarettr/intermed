@@ -5,6 +5,8 @@
 //! `--explain <finding>` output (Phase 2) can show *why* InterMed concluded
 //! something — never an unsourced verdict.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use intermed_facts::FactId;
@@ -61,6 +63,89 @@ pub enum Category {
     Performance,
     Packaging,
     Runtime,
+}
+
+/// How prominently a finding is surfaced in the default report.
+///
+/// Not every true statement is a *problem*. A safe set-union tag merge or the 20
+/// `pack.mcmeta` files in 20 jars are normal states, not findings to dump on the
+/// user. Visibility lets a rule record the fact without spamming the default
+/// report: it stays in the JSON (machine consumers / `--explain`) but the
+/// terminal collapses it to a one-line summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindingVisibility {
+    /// Shown in the default report.
+    #[default]
+    Default,
+    /// Hidden by default; shown with `--verbose`.
+    Verbose,
+    /// Only surfaced by explain views (e.g. `--vfs-explain-safe`). Used for
+    /// "this is fine" states like safe CRDT merges.
+    ExplainOnly,
+    /// Only relevant when generating an overlay/PackOps preview (e.g. the
+    /// `pack.mcmeta` the overlay must itself carry). Not a user-facing problem.
+    OverlayOnly,
+}
+
+impl FindingVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingVisibility::Default => "default",
+            FindingVisibility::Verbose => "verbose",
+            FindingVisibility::ExplainOnly => "explain-only",
+            FindingVisibility::OverlayOnly => "overlay-only",
+        }
+    }
+
+    /// Whether this finding appears in the default (non-verbose) terminal report.
+    pub fn shown_by_default(self) -> bool {
+        matches!(self, FindingVisibility::Default)
+    }
+}
+
+/// A structured, human-and-machine-readable summary of one piece of evidence.
+///
+/// Findings carry raw [`EvidenceEdge`] fact ids for full provenance, but an
+/// external consumer should not have to cross-reference a fact dump to learn
+/// *what* the evidence said. `evidence_summary` lifts the salient fields
+/// (resource path, writers, classification, semantic diff) inline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceSummaryItem {
+    /// The fact predicate this summarizes (e.g. `resource_collision`).
+    pub kind: String,
+    /// Resource path / subject, when the evidence concerns one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Mods that wrote the resource, when applicable.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writers: Vec<String>,
+    /// Collision/merge class (`json-override`, `safe-crdt-merge`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    /// Semantic diff kind (`recipe-output-override`, `lang-key-conflict`, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_kind: Option<String>,
+    /// Sample values that differ (e.g. the conflicting recipe outputs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// Forward-compatible escape hatch for fields not yet promoted to columns.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub detail: BTreeMap<String, String>,
+}
+
+impl EvidenceSummaryItem {
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            path: None,
+            writers: Vec::new(),
+            classification: None,
+            diff_kind: None,
+            outputs: Vec::new(),
+            detail: BTreeMap::new(),
+        }
+    }
 }
 
 /// Relation kinds for [`EvidenceEdge`].
@@ -153,12 +238,26 @@ pub struct Finding {
     /// Human explanation in plain language.
     pub explanation: String,
     pub evidence: Vec<EvidenceEdge>,
+    /// Structured, inline summary of the cited evidence. Populated centrally at
+    /// report-assembly time from the evidence facts, so consumers don't have to
+    /// resolve fact ids against a dump. Empty until then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_summary: Vec<EvidenceSummaryItem>,
     pub confidence: f32,
     /// Mods / plugins / paths this finding concerns.
     pub affected_components: Vec<String>,
     pub fix_candidates: Vec<FixCandidate>,
     /// Stable tags for machine consumers / CI filters (e.g. `["dependency", "missing"]`).
     pub machine_tags: Vec<String>,
+    /// How prominently this finding is surfaced (default report vs explain-only).
+    #[serde(default)]
+    pub visibility: FindingVisibility,
+    /// Rule ids that contributed to this finding after merge. Empty means the
+    /// single `rule_id` is authoritative; populated when findings sharing an `id`
+    /// from different rules are merged (e.g. a Layer-E collision absorbed into a
+    /// Layer-M semantic finding, or SBOM correlation enriching a signature note).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_sources: Vec<String>,
 }
 
 /// Fluent builder so rules read declaratively.
@@ -177,10 +276,13 @@ impl Finding {
                 title: String::new(),
                 explanation: String::new(),
                 evidence: Vec::new(),
+                evidence_summary: Vec::new(),
                 confidence: 0.9,
                 affected_components: Vec::new(),
                 fix_candidates: Vec::new(),
                 machine_tags: Vec::new(),
+                visibility: FindingVisibility::Default,
+                rule_sources: Vec::new(),
             },
         }
     }
@@ -221,6 +323,11 @@ impl FindingBuilder {
     }
     pub fn confidence(mut self, c: f32) -> Self {
         self.finding.confidence = c.clamp(0.0, 1.0);
+        self
+    }
+    /// Set how prominently the finding is surfaced (default vs explain-only).
+    pub fn visibility(mut self, v: FindingVisibility) -> Self {
+        self.finding.visibility = v;
         self
     }
     pub fn build(self) -> Finding {

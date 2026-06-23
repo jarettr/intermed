@@ -1,0 +1,10 @@
+[package]
+name = "intermed-resource-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Canonical Minecraft resource identity model (ResourceKey/domain/namespace) shared by Layer E (VFS) and Layer M (resource AST)."
+
+[dependencies]
+serde.workspace = true

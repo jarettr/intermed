@@ -23,7 +23,7 @@ use cafebabe::attributes::{Annotation, AnnotationElementValue, AttributeData};
 use cafebabe::bytecode::Opcode;
 use cafebabe::constant_pool::ConstantPoolItem;
 use cafebabe::descriptors::FieldType;
-use cafebabe::{parse_class_with_options, ParseOptions};
+use cafebabe::{ParseOptions, parse_class_with_options};
 
 /// `@SubscribeEvent` method-annotation descriptors (Forge + NeoForge).
 const SUBSCRIBE_EVENT: &[&str] = &[
@@ -136,7 +136,10 @@ fn subscribe_priority(ann: &Annotation<'_>) -> Option<i64> {
 /// Detect Fabric/Quilt `SomethingEvents.FIELD.register(…)` listener registration:
 /// a `getstatic` of a field on a `*Events`/`*Callback(s)` owner immediately
 /// followed (in the same body) by a `register` invoke records the event family.
-fn scan_method_registrations(attributes: &[cafebabe::attributes::AttributeInfo<'_>], a: &mut EntrypointAnalysis) {
+fn scan_method_registrations(
+    attributes: &[cafebabe::attributes::AttributeInfo<'_>],
+    a: &mut EntrypointAnalysis,
+) {
     let Some(code) = attributes.iter().find_map(|attr| match &attr.data {
         AttributeData::Code(code) => Some(code),
         _ => None,
@@ -151,7 +154,10 @@ fn scan_method_registrations(attributes: &[cafebabe::attributes::AttributeInfo<'
         match op {
             Opcode::Getstatic(m) => {
                 let owner = m.class_name.as_ref();
-                if owner.contains("Events") || owner.ends_with("Callback") || owner.ends_with("Callbacks") {
+                if owner.contains("Events")
+                    || owner.ends_with("Callback")
+                    || owner.ends_with("Callbacks")
+                {
                     pending = Some(format!(
                         "{}.{}",
                         simple_class(owner),
@@ -229,7 +235,10 @@ const CAPABILITY_REFS: &[(&str, &str)] = &[
     ("itemgroup/v1/FabricItemGroup", "adds_creative_tab"),
     ("block/entity/BlockEntityType", "adds_block_entities"),
     ("attachment/AttachmentType", "uses_data_attachments"),
-    ("common/capabilities/CapabilityManager", "uses_forge_capabilities"),
+    (
+        "common/capabilities/CapabilityManager",
+        "uses_forge_capabilities",
+    ),
     ("worldgen/feature/ConfiguredFeature", "has_worldgen"),
     ("worldgen/placement/PlacedFeature", "has_worldgen"),
 ];
@@ -263,7 +272,10 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
             if !name.ends_with(".class") || name.contains("module-info") {
                 continue;
             }
-            let dotted = name.strip_suffix(".class").unwrap_or(&name).replace('/', ".");
+            let dotted = name
+                .strip_suffix(".class")
+                .unwrap_or(&name)
+                .replace('/', ".");
             let mut bytes = Vec::new();
             if entry.read_to_end(&mut bytes).is_err() {
                 continue;
@@ -315,7 +327,9 @@ fn scan_class_signals(
             // Handler-body cost — a heavy handler on a *tick* event is a direct
             // performance signal (it runs every tick). Real bytecode analysis.
             let cost = method_body_cost(&method.attributes);
-            let is_tick = event.as_deref().is_some_and(|e| e.to_ascii_lowercase().contains("tick"));
+            let is_tick = event
+                .as_deref()
+                .is_some_and(|e| e.to_ascii_lowercase().contains("tick"));
             if cost.is_heavy() {
                 caps.insert("heavy_event_handler");
                 if is_tick {
@@ -491,9 +505,8 @@ mod tests {
 
     #[test]
     fn subscribe_event_method_yields_event_from_first_parameter() {
-        let bytes = testgen::subscribe_event_class(
-            "Lnet/minecraftforge/event/server/ServerStartingEvent;",
-        );
+        let bytes =
+            testgen::subscribe_event_class("Lnet/minecraftforge/event/server/ServerStartingEvent;");
         let a = analyze_entrypoint_class(&bytes).expect("analysis");
         assert_eq!(a.entrypoint_type, Some("event_bus_subscriber"));
         assert!(a.registers_listeners);

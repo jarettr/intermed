@@ -86,9 +86,7 @@ fn overlay_skips_unsafe_winners_by_default_and_stages_with_flag() {
     assert!(!plan.manifest.items[0].runtime_order_known);
     assert!(!plan.manifest.safe_to_apply);
     assert!(plan.manifest.skipped.is_empty());
-    assert!(unsafe_out
-        .join("data/example/recipes/widget.json")
-        .exists());
+    assert!(unsafe_out.join("data/example/recipes/widget.json").exists());
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -118,9 +116,10 @@ fn overlay_does_not_remove_preexisting_temp_directory() {
     std::fs::write(tmp.join("owner.txt"), "not ours").unwrap();
 
     let err = write_overlay_preview(&mods, &out, false).unwrap_err();
-    assert!(err
-        .to_string()
-        .contains("temporary overlay path already exists"));
+    assert!(
+        err.to_string()
+            .contains("temporary overlay path already exists")
+    );
     assert_eq!(
         std::fs::read_to_string(tmp.join("owner.txt")).unwrap(),
         "not ours"

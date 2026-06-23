@@ -13,7 +13,7 @@ use thiserror::Error;
 use zip::read::ZipArchive;
 
 use crate::instance_layout::resolve_layout;
-use crate::target::{target_from_layout, Target, TargetKind};
+use crate::target::{Target, TargetKind, target_from_layout};
 
 /// Error unpacking a modpack archive.
 #[derive(Debug, Error)]
@@ -27,7 +27,7 @@ pub enum ModpackError {
 /// Temporary mount of an extracted modpack; removed on drop.
 pub struct ModpackMount {
     root: PathBuf,
-    _guard: TempDirGuard,
+    _guard: tempfile::TempDir,
 }
 
 impl ModpackMount {
@@ -35,14 +35,6 @@ impl ModpackMount {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
-    }
-}
-
-struct TempDirGuard(PathBuf);
-
-impl Drop for TempDirGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -57,28 +49,26 @@ pub fn materialize_modpack_archive(
         return Ok((target.clone(), None));
     }
     let guard_dir = temp_extract_dir(&target.path)?;
-    extract_archive(&target.path, &guard_dir)?;
-    let root = find_instance_root(&guard_dir)?;
+    extract_archive(&target.path, guard_dir.path())?;
+    let root = find_instance_root(guard_dir.path())?;
     let resolved = resolve_layout(&root);
     let updated = target_from_layout(&root, &resolved);
     let mount = ModpackMount {
         root: root.clone(),
-        _guard: TempDirGuard(guard_dir),
+        _guard: guard_dir,
     };
     Ok((updated, Some(mount)))
 }
 
-fn temp_extract_dir(archive: &Path) -> Result<PathBuf, ModpackError> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| ModpackError::Message(e.to_string()))?
-        .as_nanos();
+fn temp_extract_dir(archive: &Path) -> Result<tempfile::TempDir, ModpackError> {
     let stem = archive
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("modpack");
-    let dir = std::env::temp_dir().join(format!("intermed-modpack-{stem}-{nanos}"));
-    fs::create_dir_all(&dir)?;
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("intermed-modpack-{stem}-"))
+        .tempdir()
+        .map_err(|e| ModpackError::Message(e.to_string()))?;
     Ok(dir)
 }
 
@@ -259,8 +249,8 @@ pub fn is_mrpack_layout(root: &Path) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     fn write_test_zip(path: &Path, entries: &[(&str, &[u8])]) {
         let file = File::create(path).unwrap();
@@ -286,10 +276,7 @@ mod tests {
         let archive = dir.join("pack.zip");
         write_test_zip(
             &archive,
-            &[
-                ("mods/alpha.jar", b"jar"),
-                ("server.properties", b"test=1"),
-            ],
+            &[("mods/alpha.jar", b"jar"), ("server.properties", b"test=1")],
         );
         let target = Target {
             path: archive.clone(),
@@ -303,8 +290,16 @@ mod tests {
         let (updated, mount) = materialize_modpack_archive(&target).expect("extract");
         assert!(mount.is_some());
         assert_eq!(updated.kind, TargetKind::Server);
-        assert!(updated.mods_dir.as_ref().is_some_and(|m| m.ends_with("mods")));
-        assert_eq!(updated.instance_type, Some(crate::target::InstanceType::Server));
+        assert!(
+            updated
+                .mods_dir
+                .as_ref()
+                .is_some_and(|m| m.ends_with("mods"))
+        );
+        assert_eq!(
+            updated.instance_type,
+            Some(crate::target::InstanceType::Server)
+        );
         fs::remove_dir_all(dir).ok();
     }
 
@@ -353,7 +348,10 @@ mod tests {
     fn extraction_rejects_zip_slip_entry() {
         let dir = unique_dir("intermed-modpack-slip");
         let archive = dir.join("evil.zip");
-        write_test_zip(&archive, &[("../escape.txt", b"pwned"), ("mods/ok.jar", b"j")]);
+        write_test_zip(
+            &archive,
+            &[("../escape.txt", b"pwned"), ("mods/ok.jar", b"j")],
+        );
         let dest = dir.join("out");
         fs::create_dir_all(&dest).unwrap();
         let err = extract_archive(&archive, &dest).unwrap_err();
@@ -367,10 +365,10 @@ mod tests {
     fn extraction_rejects_too_many_entries() {
         let dir = unique_dir("intermed-modpack-count");
         let archive = dir.join("many.zip");
-        let entries: Vec<(String, &[u8])> =
-            (0..50).map(|i| (format!("f{i}.txt"), b"x" as &[u8])).collect();
-        let refs: Vec<(&str, &[u8])> =
-            entries.iter().map(|(n, b)| (n.as_str(), *b)).collect();
+        let entries: Vec<(String, &[u8])> = (0..50)
+            .map(|i| (format!("f{i}.txt"), b"x" as &[u8]))
+            .collect();
+        let refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, b)| (n.as_str(), *b)).collect();
         write_test_zip(&archive, &refs);
         let dest = dir.join("out");
         fs::create_dir_all(&dest).unwrap();
@@ -453,10 +451,12 @@ mod tests {
         };
         let (updated, _) = materialize_modpack_archive(&target).expect("extract");
         assert_eq!(updated.kind, TargetKind::Instance);
-        assert!(updated
-            .mods_dir
-            .as_ref()
-            .is_some_and(|m| m.ends_with("overrides/mods")));
+        assert!(
+            updated
+                .mods_dir
+                .as_ref()
+                .is_some_and(|m| m.ends_with("overrides/mods"))
+        );
         fs::remove_dir_all(dir).ok();
     }
 }

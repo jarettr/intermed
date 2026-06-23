@@ -1,19 +1,17 @@
 //! Parity tests: imperative wrappers vs declarative pack interpreter.
 
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
-use intermed_rules::{
-    DeclarativeRulePack, DuplicateIdRule, LoaderMismatchRule, SideMismatchRule,
-};
+use intermed_rules::{DeclarativeRulePack, DuplicateIdRule, LoaderMismatchRule, SideMismatchRule};
 
 fn ctx(store: &FactStore) -> RuleCtx<'_> {
     static TARGET: std::sync::LazyLock<Target> = std::sync::LazyLock::new(|| Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     });
     RuleCtx::for_test(store, &TARGET)

@@ -112,7 +112,10 @@ mod tests {
             .attr("score", "87") // WRONG: string, schema wants Int
             .emit();
         let v = schema_violations(&store.all()[0]);
-        assert!(v.iter().any(|m| m.contains("mixin_risk_score.score")), "{v:?}");
+        assert!(
+            v.iter().any(|m| m.contains("mixin_risk_score.score")),
+            "{v:?}"
+        );
     }
 
     #[test]

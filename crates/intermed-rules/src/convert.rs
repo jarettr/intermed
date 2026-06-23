@@ -1,6 +1,6 @@
 //! v1 → v2 rule-pack upgrade for backward compatibility.
 
-use crate::model::{RulePack, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2};
+use crate::model::{RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RulePack};
 
 /// Upgrade a v1 pack to v2 schema in place (idempotent for v2 packs).
 pub fn upgrade_pack_to_v2(pack: &mut RulePack) {

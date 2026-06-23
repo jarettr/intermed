@@ -1,109 +1,102 @@
 # InterMed
 
-A **Minecraft modpack / server evidence engine**. Point it at a server, an
-instance, a mods directory, or a log, and it builds a fact graph, derives
-findings with full provenance, and emits a diagnosis you can read in the
-terminal or feed to CI.
+InterMed inspects Minecraft mods, modpacks, servers, and logs without running
+them. It reads the jars and files on disk, builds a graph of facts about what is
+there, and reports findings — each one traceable back to the exact file it came
+from.
 
-> Doctor and PackOps **explain**. Runtime **enforces**.
+It explains; it does not change anything. A run never edits your pack, downloads
+mods, or starts the game. Output is a report you read in a terminal, or JSON /
+SARIF / HTML for tools and CI.
 
-This is a ground-up Rust reimplementation of the older Java InterMed runtime,
-refocused from *enforcement* to *evidence*. Start with [`docs/CONCEPTS.md`](docs/CONCEPTS.md)
-for how the engine works, [`docs/STATUS.md`](docs/STATUS.md) for what each layer
-does today, and [`docs/ROADMAP.md`](docs/ROADMAP.md) for the phase plan.
-[`docs/donor-inventory.md`](docs/donor-inventory.md) maps the Java port.
-The current Phase 2/3 changelist is documented in
-[`docs/CL-PHASE-2-3.md`](docs/CL-PHASE-2-3.md).
-The current Phase 4/5 changelist is documented in
-[`docs/CL-PHASE-4-5.md`](docs/CL-PHASE-4-5.md).
-Phases 6/7: [`docs/CL-PHASE-6-7.md`](docs/CL-PHASE-6-7.md).
-Cache/profile: [`docs/CL-CACHE-PROFILE.md`](docs/CL-CACHE-PROFILE.md).
-Layer M (resource AST): [`docs/CL-LAYER-M.md`](docs/CL-LAYER-M.md),
-[`docs/LAYER-M-DATA-SEMANTICS.md`](docs/LAYER-M-DATA-SEMANTICS.md).
+This is `0.1.0-alpha`. The analysis runs and is tested; commands, flags, and
+output shapes may still change. The [roadmap](docs/ROADMAP.md) tracks what is
+planned and what is out of scope.
 
-## Quick start
+```
+intermed doctor ./mods
+```
 
-```bash
+```
+InterMed Doctor v0.1.0
+Target: ./mods (mods directory)
+Env:    loader=fabric  mc=1.20.1  java=21
+
+ERROR Missing dependency: cloth-config
+      bewitchment requires cloth-config (*), but it is not installed.
+      → Install cloth-config, or remove bewitchment.
+
+WARNINGS  1 actionable, 10 informational  (0 fatal, 1 error, 0 warn, 10 note · 1073 facts)
+```
+
+## What it looks at
+
+A single run can examine, depending on the target:
+
+- **Metadata** — mod ids, versions, loaders, and the dependencies each mod
+  declares.
+- **Modpack manifests** — a Modrinth `.mrpack` or CurseForge export, which lists
+  its mods by reference. When the jars are not present on disk, the report says so
+  rather than reporting an empty pack as healthy.
+- **Dependencies** — which declared dependencies are missing, which are pinned
+  too tightly or left open-ended, and which mods depend on a missing one. Plus
+  *implicit* dependencies a mod never declares but reveals through its data.
+- **Resources / data** — recipes, tags, loot tables, advancements, models,
+  blockstates, atlases. Which mods write the same file, whose copy wins, and
+  whether a merge is safe or an override.
+- **Mixins** — what each mixin targets, where two mods touch the same method,
+  `@Overwrite`s that lock other mods out, and mixins that may not apply.
+- **Scripts** — KubeJS / CraftTweaker recipe removals and replacements read from
+  the script source.
+- **Security & SBOM** — JAR signatures, a software bill of materials, and a
+  preflight surface of sensitive API references (process spawning, sockets,
+  reflection).
+- **Logs** — crash reports and `latest.log` for known error signatures.
+- **Performance** — a Spark profile, correlated against the mods that own the hot
+  methods.
+
+Every finding carries its evidence. `--explain <id>` prints the facts behind one
+finding, down to the jar and the file inside it.
+
+## Install
+
+```
 cargo build --release
-
-# Diagnose things:
-intermed doctor ./server          # a dedicated server (scans mods + logs/)
-intermed doctor ./mods            # a bare mods directory
-intermed doctor latest.log        # a single log or crash report
-intermed doctor ./server --json   # machine-readable intermed-doctor-report-v1
-intermed doctor ./server --sarif  # SARIF 2.1.0 for IDE / CI
-intermed doctor ./mods --dump-facts facts.json
-intermed doctor ./mods --explain finding_id
-
-# Inspect resource/data overrides:
-intermed vfs scan ./mods
-intermed vfs explain ./mods
-intermed vfs overlay ./mods --out ./overlay
-intermed vfs explain ./mods --path data/foo/recipes/bar.json --ast
-intermed vfs overlay ./mods --explain-plan
-intermed doctor ./mods --resource-level semantic
-
-# Inspect Mixin risk and rule packs:
-intermed mixin-map ./mods
-intermed doctor ./mods --mixin-risk
-intermed doctor ./mods --logic=datalog
-intermed doctor ./mods --logic=souffle  # requires `souffle` in PATH
-
-# DuckDB SQL backend + analytics (optional, feature-gated)
-cargo build -p intermed-cli --features duckdb
-intermed doctor ./mods --logic=duckdb --mixin-risk
-intermed doctor ./mods --db history.duckdb
-intermed db query --db history.duckdb "SELECT kind, COUNT(*) FROM facts GROUP BY kind"
-
-intermed rules check ./rules
-
-# SBOM + security (Phase 6, always on for mods)
-intermed doctor ./mods --json
-
-# Spark import (Phase 7, gated)
-intermed doctor ./server --performance
-intermed spark-map ./server --spark-report ./spark/profile.json
-
-# Compatibility Lab (Phase 8)
-intermed lab discover ./candidates.json --out corpus.lock
-intermed lab run corpus.lock --logs ./captured --out ./runs/latest
-intermed lab report ./runs/latest --out ./site
-
-# Cache + profiling (doctor)
-intermed doctor ./mods --profile profile.json
-intermed doctor ./mods --no-cache
+# the binary is target/release/intermed
 ```
 
-Exit code: `0` healthy, `1` warnings only, `2` errors or worse.
+Requires a Rust toolchain. The build also writes a man page to
+`docs/man/intermed.1` and shell completions to `docs/completions/`.
 
-More examples: [`docs/EXAMPLES.md`](docs/EXAMPLES.md). Concepts:
-[`docs/CONCEPTS.md`](docs/CONCEPTS.md). Layer status:
-[`docs/STATUS.md`](docs/STATUS.md). Jar cache: [`docs/CACHE.md`](docs/CACHE.md).
-Profiling: [`docs/PROFILING.md`](docs/PROFILING.md).
-Man page: `man -l docs/man/intermed.1` (generated at build time).
+## Where to go next
 
-## How it works
+- **[Quickstart](docs/guides/quickstart.md)** — install, first run, and a
+  copy-paste recipe for every command.
+- **Guides** — task by task:
+  [reading a report](docs/guides/reading-a-report.md) ·
+  [in CI](docs/guides/ci.md) ·
+  [dependencies](docs/guides/dependencies.md) ·
+  [resources & overlays](docs/guides/resources.md) ·
+  [mixins](docs/guides/mixins.md) ·
+  [security & SBOM](docs/guides/security.md)
+- **Reference** — complete and exhaustive:
+  [commands & flags](docs/reference/commands.md) ·
+  [output formats](docs/reference/output-formats.md) ·
+  [what each analysis examines](docs/reference/analysis.md) ·
+  [the query engine](docs/reference/engine.md) ·
+  [configuration](docs/reference/configuration.md) ·
+  [caching](docs/reference/caching.md) ·
+  [facts & schema](docs/reference/facts.md)
 
-```
-Target ──▶ [Collectors] ──▶ FactStore ──▶ [Rules] ──▶ Findings ──▶ DoctorReport
-```
+The [documentation index](docs/README.md) lists everything in one place, and the
+[roadmap](docs/ROADMAP.md) covers what is planned.
 
-Collectors observe (one per diagnostic layer A–L); rules infer; the report is
-the single structured artifact rendered to terminal / JSON / SARIF. The engine
-is generic — layers plug in at the CLI. See
-[`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) and [`docs/SCHEMA.md`](docs/SCHEMA.md).
+## Contributing and security
 
-## Workspace
-
-Core (Phases 1–8): `intermed-facts`, `intermed-evidence`, `intermed-report`,
-`intermed-doctor-core`, `intermed-minecraft-scan`, `intermed-log`,
-`intermed-deps`, `intermed-rules`, `intermed-vfs`, `intermed-packops`,
-`intermed-resource-ast`, `intermed-dynamics`, `intermed-mixin-intel`,
-`intermed-security-audit`,
-`intermed-sbom`, `intermed-spark-bridge`, `intermed-lab`, `intermed-cli`.
-
-Optional: `intermed-duckdb` (feature `duckdb`). Deferred: `intermed-runtime-preflight`.
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the architecture, the crate map, and how
+to build, check, and extend InterMed. To report a vulnerability, see
+[SECURITY.md](SECURITY.md).
 
 ## License
 
-MIT.
+See [LICENSE](LICENSE).

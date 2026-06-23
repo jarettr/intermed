@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use intermed_evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_facts::{kind, SourceRef};
+use intermed_facts::{SourceRef, kind};
 use serde::Deserialize;
 
 use crate::collector::{CollectCtx, Collector, CollectorOutcome};
@@ -46,7 +46,11 @@ impl Collector for ModpackManifestCollector {
         let locator = manifest.locator.clone();
 
         match manifest.parsed {
-            ParsedManifest::Modrinth { name, mod_file_count, files } => {
+            ParsedManifest::Modrinth {
+                name,
+                mod_file_count,
+                files,
+            } => {
                 let manifest_id = ctx
                     .store
                     .fact(EXTRACTOR, kind::MODPACK_MANIFEST)
@@ -67,7 +71,12 @@ impl Collector for ModpackManifestCollector {
                     emitted += 1;
                 }
                 emitted += emit_incomplete_if_needed(
-                    ctx, &root, manifest_id, mod_file_count, "modrinth", &locator,
+                    ctx,
+                    &root,
+                    manifest_id,
+                    mod_file_count,
+                    "modrinth",
+                    &locator,
                 );
             }
             ParsedManifest::CurseForge { name, projects } => {
@@ -92,7 +101,12 @@ impl Collector for ModpackManifestCollector {
                     emitted += 1;
                 }
                 emitted += emit_incomplete_if_needed(
-                    ctx, &root, manifest_id, projects.len(), "curseforge", &locator,
+                    ctx,
+                    &root,
+                    manifest_id,
+                    projects.len(),
+                    "curseforge",
+                    &locator,
                 );
             }
         }
@@ -156,9 +170,13 @@ impl Rule for ModpackIntegrityRule {
         for f in ctx.store.by_kind(kind::MODPACK_INCOMPLETE) {
             let referenced = f.attr_int("referenced_mods").unwrap_or(0);
             let materialized = f.attr_int("materialized_jars").unwrap_or(0);
-            let completeness_pct = f
-                .attr_int("completeness_pct")
-                .unwrap_or_else(|| if referenced > 0 { materialized * 100 / referenced } else { 0 });
+            let completeness_pct = f.attr_int("completeness_pct").unwrap_or_else(|| {
+                if referenced > 0 {
+                    materialized * 100 / referenced
+                } else {
+                    0
+                }
+            });
             // 0 jars or < 50% covered is pack-breaking for analysis (Warn);
             // 50–89% covered is a coverage caveat (Note).
             let severity = if completeness_pct < 50 {
@@ -167,30 +185,33 @@ impl Rule for ModpackIntegrityRule {
                 Severity::Note
             };
             out.push(
-                Finding::builder("modpack-incomplete", format!("modpack-incomplete:{}", f.subject))
-                    .severity(severity)
-                    .category(Category::Packaging)
-                    .title(if materialized == 0 {
-                        "Manifest-only modpack: mod jars are not present".to_string()
-                    } else {
-                        format!("Partially materialized modpack: {completeness_pct}% of mods present")
-                    })
-                    .explanation(format!(
-                        "This {} modpack references {referenced} mod file(s) by download \
+                Finding::builder(
+                    "modpack-incomplete",
+                    format!("modpack-incomplete:{}", f.subject),
+                )
+                .severity(severity)
+                .category(Category::Packaging)
+                .title(if materialized == 0 {
+                    "Manifest-only modpack: mod jars are not present".to_string()
+                } else {
+                    format!("Partially materialized modpack: {completeness_pct}% of mods present")
+                })
+                .explanation(format!(
+                    "This {} modpack references {referenced} mod file(s) by download \
                          reference, but only {materialized} mod jar(s) are materialized on disk \
                          ({completeness_pct}% coverage). Dependency, security and SBOM analysis \
                          covers only the materialized jars plus the pack's `overrides/` and \
                          manifest — the rest was not inspected.",
-                        f.subject
-                    ))
-                    .evidence(EvidenceEdge::subject(f.id))
-                    .fix(FixCandidate::advice(
-                        "Install/export the pack with its mods materialized (e.g. let the \
+                    f.subject
+                ))
+                .evidence(EvidenceEdge::subject(f.id))
+                .fix(FixCandidate::advice(
+                    "Install/export the pack with its mods materialized (e.g. let the \
                          launcher download them), then re-run intermed against the instance.",
-                    ))
-                    .tag("modpack")
-                    .tag("incomplete")
-                    .build(),
+                ))
+                .tag("modpack")
+                .tag("incomplete")
+                .build(),
             );
         }
         out
@@ -380,10 +401,19 @@ mod tests {
         // Untrusted modpack manifests: malformed JSON must yield `None`, not panic.
         let root = temp_dir("fuzz");
         let nasty = [
-            "", "{", "[]", "null", "\u{0}\u{0}", "{\"files\":1}",
-            "{\"files\":[{\"path\":42}]}", "{\"minecraft\":{\"modLoaders\":\"x\"}}",
-            "not json", "{\"files\":[null,null]}", "{\"dependencies\":[]}",
-            "{\"files\":[{}]}", "{\"manifestType\":\"minecraftModpack\",\"files\":\"\"}",
+            "",
+            "{",
+            "[]",
+            "null",
+            "\u{0}\u{0}",
+            "{\"files\":1}",
+            "{\"files\":[{\"path\":42}]}",
+            "{\"minecraft\":{\"modLoaders\":\"x\"}}",
+            "not json",
+            "{\"files\":[null,null]}",
+            "{\"dependencies\":[]}",
+            "{\"files\":[{}]}",
+            "{\"manifestType\":\"minecraftModpack\",\"files\":\"\"}",
         ];
         for (i, input) in nasty.iter().enumerate() {
             let mr = root.join(format!("modrinth-{i}.json"));

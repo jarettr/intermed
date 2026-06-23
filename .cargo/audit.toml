@@ -1,0 +1,13 @@
+# cargo-audit configuration (RustSec advisory DB).
+#
+# `cargo audit` fails the build on any *vulnerability*. The advisories ignored
+# below are **unmaintained-only** notices on transitive dependencies with no fix
+# available and no security impact for this tool — accepted and tracked here so the
+# audit stays green while a real new advisory still surfaces.
+[advisories]
+ignore = [
+    # `instant` is unmaintained (pulled in transitively); no vulnerability.
+    "RUSTSEC-2024-0384",
+    # `paste` is unmaintained (proc-macro dep, transitive); no vulnerability.
+    "RUSTSEC-2024-0436",
+]

@@ -246,9 +246,16 @@ pub const CORE_RULES: &[&str] = &[
 
 /// Rule ids with generated SQL from the embedded v2 pack (SSOT).
 pub fn generated_rule_ids() -> Vec<String> {
-    intermed_rules::generate_pack_sql(&intermed_rules::default_core_pack_v2())
-        .into_iter()
-        .map(|r| r.id)
+    intermed_rules::default_core_pack_v2()
+        .rules
+        .iter()
+        .filter(|r| {
+            matches!(
+                intermed_rules::rule_to_ir(r),
+                intermed_rules::Lowering::Ir(_)
+            )
+        })
+        .map(|r| r.id.clone())
         .collect()
 }
 

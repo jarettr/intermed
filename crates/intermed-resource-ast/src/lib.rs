@@ -24,15 +24,15 @@ pub mod scan;
 pub mod semantic;
 pub mod syntax;
 
-pub use collector::{collector, scan_mods_dir, ResourceAstScan};
-pub use rule::rule;
-pub use semantic::diff;
-pub use semantic::refs::{ResourceAstRecord, ResourceGraph};
-pub use domain::{parse_resource, parser_version, RESOURCE_AST_CACHE_SCHEMA};
+pub use collector::{ResourceAstScan, collector, scan_mods_dir};
+pub use domain::{RESOURCE_AST_CACHE_SCHEMA, parse_resource, parser_version};
 pub use model::{
     CachedResourceAst, ParseStatus, RefRelation, ResourceDomain, ResourceLevel,
     ResourceParseDiagnostic, ResourceReference, ResourceSummary,
 };
+pub use rule::rule;
+pub use semantic::diff;
+pub use semantic::refs::{ResourceAstRecord, ResourceGraph};
 
-/// Implementation status, shown in CLI help and `STATUS.md`.
+/// Implementation status, shown in CLI help.
 pub const STATUS: &str = "active experimental: Layer M (resource AST)";

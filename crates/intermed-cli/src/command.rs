@@ -12,17 +12,17 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     about = "InterMed — Minecraft modpack/server evidence engine",
     long_about = "InterMed builds a fact graph from Minecraft servers, instances, mods directories, \
 and logs, then derives findings with full provenance.\n\n\
-See docs/EXAMPLES.md for copy-paste recipes for every subcommand.",
+See docs/guides/quickstart.md for copy-paste recipes for every subcommand.",
     after_help = "Examples:\n  \
 intermed doctor ./mods\n  \
 intermed doctor ./server --mixin-risk --json\n  \
 intermed vfs explain ./mods\n  \
 intermed mixin-map ./mods\n  \
 intermed rules check ./rules\n\n\
-More: docs/EXAMPLES.md | Man: docs/man/intermed.1"
+More: docs/guides/quickstart.md | Reference: docs/reference/commands.md | Man: docs/man/intermed.1"
 )]
 pub struct Cli {
-    /// Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/CONFIG.md.
+    /// Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md.
     #[arg(long = "config", global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
@@ -48,8 +48,10 @@ pub enum Command {
     Doctor(Box<DoctorArgs>),
     /// Inspect resource/data overrides and generate overlay previews.
     Vfs(VfsArgs),
-    /// Layer-C dependency graph and PubGrub resolution.
+    /// Layer-C dependency graph, resolution, and explainable queries.
     Deps(DepsArgs),
+    /// Blast-radius analysis for removing or updating a mod.
+    Impact(ImpactArgs),
     /// Inspect static Mixin targets, overlaps, and overwrite risks.
     MixinMap(MixinMapArgs),
     /// Import and summarize Spark performance reports.
@@ -92,8 +94,10 @@ pub struct DoctorArgs {
     #[arg(long = "mixin-risk")]
     pub mixin_risk: bool,
 
-    /// Rule backend selection. Imperative remains the stable fallback.
-    #[arg(long, value_enum, default_value_t = LogicMode::Imperative)]
+    /// Rule backend. The in-process columnar query engine is the default and only
+    /// in-process engine; `souffle`/`duckdb` are optional external backends over the
+    /// same IR (require their tool / build feature).
+    #[arg(long, value_enum, default_value_t = LogicMode::Columnar)]
     pub logic: LogicMode,
 
     /// Cap the worker thread count for parallel jar/log scanning. Unset or `0`
@@ -264,19 +268,31 @@ pub struct DoctorMixinArgs {
     pub level: Option<MixinLevelArg>,
 
     /// Skip per-handler bytecode intelligence facts and findings.
-    #[arg(long = "no-mixin-handler-effects", conflicts_with = "mixin_handler_effects")]
+    #[arg(
+        long = "no-mixin-handler-effects",
+        conflicts_with = "mixin_handler_effects"
+    )]
     pub no_mixin_handler_effects: bool,
 
     /// Force per-handler bytecode intelligence on (overrides preset).
-    #[arg(long = "mixin-handler-effects", conflicts_with = "no_mixin_handler_effects")]
+    #[arg(
+        long = "mixin-handler-effects",
+        conflicts_with = "no_mixin_handler_effects"
+    )]
     pub mixin_handler_effects: bool,
 
     /// Skip safer-mixin recommendation facts and fix candidates.
-    #[arg(long = "no-mixin-recommendations", conflicts_with = "mixin_recommendations")]
+    #[arg(
+        long = "no-mixin-recommendations",
+        conflicts_with = "mixin_recommendations"
+    )]
     pub no_mixin_recommendations: bool,
 
     /// Force safer-mixin recommendations on (overrides preset).
-    #[arg(long = "mixin-recommendations", conflicts_with = "no_mixin_recommendations")]
+    #[arg(
+        long = "mixin-recommendations",
+        conflicts_with = "no_mixin_recommendations"
+    )]
     pub mixin_recommendations: bool,
 }
 
@@ -314,8 +330,10 @@ pub struct DoctorTuningArgs {
     #[arg(long = "security-corroborated-confidence", value_name = "SCORE")]
     pub security_corroborated_confidence: Option<f32>,
 
-    /// Minecraft client/server jar to index for mixin apply-failure verification.
-    /// Without it, apply-failure checks cover only mod-targeting mixins.
+    /// Minecraft client/server jar to index. Powers two layers: mixin
+    /// apply-failure verification against vanilla classes (Layer F), and a vanilla
+    /// resource index (Layer M) so `minecraft:` references resolve and tags expand
+    /// against real vanilla data instead of being assumed present.
     #[arg(long = "minecraft-jar", value_name = "JAR")]
     pub minecraft_jar: Option<PathBuf>,
 
@@ -353,10 +371,13 @@ pub struct DoctorProvenanceArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum LogicMode {
-    Imperative,
-    Datalog,
+    /// In-process columnar query engine (`intermed-columnar`): the default and only
+    /// in-process engine — optimizing logical/physical planner with hash join/aggregate.
+    /// Pure Rust, always available.
+    Columnar,
+    /// Soufflé Datalog backend (requires the `souffle` binary). Same IR, external engine.
     Souffle,
-    /// In-process DuckDB SQL rule backend (requires `--features duckdb`).
+    /// In-process DuckDB SQL rule backend (requires `--features duckdb`). Same IR.
     Duckdb,
 }
 
@@ -365,10 +386,9 @@ impl LogicMode {
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
-            LogicMode::Imperative => "imperative",
-            LogicMode::Datalog => "datalog",
             LogicMode::Souffle => "souffle",
             LogicMode::Duckdb => "duckdb",
+            LogicMode::Columnar => "columnar",
         }
     }
 }
@@ -380,7 +400,9 @@ impl std::fmt::Display for LogicMode {
 }
 
 #[derive(Args)]
-#[command(after_help = "Example:\n  intermed db query --db history.duckdb \"SELECT kind, COUNT(*) FROM facts GROUP BY kind\"")]
+#[command(
+    after_help = "Example:\n  intermed db query --db history.duckdb \"SELECT kind, COUNT(*) FROM facts GROUP BY kind\""
+)]
 pub struct DbArgs {
     #[command(subcommand)]
     pub command: DbCommand,
@@ -541,7 +563,12 @@ pub struct VfsTargetArgs {
     pub ast: bool,
 
     /// AST depth used by `--ast`: `semantic` (default) or `full`.
-    #[arg(long = "resource-level", value_enum, value_name = "LEVEL", default_value = "full")]
+    #[arg(
+        long = "resource-level",
+        value_enum,
+        value_name = "LEVEL",
+        default_value = "full"
+    )]
     pub resource_level: ResourceLevelArg,
 
     /// Accepted for script consistency; VFS output currently has no ANSI colour.
@@ -576,11 +603,13 @@ pub struct VfsOverlayArgs {
 }
 
 #[derive(Args)]
-#[command(
-    after_help = "Examples:\n  \
+#[command(after_help = "Examples:\n  \
 intermed deps graph ./mods\n  \
-intermed deps resolve ./mods"
-)]
+intermed deps resolve ./mods\n  \
+intermed deps why create ./mods\n  \
+intermed deps why-missing balm-fabric ./mods\n  \
+intermed deps implicit ./mods --namespace create\n  \
+intermed deps path waystones balm-fabric ./mods")]
 pub struct DepsArgs {
     #[command(subcommand)]
     pub command: DepsCommand,
@@ -592,6 +621,14 @@ pub enum DepsCommand {
     Graph(DepsTargetArgs),
     /// Run PubGrub resolution and emit `intermed-deps-resolution-v1` JSON.
     Resolve(DepsTargetArgs),
+    /// Explain why a mod/namespace is depended upon (declared + implicit reasons).
+    Why(DepsIdArgs),
+    /// Explain why an absent dependency is required (the requiring edges).
+    WhyMissing(DepsIdArgs),
+    /// List implicit references into a namespace (resource-derived dependencies).
+    Implicit(DepsImplicitArgs),
+    /// Find a dependency chain between two mods (`deps path <from> <to>`).
+    Path(DepsPathArgs),
 }
 
 #[derive(Args)]
@@ -603,6 +640,123 @@ pub struct DepsTargetArgs {
     /// Override the mods directory (otherwise auto-detected).
     #[arg(long = "mods-dir")]
     pub mods_dir: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct DepsIdArgs {
+    /// The mod id or namespace to explain.
+    pub id: String,
+
+    /// Mods directory or instance/server directory. Defaults to current dir.
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Override the mods directory (otherwise auto-detected).
+    #[arg(long = "mods-dir")]
+    pub mods_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct DepsImplicitArgs {
+    /// Mods directory or instance/server directory. Defaults to current dir.
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// The provider namespace to list implicit references for.
+    #[arg(long = "namespace", value_name = "NS")]
+    pub namespace: String,
+
+    /// Override the mods directory (otherwise auto-detected).
+    #[arg(long = "mods-dir")]
+    pub mods_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct DepsPathArgs {
+    /// Source mod id.
+    pub from: String,
+
+    /// Target mod id / namespace.
+    pub to: String,
+
+    /// Mods directory or instance/server directory. Defaults to current dir.
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Override the mods directory (otherwise auto-detected).
+    #[arg(long = "mods-dir")]
+    pub mods_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Args)]
+#[command(after_help = "Examples:\n  \
+intermed impact remove create ./mods\n  \
+intermed impact update sodium 0.5.8 0.6.0 ./mods")]
+pub struct ImpactArgs {
+    #[command(subcommand)]
+    pub command: ImpactCommand,
+}
+
+#[derive(Subcommand)]
+pub enum ImpactCommand {
+    /// Blast radius of removing a mod (reverse resource graph + dependents).
+    Remove(ImpactRemoveArgs),
+    /// Blast radius of bumping a mod's version (which declared ranges reject it).
+    Update(ImpactUpdateArgs),
+}
+
+#[derive(Args)]
+pub struct ImpactRemoveArgs {
+    /// The mod id / namespace to remove.
+    pub id: String,
+
+    /// Mods directory or instance/server directory. Defaults to current dir.
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Override the mods directory (otherwise auto-detected).
+    #[arg(long = "mods-dir")]
+    pub mods_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct ImpactUpdateArgs {
+    /// The mod id to update.
+    pub id: String,
+
+    /// Current version (use `-` to omit and only check the target version).
+    pub from: String,
+
+    /// Proposed new version.
+    pub to: String,
+
+    /// Mods directory or instance/server directory. Defaults to current dir.
+    #[arg(default_value = ".")]
+    pub target: PathBuf,
+
+    /// Override the mods directory (otherwise auto-detected).
+    #[arg(long = "mods-dir")]
+    pub mods_dir: Option<PathBuf>,
+
+    /// Emit machine-readable JSON instead of text.
+    #[arg(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -636,7 +790,9 @@ pub enum GraphExportFormat {
 }
 
 #[derive(Args)]
-#[command(after_help = "Examples:\n  intermed mixin-map ./mods\n  intermed mixin-map ./mods --graph-format dot --graph-out mixin.dot")]
+#[command(
+    after_help = "Examples:\n  intermed mixin-map ./mods\n  intermed mixin-map ./mods --graph-format dot --graph-out mixin.dot"
+)]
 pub struct MixinMapArgs {
     /// Mods directory or instance/server directory. Defaults to current dir.
     #[arg(default_value = ".")]
@@ -773,6 +929,28 @@ pub enum RulesCommand {
     Registry(RulesRegistryArgs),
     /// Install a pack and its registry dependencies into XDG rule-packs.
     Install(RulesInstallArgs),
+    /// Show the query-engine plan (EXPLAIN, and EXPLAIN ANALYZE with `--facts`) per rule.
+    Explain(RulesExplainArgs),
+}
+
+#[derive(Args)]
+#[command(
+    after_help = "Examples:\n  intermed rules explain                       # static EXPLAIN, all core rules\n  intermed rules explain --rule duplicate-id\n  intermed doctor ./mods --dump-facts f.json && intermed rules explain --facts f.json --rule resource-conflict-safe-crdt-merge"
+)]
+pub struct RulesExplainArgs {
+    #[arg(
+        default_value = "",
+        help = "Rule pack JSON/YAML (default: embedded core v2 when empty or missing)"
+    )]
+    pub pack: PathBuf,
+
+    /// Explain only this rule id (default: every lowerable rule).
+    #[arg(long = "rule", value_name = "ID")]
+    pub rule: Option<String>,
+
+    /// A `doctor --dump-facts` JSON file: enables EXPLAIN ANALYZE on those real facts.
+    #[arg(long = "facts", value_name = "FILE")]
+    pub facts: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -780,10 +958,14 @@ pub enum RulesGenerateBackend {
     Sql,
     Rust,
     Datalog,
+    /// Columnar query-engine `EXPLAIN` (logical + physical plan + engines) per rule.
+    Explain,
 }
 
 #[derive(Args)]
-#[command(after_help = "Example:\n  intermed rules generate --backend sql rules/core/intermed-core.rules.v2.json")]
+#[command(
+    after_help = "Example:\n  intermed rules generate --backend sql rules/core/intermed-core.rules.v2.json"
+)]
 pub struct RulesGenerateArgs {
     #[arg(
         default_value = "",
@@ -825,7 +1007,9 @@ pub struct RulesCheckArgs {
 }
 
 #[derive(Args)]
-#[command(after_help = "Example:\n  intermed rules sign rules/core/intermed-core.rules.json --key ./publisher.key")]
+#[command(
+    after_help = "Example:\n  intermed rules sign rules/core/intermed-core.rules.json --key ./publisher.key"
+)]
 pub struct RulesSignArgs {
     /// Unsigned v2 rule pack to sign.
     pub pack: PathBuf,
@@ -902,7 +1086,9 @@ pub struct RulesInstallArgs {
 }
 
 #[derive(Args)]
-#[command(after_help = "Examples:\n  intermed cache stats\n  intermed cache prune\n  intermed cache clear")]
+#[command(
+    after_help = "Examples:\n  intermed cache stats\n  intermed cache prune\n  intermed cache clear"
+)]
 pub struct CacheArgs {
     #[command(subcommand)]
     pub command: CacheCommand,
@@ -933,7 +1119,9 @@ pub enum SbomExportFormatCli {
 }
 
 #[derive(Args)]
-#[command(after_help = "Examples:\n  intermed sbom export ./mods --format spdx-json\n  intermed sbom export ./mods --format cyclonedx-json --out sbom.json")]
+#[command(
+    after_help = "Examples:\n  intermed sbom export ./mods --format spdx-json\n  intermed sbom export ./mods --format cyclonedx-json --out sbom.json"
+)]
 pub struct SbomArgs {
     #[command(subcommand)]
     pub command: SbomCommand,

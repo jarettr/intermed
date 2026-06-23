@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use intermed_vfs::{scan_mods_dir, ConflictClass};
+use intermed_vfs::{ConflictClass, scan_mods_dir};
 use zip::write::SimpleFileOptions;
 
 #[test]

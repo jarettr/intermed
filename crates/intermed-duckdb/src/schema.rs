@@ -376,10 +376,7 @@ pub fn run_row_from_report(report: &DoctorReport) -> RunRow {
         host_launcher: report.environment.host_launcher.clone(),
         mc_version: report.environment.minecraft_version.clone(),
         side: report.environment.side.map(side_label),
-        instance_type: report
-            .environment
-            .instance_type
-            .map(instance_type_label),
+        instance_type: report.environment.instance_type.map(instance_type_label),
         layout: report.environment.layout.map(|l| l.as_str().to_string()),
         total: i64::try_from(report.summary.total).unwrap_or(i64::MAX),
         error_count: i64::try_from(report.summary.error).unwrap_or(i64::MAX),
@@ -452,23 +449,17 @@ pub fn dedupe_materialized_run(bundle: MaterializedRun) -> MaterializedRun {
     MaterializedRun {
         run: bundle.run,
         facts: dedupe_rows(bundle.facts, |r| r.fact_id),
-        fact_attributes: dedupe_rows(
-            bundle.fact_attributes,
-            |r| (r.fact_id, r.key.clone()),
-        ),
+        fact_attributes: dedupe_rows(bundle.fact_attributes, |r| (r.fact_id, r.key.clone())),
         findings: dedupe_rows(bundle.findings, |r| r.finding_id.clone()),
-        finding_tags: dedupe_rows(
-            bundle.finding_tags,
-            |r| (r.finding_id.clone(), r.tag.clone()),
-        ),
-        finding_affects: dedupe_rows(
-            bundle.finding_affects,
-            |r| (r.finding_id.clone(), r.component.clone()),
-        ),
-        finding_evidence: dedupe_rows(
-            bundle.finding_evidence,
-            |r| (r.finding_id.clone(), r.fact_id, r.relation.clone()),
-        ),
+        finding_tags: dedupe_rows(bundle.finding_tags, |r| {
+            (r.finding_id.clone(), r.tag.clone())
+        }),
+        finding_affects: dedupe_rows(bundle.finding_affects, |r| {
+            (r.finding_id.clone(), r.component.clone())
+        }),
+        finding_evidence: dedupe_rows(bundle.finding_evidence, |r| {
+            (r.finding_id.clone(), r.fact_id, r.relation.clone())
+        }),
     }
 }
 
@@ -666,7 +657,7 @@ mod tests {
     use intermed_doctor_core::report::{Summary, TargetView};
     use intermed_doctor_core::target::{Environment, TargetKind};
     use intermed_evidence::{Category, Severity};
-    use intermed_facts::{kind, FactStore, SourceRef};
+    use intermed_facts::{FactStore, SourceRef, kind};
 
     #[test]
     fn run_id_is_stable_and_truncated() {
@@ -724,14 +715,16 @@ mod tests {
                 error: 1,
                 ..Summary::default()
             },
-            findings: vec![Finding::builder("duplicate-id", "duplicate-id:alpha")
-                .severity(Severity::Error)
-                .category(Category::Metadata)
-                .title("dup")
-                .explanation("dup")
-                .evidence(EvidenceEdge::subject(id))
-                .tag("metadata")
-                .build()],
+            findings: vec![
+                Finding::builder("duplicate-id", "duplicate-id:alpha")
+                    .severity(Severity::Error)
+                    .category(Category::Metadata)
+                    .title("dup")
+                    .explanation("dup")
+                    .evidence(EvidenceEdge::subject(id))
+                    .tag("metadata")
+                    .build(),
+            ],
             fix_plan: Vec::new(),
             fact_stats: store.stats(),
             collectors: Vec::new(),

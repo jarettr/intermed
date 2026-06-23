@@ -36,15 +36,51 @@ const TABLE: &[(&str, Curated)] = &[
     incompat("optifabric", "sodium"),
     incompat("sodium", "optifabric"),
     // ── Established companions ──
-    recommend("iris", "sodium", "Iris requires Sodium as its rendering backend"),
-    recommend("sodium", "iris", "Iris is the standard shader companion for Sodium"),
-    recommend("indium", "sodium", "Indium adds Fabric Rendering API support to Sodium"),
-    recommend("sodium-extra", "sodium", "Sodium Extra extends Sodium's options"),
-    recommend("reeses-sodium-options", "sodium", "Reese's Sodium Options is a Sodium UI addon"),
-    recommend("oculus", "rubidium", "Oculus is the shader companion for Rubidium/Embeddium"),
-    recommend("oculus", "embeddium", "Oculus is the shader companion for Embeddium"),
-    recommend("create", "jei", "JEI surfaces Create's many custom recipe types"),
-    recommend("emi", "jade", "EMI + Jade are a common item/tooltip information pairing"),
+    recommend(
+        "iris",
+        "sodium",
+        "Iris requires Sodium as its rendering backend",
+    ),
+    recommend(
+        "sodium",
+        "iris",
+        "Iris is the standard shader companion for Sodium",
+    ),
+    recommend(
+        "indium",
+        "sodium",
+        "Indium adds Fabric Rendering API support to Sodium",
+    ),
+    recommend(
+        "sodium-extra",
+        "sodium",
+        "Sodium Extra extends Sodium's options",
+    ),
+    recommend(
+        "reeses-sodium-options",
+        "sodium",
+        "Reese's Sodium Options is a Sodium UI addon",
+    ),
+    recommend(
+        "oculus",
+        "rubidium",
+        "Oculus is the shader companion for Rubidium/Embeddium",
+    ),
+    recommend(
+        "oculus",
+        "embeddium",
+        "Oculus is the shader companion for Embeddium",
+    ),
+    recommend(
+        "create",
+        "jei",
+        "JEI surfaces Create's many custom recipe types",
+    ),
+    recommend(
+        "emi",
+        "jade",
+        "EMI + Jade are a common item/tooltip information pairing",
+    ),
 ];
 
 const fn incompat(subject: &'static str, related: &'static str) -> (&'static str, Curated) {
@@ -91,12 +127,14 @@ mod tests {
     #[test]
     fn sodium_is_incompatible_with_optifine_and_recommends_iris() {
         let rels = curated_relationships("sodium");
-        assert!(rels
-            .iter()
-            .any(|r| r.related == "optifine" && r.kind == "known_incompatible"));
-        assert!(rels
-            .iter()
-            .any(|r| r.related == "iris" && r.kind == "recommended_together"));
+        assert!(
+            rels.iter()
+                .any(|r| r.related == "optifine" && r.kind == "known_incompatible")
+        );
+        assert!(
+            rels.iter()
+                .any(|r| r.related == "iris" && r.kind == "recommended_together")
+        );
     }
 
     #[test]

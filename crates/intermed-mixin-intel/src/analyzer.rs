@@ -16,7 +16,7 @@ use crate::model::{
     ConflictEdgeType, HighRiskOverwrite, InteractionType, MemberKind, MixinAnalysis,
     MixinClassModel, MixinClassRecord, MixinConflictEdgeRecord, MixinEffect,
     MixinInteractionRecord, MixinOperation, MixinOverlap, MixinPriorityConflictRecord,
-    MixinRiskAssessment, MixinShadowMember, ResolvedInjectionPoint,
+    MixinRiskAssessment, MixinShadowMember, ResolvedInjectionPoint, Side,
 };
 use crate::refmap::Namespace;
 use crate::semantics::InjectionImpact;
@@ -25,6 +25,29 @@ use crate::semantics::InjectionImpact;
 fn ordered_pair(target: &str, a: &str, b: &str) -> (String, String, String) {
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
     (target.to_string(), lo.to_string(), hi.to_string())
+}
+
+/// Index from mixin class name to its resolved [`Side`] (plan Phase 1). Used to
+/// drop cross-mod interactions/edges whose two mixins can never co-apply (a strict
+/// `client` vs strict `server` pairing).
+fn side_index(classes: &[MixinClassRecord]) -> BTreeMap<&str, Side> {
+    let mut idx: BTreeMap<&str, Side> = BTreeMap::new();
+    for c in classes {
+        // A class can be listed under more than one config view; widen rather than
+        // clobber so the recorded side is never narrower than reality.
+        idx.entry(c.class_name.as_str())
+            .and_modify(|s| *s = s.merge(c.side))
+            .or_insert(c.side);
+    }
+    idx
+}
+
+/// Are the two named mixins on incompatible strict sides (so any conflict between
+/// them is impossible)? Unknown sides (mixin not indexed) are treated as universal.
+fn mixins_side_incompatible(idx: &BTreeMap<&str, Side>, a: &str, b: &str) -> bool {
+    let sa = idx.get(a).copied().unwrap_or(Side::Unknown);
+    let sb = idx.get(b).copied().unwrap_or(Side::Unknown);
+    !sa.compatible_with(sb)
 }
 
 /// Analyzes mixin class models and builds interaction / risk artifacts.
@@ -62,10 +85,24 @@ impl MixinInteractionEngine {
             .flat_map(|c| c.effects.iter().cloned())
             .collect();
         let overlaps = classify_overlaps(&self.hot_paths, classes, &mixin_effects);
-        let high_risk_overwrites =
-            classify_overwrites(&self.hot_paths, classes, &mixin_effects);
-        let (interactions, conflict_edges, priority_conflicts) =
+        let high_risk_overwrites = classify_overwrites(&self.hot_paths, classes, &mixin_effects);
+        let (mut interactions, mut conflict_edges, mut priority_conflicts) =
             detect_interactions(&models, &overlaps, &self.hierarchy);
+
+        // Phase 1 side-suppression: a strict client-only vs server-only pair can
+        // never co-apply in one process, so it is not a conflict. Filter centrally
+        // (one chokepoint catches every edge/interaction kind) rather than guarding
+        // each pairwise pass. Conservative: Both/Unknown sides are never suppressed.
+        let sides = side_index(classes);
+        interactions.retain(|i| !mixins_side_incompatible(&sides, &i.mixin_a, &i.mixin_b));
+        conflict_edges.retain(|e| {
+            // Namespace-mismatch edges are mod-level (empty mixin names) — keep them.
+            e.source_mixin.is_empty()
+                || e.target_mixin.is_empty()
+                || !mixins_side_incompatible(&sides, &e.source_mixin, &e.target_mixin)
+        });
+        priority_conflicts.retain(|p| !mixins_side_incompatible(&sides, &p.mixin_a, &p.mixin_b));
+
         let risk_assessments = compute_risk_scores(
             classes,
             &overlaps,
@@ -122,7 +159,14 @@ fn classify_overlaps(
         let operations: BTreeSet<MixinOperation> =
             group.iter().flat_map(|c| c.operations.clone()).collect();
         let hot_path = overlap_is_hot(rules, target, &group);
-        let (method_conflict, shared_methods) = method_level_conflict(&group, effects);
+        let (mut method_conflict, mut shared_methods) = method_level_conflict(&group, effects);
+        // Phase 1: a target touched only by mutually side-incompatible mods (pure
+        // client-vs-server split) is not a real method conflict — no two of its
+        // mixins can ever co-apply. Demote it rather than report a phantom clash.
+        if method_conflict && !has_compatible_cross_mod_pair(&group) {
+            method_conflict = false;
+            shared_methods.clear();
+        }
         let effect_summaries = effect_summaries_for_target(effects, target);
         out.push(MixinOverlap {
             target: target.to_string(),
@@ -136,6 +180,19 @@ fn classify_overlaps(
         });
     }
     out
+}
+
+/// `true` when the group contains at least one cross-mod class pair whose sides are
+/// compatible — i.e. there is a pair that could genuinely co-apply (plan Phase 1).
+fn has_compatible_cross_mod_pair(group: &[&MixinClassRecord]) -> bool {
+    for i in 0..group.len() {
+        for j in (i + 1)..group.len() {
+            if group[i].mod_id != group[j].mod_id && group[i].side.compatible_with(group[j].side) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn overlap_is_hot(rules: &HotPathRules, target: &str, group: &[&MixinClassRecord]) -> bool {
@@ -171,13 +228,8 @@ fn classify_overwrites(
         for target in &class.targets {
             let hot = rules.tag_for(target).is_some();
             if methods.is_empty() {
-                let matched = effect_for_overwrite(
-                    effects,
-                    &class.mod_id,
-                    &class.class_name,
-                    target,
-                    "",
-                );
+                let matched =
+                    effect_for_overwrite(effects, &class.mod_id, &class.class_name, target, "");
                 out.push(HighRiskOverwrite {
                     mod_id: class.mod_id.clone(),
                     class_name: class.class_name.clone(),
@@ -199,9 +251,8 @@ fn classify_overwrites(
                         target,
                         method,
                     );
-                    let handler_effect = matched
-                        .and_then(|e| e.handler_effect.clone())
-                        .or_else(|| {
+                    let handler_effect =
+                        matched.and_then(|e| e.handler_effect.clone()).or_else(|| {
                             class
                                 .injected_methods
                                 .iter()
@@ -236,7 +287,8 @@ fn effect_matches_compare_key(effect: &MixinEffect, compare_key: &str) -> bool {
         return true;
     }
     if !effect.site_key.is_empty() && !compare_key.contains('@') {
-        return effect.site_key.starts_with(&format!("{compare_key}@")) || effect.method == compare_key;
+        return effect.site_key.starts_with(&format!("{compare_key}@"))
+            || effect.method == compare_key;
     }
     effect.method == compare_key
 }
@@ -386,7 +438,11 @@ fn detect_interactions(
             added_by_target
                 .entry(added.target.clone())
                 .or_default()
-                .push((class.mod_id.clone(), class.class_name.clone(), added.name.clone()));
+                .push((
+                    class.mod_id.clone(),
+                    class.class_name.clone(),
+                    added.name.clone(),
+                ));
         }
     }
     for model in models {
@@ -407,10 +463,7 @@ fn detect_interactions(
                             mixin_a: mixin.clone(),
                             mixin_b: class.class_name.clone(),
                             target: shadow.target.clone(),
-                            detail: format!(
-                                "{mod_id} added `{name}`; {} shadows it",
-                                class.mod_id
-                            ),
+                            detail: format!("{mod_id} added `{name}`; {} shadows it", class.mod_id),
                             strength: 70,
                             cross_mod: true,
                         });
@@ -492,22 +545,68 @@ fn detect_interactions(
     }
 
     // Inherited target collisions: injections on classes in a super/sub chain.
+    // The slash-normalized target (`a.b` → `a/b`) is precomputed once per injection
+    // instead of inside the O(n²) pair loop — that `replace('.', "/")` allocation,
+    // run tens of millions of times, was the dominant cost of the whole analysis.
+    let slashed: Vec<Vec<String>> = models
+        .iter()
+        .map(|m| {
+            m.record
+                .injected_methods
+                .iter()
+                .map(|inj| inj.target.replace('.', "/"))
+                .collect()
+        })
+        .collect();
+    // Memoize each distinct target's ancestor chain. `hierarchy.related` otherwise
+    // rebuilds two `Vec`+`BTreeSet`s via `ancestors()` on every one of the millions
+    // of pair comparisons; there are only a few hundred distinct targets, so caching
+    // collapses that to one walk per target. `related` is then a pure slice scan.
+    let mut anc_of: std::collections::HashMap<&str, Vec<String>> = std::collections::HashMap::new();
+    for per_model in &slashed {
+        for s in per_model {
+            anc_of
+                .entry(s.as_str())
+                .or_insert_with(|| hierarchy.ancestors(s));
+        }
+    }
+    let related = |a: &str, b: &str| -> bool {
+        a == b
+            || anc_of.get(a).is_some_and(|anc| anc.iter().any(|x| x == b))
+            || anc_of.get(b).is_some_and(|anc| anc.iter().any(|x| x == a))
+    };
+    // A pair can only form an inherited-target edge if both targets participate in
+    // the class hierarchy (one is an ancestor of the other). Most mod mixins target
+    // leaf classes with no chain, so restrict the O(n²) sweep to models that have at
+    // least one hierarchy-participating target — pruning the vast majority of pairs.
+    let relevant_targets: std::collections::HashSet<&str> = anc_of
+        .iter()
+        .filter(|(_, anc)| !anc.is_empty())
+        .flat_map(|(s, anc)| std::iter::once(*s).chain(anc.iter().map(String::as_str)))
+        .collect();
+    let relevant_models: Vec<usize> = (0..models.len())
+        .filter(|&i| {
+            slashed[i]
+                .iter()
+                .any(|s| relevant_targets.contains(s.as_str()))
+        })
+        .collect();
     let mut inherited_pairs: BTreeSet<(String, String, String, String)> = BTreeSet::new();
-    for (i, model_a) in models.iter().enumerate() {
-        let class_a = &model_a.record;
-        for model_b in models.iter().skip(i + 1) {
-            let class_b = &model_b.record;
+    for (oi, &i) in relevant_models.iter().enumerate() {
+        let class_a = &models[i].record;
+        for &j in &relevant_models[oi + 1..] {
+            let class_b = &models[j].record;
             if class_a.mod_id == class_b.mod_id {
                 continue;
             }
-            for inj_a in &class_a.injected_methods {
-                for inj_b in &class_b.injected_methods {
+            for (ia, inj_a) in class_a.injected_methods.iter().enumerate() {
+                let a_slash = &slashed[i][ia];
+                for (ib, inj_b) in class_b.injected_methods.iter().enumerate() {
                     if inj_a.target == inj_b.target {
                         continue;
                     }
-                    let a_slash = inj_a.target.replace('.', "/");
-                    let b_slash = inj_b.target.replace('.', "/");
-                    if !hierarchy.related(&a_slash, &b_slash) {
+                    let b_slash = &slashed[j][ib];
+                    if !related(a_slash, b_slash) {
                         continue;
                     }
                     let pair_key = (
@@ -715,15 +814,12 @@ fn detect_interactions(
                 continue;
             }
             if head_sites.contains(&(target.clone(), method.clone()))
-                && head_class
-                    .injected_methods
-                    .iter()
-                    .any(|i| {
-                        i.target == *target
-                            && i.resolved == *method
-                            && i.at_target == "HEAD"
-                            && i.injection_type == MixinOperation::Inject.as_str()
-                    })
+                && head_class.injected_methods.iter().any(|i| {
+                    i.target == *target
+                        && i.resolved == *method
+                        && i.at_target == "HEAD"
+                        && i.injection_type == MixinOperation::Inject.as_str()
+                })
             {
                 edge_id += 1;
                 conflict_edges.push(MixinConflictEdgeRecord {
@@ -885,17 +981,49 @@ fn detect_advanced_conflicts(
                 if (a_op == "redirect" && b_op == "wrap-operation")
                     || (a_op == "wrap-operation" && b_op == "redirect")
                 {
-                    push(edge_id, ConflictEdgeType::RedirectVsWrapOperation, a, b, target, site_label.clone(), 80);
+                    push(
+                        edge_id,
+                        ConflictEdgeType::RedirectVsWrapOperation,
+                        a,
+                        b,
+                        target,
+                        site_label.clone(),
+                        80,
+                    );
                 }
                 // wrap-with-condition can suppress a redirect/wrap/call-site hook
                 if a_op == "wrap-with-condition" && (is_redirect(b_op) || b_op == "inject") {
-                    push(edge_id, ConflictEdgeType::WrapConditionSuppressesCall, a, b, target, site_label.clone(), 75);
+                    push(
+                        edge_id,
+                        ConflictEdgeType::WrapConditionSuppressesCall,
+                        a,
+                        b,
+                        target,
+                        site_label.clone(),
+                        75,
+                    );
                 } else if b_op == "wrap-with-condition" && (is_redirect(a_op) || a_op == "inject") {
-                    push(edge_id, ConflictEdgeType::WrapConditionSuppressesCall, b, a, target, site_label.clone(), 75);
+                    push(
+                        edge_id,
+                        ConflictEdgeType::WrapConditionSuppressesCall,
+                        b,
+                        a,
+                        target,
+                        site_label.clone(),
+                        75,
+                    );
                 }
                 // two @ModifyArgs on the same invocation
                 if a_op == "modify-args" && b_op == "modify-args" {
-                    push(edge_id, ConflictEdgeType::ModifyArgsSameInvocation, a, b, target, site_label.clone(), 70);
+                    push(
+                        edge_id,
+                        ConflictEdgeType::ModifyArgsSameInvocation,
+                        a,
+                        b,
+                        target,
+                        site_label.clone(),
+                        70,
+                    );
                 }
             }
         }
@@ -1068,11 +1196,7 @@ fn overwrite_site_key(
         .unwrap_or_default()
 }
 
-fn overwrite_fallback_description(
-    class: &MixinClassRecord,
-    target: &str,
-    method: &str,
-) -> String {
+fn overwrite_fallback_description(class: &MixinClassRecord, target: &str, method: &str) -> String {
     if method.is_empty() {
         format!(
             "`{}` @Overwrite on `{target}` replaces target behaviour — high compatibility risk.",
@@ -1146,7 +1270,10 @@ fn compute_risk_scores(
         let impact_boost = max_impact_weight(classes, &overlap.target);
         if impact_boost > 0 {
             impact += i32::from(impact_boost.min(16));
-            reasons.push(format!("Injection semantics weight +{}", impact_boost.min(16)));
+            reasons.push(format!(
+                "Injection semantics weight +{}",
+                impact_boost.min(16)
+            ));
         }
         let modifies_return = effects.iter().any(|e| {
             e.target == overlap.target
@@ -1168,7 +1295,8 @@ fn compute_risk_scores(
         });
         if advanced {
             impact += 6;
-            reasons.push("Advanced interaction pattern (redirect chain / shared local)".to_string());
+            reasons
+                .push("Advanced interaction pattern (redirect chain / shared local)".to_string());
         }
         let impact = impact.clamp(0, 40);
 
@@ -1196,6 +1324,45 @@ fn compute_risk_scores(
         if edge_count > 0 {
             blast += (edge_count as i32 * 2).min(6);
             reasons.push(format!("{edge_count} interaction edge(s)"));
+        }
+        // Resource-domain cross-layer boost: mixin on a data-loader class affects
+        // the runtime data Layer M reads statically — blast surface spans both layers.
+        if let Some(rsub) = crate::resource_bridge::classify_resource_loader(&overlap.target) {
+            blast += 8;
+            reasons.push(format!(
+                "Target is a `{}` data-loader (Layer M cross-layer blast surface)",
+                rsub.domain()
+            ));
+        }
+        // Subsystem-criticality boost: security-sensitive and performance-critical
+        // subsystems earn a modest blast-radius premium for their wider impact.
+        if let Some(sub) = crate::subsystem::classify_subsystem(&overlap.target) {
+            use crate::subsystem::Subsystem;
+            let sub_boost = match sub {
+                Subsystem::Networking | Subsystem::ClassLoading | Subsystem::Serialization => {
+                    reasons.push(format!(
+                        "Target is in the `{}` subsystem (security-sensitive path)",
+                        sub.as_str()
+                    ));
+                    6i32
+                }
+                Subsystem::Rendering | Subsystem::ServerTick => {
+                    reasons.push(format!(
+                        "Target is in the `{}` subsystem (performance-critical path)",
+                        sub.as_str()
+                    ));
+                    4i32
+                }
+                Subsystem::Persistence => {
+                    reasons.push(format!(
+                        "Target is in the `{}` subsystem (save-IO path)",
+                        sub.as_str()
+                    ));
+                    4i32
+                }
+                _ => 0i32,
+            };
+            blast += sub_boost;
         }
         let blast = blast.clamp(0, 30);
 
@@ -1234,9 +1401,12 @@ fn compute_risk_scores(
             })
         {
             fragility += 8;
-            reasons.push("CAPTURE_FAILHARD local capture (apply-failure risk on update)".to_string());
+            reasons
+                .push("CAPTURE_FAILHARD local capture (apply-failure risk on update)".to_string());
         }
-        let priority_conflict = priority_conflicts.iter().any(|p| p.target == overlap.target);
+        let priority_conflict = priority_conflicts
+            .iter()
+            .any(|p| p.target == overlap.target);
         if priority_conflict {
             fragility += 6;
             actionability = actionability.max(70);
@@ -1298,8 +1468,9 @@ fn compute_risk_scores(
         //    `fold_apply_failures`) and floors the score because a confirmed
         //    apply failure is itself certain. ──
         let semantic_conflict = (impact as f32 * 2.5).round().clamp(0.0, 100.0) as i32;
-        let magnitude =
-            0.5 * semantic_conflict as f32 + 0.3 * (blast as f32 / 30.0 * 100.0) + 0.2 * (fragility as f32 / 30.0 * 100.0);
+        let magnitude = 0.5 * semantic_conflict as f32
+            + 0.3 * (blast as f32 / 30.0 * 100.0)
+            + 0.2 * (fragility as f32 / 30.0 * 100.0);
         let score = ((certainty as f32 / 100.0) * magnitude)
             .round()
             .clamp(0.0, 100.0) as u8;
@@ -1365,10 +1536,7 @@ fn method_level_conflict(
     let mut by_site: BTreeMap<String, Vec<&MixinClassRecord>> = BTreeMap::new();
     for c in group {
         for m in &c.injected_methods {
-            by_site
-                .entry(injection_compare_key(m))
-                .or_default()
-                .push(c);
+            by_site.entry(injection_compare_key(m)).or_default().push(c);
         }
     }
     for (site, mods) in &by_site {
@@ -1460,11 +1628,7 @@ mod tests {
     use super::*;
     use crate::model::ResolvedInjectionPoint;
 
-    fn record(
-        mod_id: &str,
-        methods: &[&str],
-        ops: &[MixinOperation],
-    ) -> MixinClassRecord {
+    fn record(mod_id: &str, methods: &[&str], ops: &[MixinOperation]) -> MixinClassRecord {
         MixinClassRecord {
             archive: format!("{mod_id}.jar"),
             mod_id: mod_id.into(),
@@ -1473,6 +1637,7 @@ mod tests {
             class_path: format!("{mod_id}/Mixin.class"),
             targets: vec!["net.minecraft.server.MinecraftServer".into()],
             target_namespace: Default::default(),
+            runtime_namespace: Default::default(),
             operations: ops.to_vec(),
             injected_methods: methods
                 .iter()
@@ -1508,6 +1673,9 @@ mod tests {
             hot_paths: vec!["server-tick".into()],
             effects: Vec::new(),
             plugin_gated: false,
+            side: Side::Both,
+            activation: crate::model::ActivationStatus::ActiveAssumed,
+            activation_reason: String::new(),
         }
     }
 
@@ -1516,14 +1684,13 @@ mod tests {
         let mut ov = record("alpha", &["tick()V"], &[MixinOperation::Overwrite]);
         ov.injected_methods[0].injection_type = "overwrite".into();
         let inj = record("beta", &["tick()V"], &[MixinOperation::Inject]);
-        let (_, edges, _) = detect_interactions(
-            &[ov.into(), inj.into()],
-            &[],
-            &HierarchyIndex::new(),
+        let (_, edges, _) =
+            detect_interactions(&[ov.into(), inj.into()], &[], &HierarchyIndex::new());
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::OverwriteVsInjector)
         );
-        assert!(edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::OverwriteVsInjector));
     }
 
     #[test]
@@ -1533,14 +1700,13 @@ mod tests {
         head.injected_methods[0].meta.cancellable = true;
         let mut ret = record("beta", &["tick()V"], &[MixinOperation::Inject]);
         ret.injected_methods[0].at_target = "RETURN".into();
-        let (_, edges, _) = detect_interactions(
-            &[head.into(), ret.into()],
-            &[],
-            &HierarchyIndex::new(),
+        let (_, edges, _) =
+            detect_interactions(&[head.into(), ret.into()], &[], &HierarchyIndex::new());
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::CancellableHeadVsReturn)
         );
-        assert!(edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::CancellableHeadVsReturn));
     }
 
     #[test]
@@ -1557,20 +1723,26 @@ mod tests {
         };
         a.added_members = vec![member(false)];
         b.added_members = vec![member(false)];
-        let (_, edges, _) =
-            detect_interactions(&[a.clone().into(), b.clone().into()], &[], &HierarchyIndex::new());
-        assert!(edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::UniqueMemberConflict));
+        let (_, edges, _) = detect_interactions(
+            &[a.clone().into(), b.clone().into()],
+            &[],
+            &HierarchyIndex::new(),
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::UniqueMemberConflict)
+        );
 
         // Both @Unique → no collision edge.
         a.added_members = vec![member(true)];
         b.added_members = vec![member(true)];
-        let (_, edges, _) =
-            detect_interactions(&[a.into(), b.into()], &[], &HierarchyIndex::new());
-        assert!(!edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::UniqueMemberConflict));
+        let (_, edges, _) = detect_interactions(&[a.into(), b.into()], &[], &HierarchyIndex::new());
+        assert!(
+            !edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::UniqueMemberConflict)
+        );
     }
 
     #[test]
@@ -1625,8 +1797,18 @@ mod tests {
         // Comparing on the display name (the old behaviour) missed this; comparing
         // on the canonical key catches it.
         let classes = vec![
-            record_with_site("alpha", "tick()V", "method_1574()V", Namespace::Intermediary),
-            record_with_site("beta", "method_1574()V", "method_1574()V", Namespace::Intermediary),
+            record_with_site(
+                "alpha",
+                "tick()V",
+                "method_1574()V",
+                Namespace::Intermediary,
+            ),
+            record_with_site(
+                "beta",
+                "method_1574()V",
+                "method_1574()V",
+                Namespace::Intermediary,
+            ),
         ];
         let analysis = MixinInteractionEngine::new().analyze(&classes);
         assert!(
@@ -1645,18 +1827,27 @@ mod tests {
         // namespace mismatch rather than silently missed.
         let classes = vec![
             record_with_site("alpha", "tick()V", "tick()V", Namespace::Named),
-            record_with_site("beta", "method_1574()V", "method_1574()V", Namespace::Intermediary),
+            record_with_site(
+                "beta",
+                "method_1574()V",
+                "method_1574()V",
+                Namespace::Intermediary,
+            ),
         ];
         let analysis = MixinInteractionEngine::new().analyze(&classes);
-        assert!(analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::NamespaceMismatch));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::NamespaceMismatch)
+        );
         // And it is not falsely reported as a confirmed same-injection conflict.
-        assert!(!analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint));
+        assert!(
+            !analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint)
+        );
     }
 
     #[test]
@@ -1681,11 +1872,13 @@ mod tests {
             analysis.conflict_edges
         );
         // The real cross-mod conflict (alpha↔beta) is still reported.
-        assert!(analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint
-                && e.source_mod != e.target_mod));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint
+                    && e.source_mod != e.target_mod)
+        );
         // Both an intra-mod (alpha↔alpha) and cross-mod interaction exist.
         assert!(analysis.interactions.iter().any(|i| !i.cross_mod));
         assert!(analysis.interactions.iter().any(|i| i.cross_mod));
@@ -1696,10 +1889,12 @@ mod tests {
         let a = record("alpha", &["tick()V"], &[MixinOperation::Inject]);
         let b = record("beta", &["tick()V"], &[MixinOperation::Inject]);
         let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
-        assert!(analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint)
+        );
         assert!(analysis.interactions.iter().any(|i| i.cross_mod));
     }
 
@@ -1712,10 +1907,12 @@ mod tests {
         ret.injected_methods[0].site_key = "tick()V@RETURN".into();
         ret.injected_methods[0].at_target = "RETURN".into();
         let analysis = MixinInteractionEngine::new().analyze(&[head, ret]);
-        assert!(!analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint));
+        assert!(
+            !analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::SameInjectionPoint)
+        );
     }
 
     #[test]
@@ -1767,8 +1964,10 @@ mod tests {
         let mut a = record("alpha", &["tick()V"], &[MixinOperation::Inject]);
         a.plugin_gated = true;
         let b = record("beta", &["tick()V"], &[MixinOperation::Inject]);
-        let plain = MixinInteractionEngine::new()
-            .analyze(&[record("alpha", &["tick()V"], &[MixinOperation::Inject]), b.clone()]);
+        let plain = MixinInteractionEngine::new().analyze(&[
+            record("alpha", &["tick()V"], &[MixinOperation::Inject]),
+            b.clone(),
+        ]);
         let gated = MixinInteractionEngine::new().analyze(&[a, b]);
         assert!(
             gated.risk_assessments[0].certainty < plain.risk_assessments[0].certainty,
@@ -1812,9 +2011,12 @@ mod tests {
         let mut b = record("beta", &["tick()V"], &[MixinOperation::Overwrite]);
         b.injected_methods[0].injection_type = "overwrite".into();
         let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
-        assert!(analysis.conflict_edges.iter().any(|e| {
-            e.edge_type == ConflictEdgeType::OverwritesSameMethod
-        }));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| { e.edge_type == ConflictEdgeType::OverwritesSameMethod })
+        );
     }
 
     #[test]
@@ -1826,9 +2028,12 @@ mod tests {
         b.injected_methods[0].injection_type = "redirect".into();
         b.injected_methods[0].impact = "call-replace".into();
         let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
-        assert!(analysis.conflict_edges.iter().any(|e| {
-            e.edge_type == ConflictEdgeType::RedirectsSameCall
-        }));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| { e.edge_type == ConflictEdgeType::RedirectsSameCall })
+        );
     }
 
     #[test]
@@ -1840,9 +2045,12 @@ mod tests {
         b.injected_methods[0].injection_type = "modify-variable".into();
         b.injected_methods[0].local_index = Some(2);
         let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
-        assert!(analysis.conflict_edges.iter().any(|e| {
-            e.edge_type == ConflictEdgeType::ModifiesSameLocal
-        }));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| { e.edge_type == ConflictEdgeType::ModifiesSameLocal })
+        );
     }
 
     #[test]
@@ -1856,9 +2064,12 @@ mod tests {
         invoke.injected_methods[0].impact = "call-replace".into();
         invoke.injected_methods[0].site_key = "tick()V@INVOKE".into();
         let analysis = MixinInteractionEngine::new().analyze(&[head, invoke]);
-        assert!(analysis.conflict_edges.iter().any(|e| {
-            e.edge_type == ConflictEdgeType::ChainedInjection
-        }));
+        assert!(
+            analysis
+                .conflict_edges
+                .iter()
+                .any(|e| { e.edge_type == ConflictEdgeType::ChainedInjection })
+        );
     }
 
     #[test]
@@ -1881,13 +2092,12 @@ mod tests {
         beta.hot_paths.clear();
         beta.injected_methods[0].target = "net.minecraft.server.MinecraftServer".into();
         let effects: Vec<MixinEffect> = Vec::new();
-        let overlaps = classify_overlaps(
-            &HotPathRules::default(),
-            &[alpha, beta],
-            &effects,
-        );
+        let overlaps = classify_overlaps(&HotPathRules::default(), &[alpha, beta], &effects);
         assert_eq!(overlaps.len(), 1);
-        assert!(overlaps[0].hot_path, "server target must be hot via HotPathRules");
+        assert!(
+            overlaps[0].hot_path,
+            "server target must be hot via HotPathRules"
+        );
     }
 
     fn shadow_field(mod_id: &str, name: &str, descriptor: &str) -> MixinClassRecord {
@@ -1956,10 +2166,12 @@ mod tests {
             shadow_field("alpha", "playerCount", "J"),
         ];
         let analysis = MixinInteractionEngine::new().analyze(&classes);
-        assert!(!analysis
-            .conflict_edges
-            .iter()
-            .any(|e| e.edge_type == ConflictEdgeType::ShadowDescriptorConflict));
+        assert!(
+            !analysis
+                .conflict_edges
+                .iter()
+                .any(|e| e.edge_type == ConflictEdgeType::ShadowDescriptorConflict)
+        );
     }
 
     #[test]
@@ -1992,9 +2204,76 @@ mod tests {
             .find(|r| r.subject == "net.minecraft.server.MinecraftServer")
             .expect("risk assessment for shared target");
         assert!(
-            assessment.reasons.iter().any(|r| r.contains("version skew")),
+            assessment
+                .reasons
+                .iter()
+                .any(|r| r.contains("version skew")),
             "skew reason must be present: {:?}",
             assessment.reasons
+        );
+    }
+
+    // ── Phase 1: activation / side suppression ──────────────────────────────
+
+    #[test]
+    fn client_only_vs_server_only_is_not_a_conflict() {
+        // Two mods inject into the *same* site on the same target, but one is
+        // client-only and the other server-only — they can never co-apply, so no
+        // cross-mod conflict edge / interaction should survive.
+        let mut a = record("alpha", &["tick()V"], &[MixinOperation::Inject]);
+        a.side = Side::Client;
+        let mut b = record("beta", &["tick()V"], &[MixinOperation::Inject]);
+        b.side = Side::Server;
+        let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
+        assert!(
+            analysis.conflict_edges.is_empty(),
+            "client-vs-server pair must not produce conflict edges: {:?}",
+            analysis.conflict_edges
+        );
+        assert!(
+            !analysis.interactions.iter().any(|i| i.cross_mod),
+            "client-vs-server pair must not produce a cross-mod interaction"
+        );
+        // And the overlap on that target must not be flagged as a method conflict.
+        let overlap = analysis
+            .overlaps
+            .iter()
+            .find(|o| o.target == "net.minecraft.server.MinecraftServer");
+        if let Some(o) = overlap {
+            assert!(
+                !o.method_conflict,
+                "pure cross-side overlap must not be a method conflict"
+            );
+        }
+    }
+
+    #[test]
+    fn same_side_pair_still_conflicts() {
+        // Control: identical setup but both mods are server-side — the conflict
+        // must still be reported, proving the suppression is side-gated, not blanket.
+        let mut a = record("alpha", &["tick()V"], &[MixinOperation::Inject]);
+        a.side = Side::Server;
+        let mut b = record("beta", &["tick()V"], &[MixinOperation::Inject]);
+        b.side = Side::Server;
+        let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
+        assert!(
+            !analysis.conflict_edges.is_empty(),
+            "same-side pair on one site must still conflict"
+        );
+    }
+
+    #[test]
+    fn both_side_is_compatible_with_either_strict_side() {
+        // A `Both` (common) mixin can co-apply with a client-only one, so the
+        // conflict is preserved (Both/Unknown never suppress).
+        let mut a = record("alpha", &["tick()V"], &[MixinOperation::Inject]);
+        a.side = Side::Both;
+        let mut b = record("beta", &["tick()V"], &[MixinOperation::Inject]);
+        b.side = Side::Client;
+        let analysis = MixinInteractionEngine::new().analyze(&[a, b]);
+        assert!(
+            !analysis.conflict_edges.is_empty(),
+            "Both-vs-client pair must still conflict"
         );
     }
 }

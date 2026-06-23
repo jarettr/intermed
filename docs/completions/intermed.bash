@@ -37,6 +37,9 @@ _intermed() {
             intermed,history)
                 cmd="intermed__subcmd__history"
                 ;;
+            intermed,impact)
+                cmd="intermed__subcmd__impact"
+                ;;
             intermed,lab)
                 cmd="intermed__subcmd__lab"
                 ;;
@@ -112,8 +115,20 @@ _intermed() {
             intermed__subcmd__deps,help)
                 cmd="intermed__subcmd__deps__subcmd__help"
                 ;;
+            intermed__subcmd__deps,implicit)
+                cmd="intermed__subcmd__deps__subcmd__implicit"
+                ;;
+            intermed__subcmd__deps,path)
+                cmd="intermed__subcmd__deps__subcmd__path"
+                ;;
             intermed__subcmd__deps,resolve)
                 cmd="intermed__subcmd__deps__subcmd__resolve"
+                ;;
+            intermed__subcmd__deps,why)
+                cmd="intermed__subcmd__deps__subcmd__why"
+                ;;
+            intermed__subcmd__deps,why-missing)
+                cmd="intermed__subcmd__deps__subcmd__why__subcmd__missing"
                 ;;
             intermed__subcmd__deps__subcmd__help,graph)
                 cmd="intermed__subcmd__deps__subcmd__help__subcmd__graph"
@@ -121,8 +136,20 @@ _intermed() {
             intermed__subcmd__deps__subcmd__help,help)
                 cmd="intermed__subcmd__deps__subcmd__help__subcmd__help"
                 ;;
+            intermed__subcmd__deps__subcmd__help,implicit)
+                cmd="intermed__subcmd__deps__subcmd__help__subcmd__implicit"
+                ;;
+            intermed__subcmd__deps__subcmd__help,path)
+                cmd="intermed__subcmd__deps__subcmd__help__subcmd__path"
+                ;;
             intermed__subcmd__deps__subcmd__help,resolve)
                 cmd="intermed__subcmd__deps__subcmd__help__subcmd__resolve"
+                ;;
+            intermed__subcmd__deps__subcmd__help,why)
+                cmd="intermed__subcmd__deps__subcmd__help__subcmd__why"
+                ;;
+            intermed__subcmd__deps__subcmd__help,why-missing)
+                cmd="intermed__subcmd__deps__subcmd__help__subcmd__why__subcmd__missing"
                 ;;
             intermed__subcmd__help,cache)
                 cmd="intermed__subcmd__help__subcmd__cache"
@@ -144,6 +171,9 @@ _intermed() {
                 ;;
             intermed__subcmd__help,history)
                 cmd="intermed__subcmd__help__subcmd__history"
+                ;;
+            intermed__subcmd__help,impact)
+                cmd="intermed__subcmd__help__subcmd__impact"
                 ;;
             intermed__subcmd__help,lab)
                 cmd="intermed__subcmd__help__subcmd__lab"
@@ -184,8 +214,20 @@ _intermed() {
             intermed__subcmd__help__subcmd__deps,graph)
                 cmd="intermed__subcmd__help__subcmd__deps__subcmd__graph"
                 ;;
+            intermed__subcmd__help__subcmd__deps,implicit)
+                cmd="intermed__subcmd__help__subcmd__deps__subcmd__implicit"
+                ;;
+            intermed__subcmd__help__subcmd__deps,path)
+                cmd="intermed__subcmd__help__subcmd__deps__subcmd__path"
+                ;;
             intermed__subcmd__help__subcmd__deps,resolve)
                 cmd="intermed__subcmd__help__subcmd__deps__subcmd__resolve"
+                ;;
+            intermed__subcmd__help__subcmd__deps,why)
+                cmd="intermed__subcmd__help__subcmd__deps__subcmd__why"
+                ;;
+            intermed__subcmd__help__subcmd__deps,why-missing)
+                cmd="intermed__subcmd__help__subcmd__deps__subcmd__why__subcmd__missing"
                 ;;
             intermed__subcmd__help__subcmd__history,conflicts)
                 cmd="intermed__subcmd__help__subcmd__history__subcmd__conflicts"
@@ -198,6 +240,12 @@ _intermed() {
                 ;;
             intermed__subcmd__help__subcmd__history,prune)
                 cmd="intermed__subcmd__help__subcmd__history__subcmd__prune"
+                ;;
+            intermed__subcmd__help__subcmd__impact,remove)
+                cmd="intermed__subcmd__help__subcmd__impact__subcmd__remove"
+                ;;
+            intermed__subcmd__help__subcmd__impact,update)
+                cmd="intermed__subcmd__help__subcmd__impact__subcmd__update"
                 ;;
             intermed__subcmd__help__subcmd__lab,discover)
                 cmd="intermed__subcmd__help__subcmd__lab__subcmd__discover"
@@ -213,6 +261,9 @@ _intermed() {
                 ;;
             intermed__subcmd__help__subcmd__rules,check)
                 cmd="intermed__subcmd__help__subcmd__rules__subcmd__check"
+                ;;
+            intermed__subcmd__help__subcmd__rules,explain)
+                cmd="intermed__subcmd__help__subcmd__rules__subcmd__explain"
                 ;;
             intermed__subcmd__help__subcmd__rules,generate)
                 cmd="intermed__subcmd__help__subcmd__rules__subcmd__generate"
@@ -280,6 +331,24 @@ _intermed() {
             intermed__subcmd__history__subcmd__help,prune)
                 cmd="intermed__subcmd__history__subcmd__help__subcmd__prune"
                 ;;
+            intermed__subcmd__impact,help)
+                cmd="intermed__subcmd__impact__subcmd__help"
+                ;;
+            intermed__subcmd__impact,remove)
+                cmd="intermed__subcmd__impact__subcmd__remove"
+                ;;
+            intermed__subcmd__impact,update)
+                cmd="intermed__subcmd__impact__subcmd__update"
+                ;;
+            intermed__subcmd__impact__subcmd__help,help)
+                cmd="intermed__subcmd__impact__subcmd__help__subcmd__help"
+                ;;
+            intermed__subcmd__impact__subcmd__help,remove)
+                cmd="intermed__subcmd__impact__subcmd__help__subcmd__remove"
+                ;;
+            intermed__subcmd__impact__subcmd__help,update)
+                cmd="intermed__subcmd__impact__subcmd__help__subcmd__update"
+                ;;
             intermed__subcmd__lab,discover)
                 cmd="intermed__subcmd__lab__subcmd__discover"
                 ;;
@@ -313,6 +382,9 @@ _intermed() {
             intermed__subcmd__rules,check)
                 cmd="intermed__subcmd__rules__subcmd__check"
                 ;;
+            intermed__subcmd__rules,explain)
+                cmd="intermed__subcmd__rules__subcmd__explain"
+                ;;
             intermed__subcmd__rules,generate)
                 cmd="intermed__subcmd__rules__subcmd__generate"
                 ;;
@@ -336,6 +408,9 @@ _intermed() {
                 ;;
             intermed__subcmd__rules__subcmd__help,check)
                 cmd="intermed__subcmd__rules__subcmd__help__subcmd__check"
+                ;;
+            intermed__subcmd__rules__subcmd__help,explain)
+                cmd="intermed__subcmd__rules__subcmd__help__subcmd__explain"
                 ;;
             intermed__subcmd__rules__subcmd__help,generate)
                 cmd="intermed__subcmd__rules__subcmd__help__subcmd__generate"
@@ -419,7 +494,7 @@ _intermed() {
 
     case "${cmd}" in
         intermed)
-            opts="-v -h -V --config --dump-config --quiet --verbose --help --version doctor vfs deps mixin-map spark-map lab rules db history trends cache sbom demo help"
+            opts="-v -h -V --config --dump-config --quiet --verbose --help --version doctor vfs deps impact mixin-map spark-map lab rules db history trends cache sbom demo help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -759,7 +834,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps)
-            opts="-v -h --config --dump-config --quiet --verbose --help graph resolve help"
+            opts="-v -h --config --dump-config --quiet --verbose --help graph resolve why why-missing implicit path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -799,7 +874,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__help)
-            opts="graph resolve help"
+            opts="graph resolve why why-missing implicit path help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -840,6 +915,34 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__deps__subcmd__help__subcmd__implicit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__help__subcmd__path)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__deps__subcmd__help__subcmd__resolve)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
@@ -854,8 +957,128 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__deps__subcmd__help__subcmd__why)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__help__subcmd__why__subcmd__missing)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__implicit)
+            opts="-v -h --namespace --mods-dir --json --config --dump-config --quiet --verbose --help [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --namespace)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__path)
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <FROM> <TO> [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__deps__subcmd__resolve)
             opts="-v -h --mods-dir --config --dump-config --quiet --verbose --help [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__why)
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__deps__subcmd__why__subcmd__missing)
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -888,7 +1111,7 @@ _intermed() {
                     return 0
                     ;;
                 --logic)
-                    COMPREPLY=($(compgen -W "imperative datalog souffle duckdb" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "columnar souffle duckdb" -- "${cur}"))
                     return 0
                     ;;
                 --jobs)
@@ -1023,7 +1246,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__help)
-            opts="doctor vfs deps mixin-map spark-map lab rules db history trends cache sbom demo help"
+            opts="doctor vfs deps impact mixin-map spark-map lab rules db history trends cache sbom demo help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1149,7 +1372,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__help__subcmd__deps)
-            opts="graph resolve"
+            opts="graph resolve why why-missing implicit path"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1176,7 +1399,63 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__help__subcmd__deps__subcmd__implicit)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__deps__subcmd__path)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__help__subcmd__deps__subcmd__resolve)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__deps__subcmd__why)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__deps__subcmd__why__subcmd__missing)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1288,6 +1567,48 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__help__subcmd__impact)
+            opts="remove update"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__impact__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__impact__subcmd__update)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__help__subcmd__lab)
             opts="discover run report eval"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -1373,7 +1694,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__help__subcmd__rules)
-            opts="check generate sign verify update registry install"
+            opts="check generate sign verify update registry install explain"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1387,6 +1708,20 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__help__subcmd__rules__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__help__subcmd__rules__subcmd__explain)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -1834,6 +2169,124 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__impact)
+            opts="-v -h --config --dump-config --quiet --verbose --help remove update help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__help)
+            opts="remove update help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__help__subcmd__remove)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__help__subcmd__update)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__remove)
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__impact__subcmd__update)
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> <FROM> <TO> [TARGET]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__lab)
             opts="-v -h --config --dump-config --quiet --verbose --help discover run report eval help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
@@ -2075,7 +2528,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules)
-            opts="-v -h --config --dump-config --quiet --verbose --help check generate sign verify update registry install help"
+            opts="-v -h --config --dump-config --quiet --verbose --help check generate sign verify update registry install explain help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2118,6 +2571,32 @@ _intermed() {
             COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
             return 0
             ;;
+        intermed__subcmd__rules__subcmd__explain)
+            opts="-v -h --rule --facts --config --dump-config --quiet --verbose --help [PACK]"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --rule)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --facts)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --config)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
         intermed__subcmd__rules__subcmd__generate)
             opts="-v -h --backend --out --config --dump-config --quiet --verbose --help [PACK]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
@@ -2126,7 +2605,7 @@ _intermed() {
             fi
             case "${prev}" in
                 --backend)
-                    COMPREPLY=($(compgen -W "sql rust datalog" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "sql rust datalog explain" -- "${cur}"))
                     return 0
                     ;;
                 --out)
@@ -2145,7 +2624,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__help)
-            opts="check generate sign verify update registry install help"
+            opts="check generate sign verify update registry install explain help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2159,6 +2638,20 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__help__subcmd__check)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        intermed__subcmd__rules__subcmd__help__subcmd__explain)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )

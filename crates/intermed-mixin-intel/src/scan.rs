@@ -11,20 +11,20 @@ use intermed_doctor_core::settings::MixinSettings;
 use intermed_doctor_core::{JarCache, Target, TargetKind};
 
 use crate::analyzer::MixinInteractionEngine;
-use crate::effect::enrich_classes_with_effects;
-use crate::recommendation::recommend_for_scan;
 use crate::class_parser::{parse_mixin_class_with_hierarchy, resolve_parse};
+use crate::effect::enrich_classes_with_effects;
 use crate::hierarchy::HierarchyIndex;
-use crate::hot_path::{any_hot_path, HotPathRules};
+use crate::hot_path::{HotPathRules, any_hot_path};
+use crate::model::TargetNamespace;
 use crate::model::{
     MixinAnalysis, MixinClassRecord, MixinConfigRecord, MixinScan, MixinScanFailure,
 };
-use crate::model::TargetNamespace;
-use crate::refmap::{dotted_name, MappingContext, Refmap, TinyMappings};
+use crate::recommendation::recommend_for_scan;
+use crate::refmap::{MappingContext, Namespace, Refmap, TinyMappings, dotted_name};
 
 const EXTRACTOR: &str = "mixin-analyzer";
 /// Bump trailing revision when parse / analysis logic changes within a release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r22");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r28");
 
 /// Stable collector / fact extractor id (`mixin-analyzer`).
 pub fn extractor_id() -> &'static str {
@@ -132,6 +132,9 @@ pub fn scan_mods_dir_filtered(
     let mut analysis = MixinInteractionEngine::new()
         .with_hierarchy(hierarchy)
         .analyze(&classes);
+    // Phase 4: what classes did the analyzer actually have indexed? Absence-based
+    // verdicts read this so they never sound more confident than coverage allows.
+    let classpath_coverage = crate::classpath::ClasspathCoverage::from_index(&target_index);
     let apply_failures = crate::apply_failure::detect_apply_failures(
         &classes,
         &target_index,
@@ -157,6 +160,9 @@ pub fn scan_mods_dir_filtered(
         analysis,
         apply_failures,
         recommendations,
+        Some(classpath_coverage),
+        Some(&target_index),
+        global_mappings.as_ref(),
         failures,
     ))
 }
@@ -188,8 +194,44 @@ fn assemble_scan(
     analysis: MixinAnalysis,
     apply_failures: Vec<crate::apply_failure::ApplyFailure>,
     recommendations: Vec<crate::model::MixinRecommendationRecord>,
+    classpath_coverage: Option<crate::classpath::ClasspathCoverage>,
+    target_index: Option<&crate::apply_failure::TargetClassIndex>,
+    mappings: Option<&TinyMappings>,
     failures: Vec<MixinScanFailure>,
 ) -> MixinScan {
+    // Phase 2: flatten classes into stable, site-level application records before
+    // moving `classes` into the scan. Phase 5: resolve each site's target method
+    // descriptor-aware against the class index.
+    // Phase 18: Standard baseline depth; Phase 19 escalates hot/destructive/required
+    // /fail-hard/unresolved sites to Deep automatically, so heavy checks land where
+    // they matter without paying for them on every benign observer inject.
+    let application_sites = crate::site::build_application_sites(
+        &classes,
+        target_index,
+        mappings,
+        crate::profile::PrecisionProfile::Standard,
+    );
+    // Phases 9–10: order + composition of handlers sharing an exact injection point.
+    let compositions = crate::composition::analyze_compositions(&application_sites);
+    // Cross-layer: mixins hooking Minecraft data loaders mutate runtime resources
+    // (Layer F → Layer M / Dynamics bridge).
+    let resource_mutations = crate::resource_bridge::detect_resource_mutations(&application_sites);
+    // Cross-layer: mixin targets reveal behaviour-grounded capabilities (Layer F → B)
+    // and security-sensitive subsystem hooks (Layer F → G).
+    let (capabilities, security_surfaces) = crate::subsystem::derive_subsystems(&application_sites);
+    // Phase 13/14: roll site/composition/apply evidence into actionable diagnoses,
+    // graded under the unified confidence/severity model. Absence is only
+    // conclusive when the classpath coverage permits it (plan Phase 4/14).
+    let coverage_conclusive = classpath_coverage
+        .as_ref()
+        .map(|c| c.level.minecraft_absence_conclusive())
+        .unwrap_or(false);
+    let risk_clusters = crate::clusters::build_clusters(
+        &application_sites,
+        &apply_failures,
+        &compositions,
+        coverage_conclusive,
+    );
     MixinScan {
         target: dir.display().to_string(),
         configs,
@@ -207,6 +249,13 @@ fn assemble_scan(
         bloat: analysis.bloat,
         graph_export: Some(analysis.graph.export()),
         apply_failures,
+        application_sites,
+        classpath_coverage,
+        compositions,
+        risk_clusters,
+        resource_mutations,
+        capabilities,
+        security_surfaces,
         failures,
     }
 }
@@ -257,6 +306,7 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
     let mod_id = detect_mod_id(&mut archive).unwrap_or_else(|| archive_stem(&archive_label));
     let config_paths = discover_mixin_configs(&mut archive);
     let tiny = discover_tiny_mappings(&mut archive);
+    let runtime_namespace = detect_runtime_namespace(&mut archive);
 
     let mut hierarchy = HierarchyIndex::new();
     let mut target_index = crate::apply_failure::TargetClassIndex::new();
@@ -291,14 +341,18 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
                 for mixin in &config.mixins {
                     let class_path = mixin_class_path(&config.package, mixin);
                     match read_zip_bytes(&mut archive, &class_path) {
-                        Some(bytes) => partial.classes.push(analyze_class(
-                            &config,
-                            mixin,
-                            &class_path,
-                            &bytes,
-                            &mut mapping,
-                            hierarchy,
-                        )),
+                        Some(bytes) => {
+                            let mut rec = analyze_class(
+                                &config,
+                                mixin,
+                                &class_path,
+                                &bytes,
+                                &mut mapping,
+                                hierarchy,
+                            );
+                            rec.runtime_namespace = runtime_namespace;
+                            partial.classes.push(rec);
+                        }
                         None => partial.failures.push(MixinScanFailure {
                             archive: archive_label.clone(),
                             path: Some(class_path),
@@ -334,6 +388,15 @@ pub(crate) fn analyze_class(
     let hot_paths = any_hot_path(&rules, &parsed.targets, &parsed.raw_injections);
     let injected_methods = resolve_parse(&parsed, mapping);
 
+    // Phase 1: resolve this mixin's application side from its config provenance,
+    // then its activation status (assumed-active unless plugin-gated).
+    let side = config
+        .mixin_sides
+        .get(mixin)
+        .copied()
+        .unwrap_or(crate::model::Side::Both);
+    let (activation, activation_reason) = crate::activation::class_activation(config, side);
+
     MixinClassRecord {
         archive: config.archive.clone(),
         mod_id: config.mod_id.clone(),
@@ -342,6 +405,9 @@ pub(crate) fn analyze_class(
         class_path: class_path.to_string(),
         targets: parsed.targets.clone(),
         target_namespace,
+        // Set by the caller (`scan_jar`) from the jar's loader metadata; the
+        // analyzer itself has no archive handle, so default here.
+        runtime_namespace: Namespace::Unknown,
         operations: parsed.operations.into_iter().collect(),
         injected_methods,
         shadows: parsed.shadows,
@@ -354,6 +420,9 @@ pub(crate) fn analyze_class(
         hot_paths,
         effects: Vec::new(),
         plugin_gated: config.plugin.is_some(),
+        side,
+        activation,
+        activation_reason,
     }
 }
 
@@ -418,6 +487,29 @@ fn discover_mixin_configs(archive: &mut zip::ZipArchive<std::fs::File>) -> Vec<S
         out.extend(glob_mixin_configs(archive));
     }
     out.into_iter().collect()
+}
+
+/// The class namespace this jar's loader presents to mixins **at runtime**,
+/// inferred from which loader-metadata file the jar ships.
+///
+/// Forge/NeoForge run mixins against official Mojang class names (since 1.20.1);
+/// Fabric/Quilt run against the obfuscated→intermediary namespace. A `remap=false`
+/// reference is taken verbatim, so it only resolves when it is *already* written
+/// in this runtime namespace — which is exactly what the apply-failure checks
+/// compare against. A multi-loader jar that ships both manifests is ambiguous
+/// (its runtime depends on the instance it is installed into), so it is reported
+/// `Unknown` and the namespace-mismatch checks stay silent rather than guess.
+fn detect_runtime_namespace(archive: &mut zip::ZipArchive<std::fs::File>) -> Namespace {
+    let forge = read_zip_text(archive, "META-INF/mods.toml").is_some()
+        || read_zip_text(archive, "META-INF/neoforge.mods.toml").is_some();
+    let fabric = read_zip_text(archive, "fabric.mod.json").is_some()
+        || read_zip_text(archive, "quilt.mod.json").is_some();
+    match (forge, fabric) {
+        (true, false) => Namespace::Named,
+        (false, true) => Namespace::Intermediary,
+        // Neither manifest, or an ambiguous multi-loader jar with both.
+        _ => Namespace::Unknown,
+    }
 }
 
 /// Extract `config = "x.mixins.json"` entries from a Forge/NeoForge `mods.toml`,
@@ -516,10 +608,9 @@ fn mixin_paths_from_json(text: &str, path: &[&str]) -> Vec<String> {
 fn mixin_config_entry_path(entry: &serde_json::Value) -> Option<String> {
     match entry {
         serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(o) => o
-            .get("config")
-            .and_then(|c| c.as_str())
-            .map(str::to_string),
+        serde_json::Value::Object(o) => {
+            o.get("config").and_then(|c| c.as_str()).map(str::to_string)
+        }
         _ => None,
     }
 }
@@ -589,14 +680,27 @@ fn parse_config(
 ) -> Result<MixinConfigRecord, serde_json::Error> {
     let raw: RawMixinConfig = serde_json::from_str(text)?;
     let mut mixins = std::collections::BTreeSet::new();
-    for value in raw
-        .mixins
-        .iter()
-        .chain(raw.client.iter())
-        .chain(raw.server.iter())
-    {
-        if let Some(name) = mixin_name(value) {
-            mixins.insert(name);
+    // Per-mixin side, keyed by short name. The array a mixin appears in sets the
+    // default side (`mixins` ⇒ both, `client`/`server` ⇒ that side); an object-form
+    // `environment` overrides it. The same mixin in more than one array widens
+    // (Side::merge) — declared for both sides ⇒ Both. This preserves the meaning the
+    // old code dropped by flattening all three arrays into one set.
+    let mut mixin_sides: std::collections::BTreeMap<String, crate::model::Side> =
+        std::collections::BTreeMap::new();
+    for (entries, array_default) in [
+        (&raw.mixins, crate::model::Side::Both),
+        (&raw.client, crate::model::Side::Client),
+        (&raw.server, crate::model::Side::Server),
+    ] {
+        for value in entries {
+            if let Some(name) = mixin_name(value) {
+                let side = crate::activation::entry_side(value, array_default);
+                mixin_sides
+                    .entry(name.clone())
+                    .and_modify(|s| *s = s.merge(side))
+                    .or_insert(side);
+                mixins.insert(name);
+            }
         }
     }
 
@@ -609,6 +713,7 @@ fn parse_config(
         refmap: raw.refmap,
         mixins: mixins.into_iter().collect(),
         plugin: raw.plugin.filter(|p| !p.trim().is_empty()),
+        mixin_sides,
     })
 }
 
@@ -808,5 +913,31 @@ config="real.mixins.json"
         let json = r#"{"package":"x","plugin":"com.example.MyPlugin","mixins":["A"]}"#;
         let rec = parse_config("a.jar", "x.mixins.json", "x", json).unwrap();
         assert_eq!(rec.plugin.as_deref(), Some("com.example.MyPlugin"));
+    }
+
+    #[test]
+    fn config_records_per_mixin_side_from_arrays_and_environment() {
+        use crate::model::Side;
+        // `mixins` ⇒ Both, `client` ⇒ Client, `server` ⇒ Server; an object-form
+        // `environment` overrides the array default.
+        let json = r#"{
+            "package": "x",
+            "mixins": ["Common", {"config":"ignored","class":"PinnedClient","environment":"client"}],
+            "client": ["RenderA"],
+            "server": ["TickB"]
+        }"#;
+        let rec = parse_config("a.jar", "x.mixins.json", "x", json).unwrap();
+        assert_eq!(rec.mixin_sides.get("Common"), Some(&Side::Both));
+        assert_eq!(rec.mixin_sides.get("PinnedClient"), Some(&Side::Client));
+        assert_eq!(rec.mixin_sides.get("RenderA"), Some(&Side::Client));
+        assert_eq!(rec.mixin_sides.get("TickB"), Some(&Side::Server));
+    }
+
+    #[test]
+    fn mixin_in_both_client_and_server_widens_to_both() {
+        use crate::model::Side;
+        let json = r#"{"package":"x","client":["Dual"],"server":["Dual"]}"#;
+        let rec = parse_config("a.jar", "x.mixins.json", "x", json).unwrap();
+        assert_eq!(rec.mixin_sides.get("Dual"), Some(&Side::Both));
     }
 }

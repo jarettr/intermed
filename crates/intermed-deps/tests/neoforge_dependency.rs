@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use intermed_deps::DependencyRule;
 use intermed_doctor_core::evidence::Severity;
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 
 fn test_target() -> &'static Target {
@@ -12,9 +12,9 @@ fn test_target() -> &'static Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     });
     &TARGET
@@ -54,10 +54,7 @@ fn optional_and_incompatible_absent_mods_do_not_emit_missing_dependency() {
             .iter()
             .any(|f| f.id.starts_with("missing-dependency:create->")),
         "optional/incompatible deps must not surface as missing: {:?}",
-        findings
-            .iter()
-            .map(|f| &f.id)
-            .collect::<Vec<_>>()
+        findings.iter().map(|f| &f.id).collect::<Vec<_>>()
     );
     assert!(
         !findings
@@ -136,7 +133,11 @@ fn discouraged_mod_present_emits_warn_not_missing() {
 #[test]
 fn loadbefore_absent_target_is_not_a_missing_dependency() {
     let mut store = FactStore::new();
-    store.fact("meta", kind::PLUGIN).subject("myplugin").attr("version", "1.0").emit();
+    store
+        .fact("meta", kind::PLUGIN)
+        .subject("myplugin")
+        .attr("version", "1.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("myplugin")
@@ -148,7 +149,9 @@ fn loadbefore_absent_target_is_not_a_missing_dependency() {
 
     let findings = DependencyRule.evaluate(&ctx_from(&store));
     assert!(
-        !findings.iter().any(|f| f.id.starts_with("missing-dependency:")),
+        !findings
+            .iter()
+            .any(|f| f.id.starts_with("missing-dependency:")),
         "loadbefore is an ordering hint, never a missing dependency: {:?}",
         findings.iter().map(|f| &f.id).collect::<Vec<_>>()
     );
@@ -157,8 +160,16 @@ fn loadbefore_absent_target_is_not_a_missing_dependency() {
 #[test]
 fn optional_wrong_version_is_warn_not_error() {
     let mut store = FactStore::new();
-    store.fact("meta", kind::MOD).subject("create").attr("version", "6.0").emit();
-    store.fact("meta", kind::MOD).subject("sodium").attr("version", "0.4.0").emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("create")
+        .attr("version", "6.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("sodium")
+        .attr("version", "0.4.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("create")
@@ -173,14 +184,26 @@ fn optional_wrong_version_is_warn_not_error() {
         .iter()
         .find(|f| f.id == "wrong-version:create->sodium")
         .expect("optional wrong-version still reported");
-    assert_eq!(wrong.severity, Severity::Warn, "optional integration mismatch is not pack-breaking");
+    assert_eq!(
+        wrong.severity,
+        Severity::Warn,
+        "optional integration mismatch is not pack-breaking"
+    );
 }
 
 #[test]
 fn mandatory_wrong_version_stays_error() {
     let mut store = FactStore::new();
-    store.fact("meta", kind::MOD).subject("create").attr("version", "6.0").emit();
-    store.fact("meta", kind::MOD).subject("flywheel").attr("version", "0.6.0").emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("create")
+        .attr("version", "6.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("flywheel")
+        .attr("version", "0.6.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("create")
@@ -201,8 +224,16 @@ fn mandatory_wrong_version_stays_error() {
 #[test]
 fn discouraged_out_of_range_stays_silent() {
     let mut store = FactStore::new();
-    store.fact("meta", kind::MOD).subject("a").attr("version", "1.0").emit();
-    store.fact("meta", kind::MOD).subject("b").attr("version", "2.0").emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("a")
+        .attr("version", "1.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("b")
+        .attr("version", "2.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("a")
@@ -214,7 +245,9 @@ fn discouraged_out_of_range_stays_silent() {
 
     let findings = DependencyRule.evaluate(&ctx_from(&store));
     assert!(
-        !findings.iter().any(|f| f.id.starts_with("discouraged-dependency:")),
+        !findings
+            .iter()
+            .any(|f| f.id.starts_with("discouraged-dependency:")),
         "discouraged only fires inside its declared range"
     );
 }
@@ -228,8 +261,15 @@ fn java_and_loader_platform_version_constraints_are_checked() {
         .attr("loader_version", "0.14.9")
         .attr("mc_version", "1.20.1")
         .emit();
-    store.fact("env", kind::JAVA_RUNTIME).attr("version", "17.0.2").emit();
-    store.fact("meta", kind::MOD).subject("modern").attr("version", "1.0").emit();
+    store
+        .fact("env", kind::JAVA_RUNTIME)
+        .attr("version", "17.0.2")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("modern")
+        .attr("version", "1.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("modern")
@@ -249,7 +289,9 @@ fn java_and_loader_platform_version_constraints_are_checked() {
 
     let findings = DependencyRule.evaluate(&ctx_from(&store));
     assert!(
-        findings.iter().any(|f| f.id == "wrong-loader-version:modern->fabricloader"),
+        findings
+            .iter()
+            .any(|f| f.id == "wrong-loader-version:modern->fabricloader"),
         "fabricloader 0.14.9 < 0.15 must be flagged: {:?}",
         findings.iter().map(|f| &f.id).collect::<Vec<_>>()
     );
@@ -263,8 +305,15 @@ fn java_and_loader_platform_version_constraints_are_checked() {
 fn platform_constraints_silent_without_known_versions() {
     // No loader_version / java_runtime → cannot decide → never a false positive.
     let mut store = FactStore::new();
-    store.fact("env", kind::ENVIRONMENT).attr("loader", "fabric").emit();
-    store.fact("meta", kind::MOD).subject("m").attr("version", "1.0").emit();
+    store
+        .fact("env", kind::ENVIRONMENT)
+        .attr("loader", "fabric")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("m")
+        .attr("version", "1.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("m")
@@ -274,17 +323,37 @@ fn platform_constraints_silent_without_known_versions() {
         .attr("relation", "depends")
         .emit();
     let findings = DependencyRule.evaluate(&ctx_from(&store));
-    assert!(!findings.iter().any(|f| f.id.starts_with("wrong-loader-version:")));
-    assert!(!findings.iter().any(|f| f.id.starts_with("missing-dependency:m->fabricloader")));
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.id.starts_with("wrong-loader-version:"))
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.id.starts_with("missing-dependency:m->fabricloader"))
+    );
 }
 
 #[test]
 fn duplicate_dependency_version_check_is_lenient_and_flagged() {
     let mut store = FactStore::new();
     // Two versions of the same id installed (a real duplicate-id situation).
-    store.fact("meta", kind::MOD).subject("lib").attr("version", "1.0").emit();
-    store.fact("meta", kind::MOD).subject("lib").attr("version", "2.0").emit();
-    store.fact("meta", kind::MOD).subject("consumer").attr("version", "1.0").emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("lib")
+        .attr("version", "1.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("lib")
+        .attr("version", "2.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("consumer")
+        .attr("version", "1.0")
+        .emit();
     store
         .fact("meta", kind::DEPENDENCY)
         .subject("consumer")
@@ -296,7 +365,9 @@ fn duplicate_dependency_version_check_is_lenient_and_flagged() {
 
     let findings = DependencyRule.evaluate(&ctx_from(&store));
     assert!(
-        !findings.iter().any(|f| f.id == "wrong-version:consumer->lib"),
+        !findings
+            .iter()
+            .any(|f| f.id == "wrong-version:consumer->lib"),
         "any installed version in range satisfies — no false wrong-version with a duplicate id"
     );
 }

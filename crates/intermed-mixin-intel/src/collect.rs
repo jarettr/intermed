@@ -1,7 +1,7 @@
 //! Fact emission from mixin scan results.
 
-use intermed_doctor_core::facts::{kind, SourceRef};
 use intermed_doctor_core::CollectCtx;
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::settings::MixinSettings;
 
 use crate::model::{MixinOperation, MixinScan};
@@ -9,6 +9,27 @@ use crate::scan::extractor_id;
 
 pub fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &MixinScan) -> usize {
     emit_scan_with_settings(ctx, scan, ctx.settings.mixin)
+}
+
+/// Cross-layer precision (plan §5): a fully-resolved (`ValueSource`) handler that
+/// sits on a hot path is raised to `Full` — the dataflow is complete *and* has
+/// been cross-referenced with hot-path context. Selective by design: the heavier
+/// `Full` claim is reserved for handlers where the extra context actually matters.
+fn effective_precision(
+    df: Option<&crate::model::HandlerDataflow>,
+    on_hot_path: bool,
+) -> crate::model::PrecisionLevel {
+    use crate::model::PrecisionLevel;
+    match df {
+        None => PrecisionLevel::Structural,
+        Some(d) => {
+            let mut p = d.precision;
+            if on_hot_path && p == PrecisionLevel::ValueSource {
+                p.raise_to(PrecisionLevel::Full);
+            }
+            p
+        }
+    }
 }
 
 /// Emit mixin facts, honoring [`MixinSettings`] noise controls.
@@ -19,6 +40,44 @@ pub fn emit_scan_with_settings(
 ) -> usize {
     let extractor = extractor_id();
     let mut emitted = 0usize;
+
+    // Aggregate dataflow-precision metrics (plan §0): one measurement fact per scan
+    // so precision regressions are visible in `--json` / DuckDB. Never a finding.
+    let metrics = crate::metrics::DataflowMetrics::from_scan(scan);
+    if metrics.analyzed > 0 {
+        ctx.store
+            .fact(extractor, kind::MIXIN_DATAFLOW_METRICS)
+            .subject(scan.target.clone())
+            .attr("analyzed", metrics.analyzed as i64)
+            .attr("precise", metrics.precise as i64)
+            .attr("imprecise", metrics.imprecise as i64)
+            .attr("precise_percent", i64::from(metrics.precise_percent()))
+            .attr("mean_confidence", i64::from(metrics.mean_confidence))
+            .attr("imprecise_reasons", metrics.reasons_csv())
+            .source(SourceRef::file(scan.target.clone()))
+            .emit();
+        emitted += 1;
+    }
+
+    // Phase 4: runtime classpath coverage — one measurement fact per scan so
+    // absence-based verdicts can be read against the coverage that produced them.
+    if let Some(cov) = &scan.classpath_coverage {
+        ctx.store
+            .fact(extractor, kind::MIXIN_CLASSPATH_COVERAGE)
+            .subject(scan.target.clone())
+            .attr("level", cov.level.as_str())
+            .attr("minecraft", cov.minecraft)
+            .attr("mods", cov.mods)
+            .attr("libraries", cov.libraries)
+            .attr("loader", cov.loader)
+            .attr("minecraft_classes", cov.minecraft_classes as i64)
+            .attr("mod_classes", cov.mod_classes as i64)
+            .attr("missing_scopes", cov.missing_scopes.join(","))
+            .attr("summary", cov.summary())
+            .source(SourceRef::file(scan.target.clone()))
+            .emit();
+        emitted += 1;
+    }
 
     for c in &scan.configs {
         ctx.store
@@ -78,6 +137,23 @@ pub fn emit_scan_with_settings(
                     .collect::<Vec<_>>()
                     .join(","),
             )
+            .source(SourceRef::inside(
+                class.archive.clone(),
+                class.class_path.clone(),
+            ))
+            .emit();
+        emitted += 1;
+
+        // Phase 1: activation status + application side for this mixin class.
+        ctx.store
+            .fact(extractor, kind::MIXIN_ACTIVATION)
+            .subject(class.class_name.clone())
+            .attr("mod", class.mod_id.clone())
+            .attr("config", class.config.clone())
+            .attr("side", class.side.as_str())
+            .attr("activation", class.activation.as_str())
+            .attr("conditional", class.activation.is_conditional())
+            .attr("reason", class.activation_reason.clone())
             .source(SourceRef::inside(
                 class.archive.clone(),
                 class.class_path.clone(),
@@ -178,10 +254,13 @@ pub fn emit_scan_with_settings(
                 .attr("target", shadow.target.clone())
                 .attr("name", shadow.name.clone())
                 .attr("descriptor", shadow.descriptor.clone())
-                .attr("kind", match shadow.kind {
-                    crate::model::MemberKind::Field => "field",
-                    crate::model::MemberKind::Method => "method",
-                })
+                .attr(
+                    "kind",
+                    match shadow.kind {
+                        crate::model::MemberKind::Field => "field",
+                        crate::model::MemberKind::Method => "method",
+                    },
+                )
                 .source(SourceRef::inside(
                     class.archive.clone(),
                     class.class_path.clone(),
@@ -198,10 +277,13 @@ pub fn emit_scan_with_settings(
                 .attr("target", added.target.clone())
                 .attr("name", added.name.clone())
                 .attr("descriptor", added.descriptor.clone())
-                .attr("kind", match added.kind {
-                    crate::model::MemberKind::Field => "field",
-                    crate::model::MemberKind::Method => "method",
-                })
+                .attr(
+                    "kind",
+                    match added.kind {
+                        crate::model::MemberKind::Field => "field",
+                        crate::model::MemberKind::Method => "method",
+                    },
+                )
                 .attr("origin", added.origin.clone())
                 .source(SourceRef::inside(
                     class.archive.clone(),
@@ -237,7 +319,8 @@ pub fn emit_scan_with_settings(
         }
 
         for body in &class.handler_bodies {
-            ctx.store
+            let mut handler_body = ctx
+                .store
                 .fact(extractor, kind::MIXIN_HANDLER_BODY)
                 .subject(class.mod_id.clone())
                 .attr("mixin", class.class_name.clone())
@@ -257,7 +340,15 @@ pub fn emit_scan_with_settings(
                     "accesses_target_fields",
                     body.accesses_target_fields.join(","),
                 )
-                .attr("calls_target_methods", body.calls_target_methods.join(","))
+                .attr("calls_target_methods", body.calls_target_methods.join(","));
+            // Reflective-dispatch targets — only present on reflective handlers, so
+            // the attribute is added only when there is evidence (no empty attr on
+            // the overwhelming majority of handlers).
+            if !body.reflective_targets.is_empty() {
+                handler_body =
+                    handler_body.attr("reflective_targets", body.reflective_targets.join(","));
+            }
+            handler_body
                 .source(SourceRef::inside(
                     class.archive.clone(),
                     class.class_path.clone(),
@@ -269,33 +360,66 @@ pub fn emit_scan_with_settings(
                 let handler_effect = crate::handler_effect::derive_handler_effect(body);
                 ctx.store
                     .fact(extractor, kind::MIXIN_HANDLER_EFFECT)
-                .subject(class.mod_id.clone())
-                .attr("mixin", class.class_name.clone())
-                .attr("handler_method", handler_effect.handler_method.clone())
-                .attr("handler_local_store", handler_effect.handler_local_store)
-                .attr("modifies_return", handler_effect.modifies_return)
-                .attr("early_return", handler_effect.early_return)
-                .attr("cancels", handler_effect.cancels)
-                .attr("sets_return_value", handler_effect.sets_return_value)
-                .attr("conditional_control", handler_effect.conditional_control)
-                .attr("return_value_source", handler_effect.return_value_source.as_str())
-                .attr("writes_target_state", handler_effect.writes_target_state)
-                .attr("original_call_count", i64::from(handler_effect.original_call_count))
-                .attr("complexity_score", i64::from(handler_effect.complexity_score))
-                .attr(
-                    "side_effects",
-                    handler_effect
-                        .side_effects
-                        .iter()
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                )
-                .source(SourceRef::inside(
-                    class.archive.clone(),
-                    class.class_path.clone(),
-                ))
-                .emit();
+                    .subject(class.mod_id.clone())
+                    .attr("mixin", class.class_name.clone())
+                    .attr("handler_method", handler_effect.handler_method.clone())
+                    .attr("handler_local_store", handler_effect.handler_local_store)
+                    .attr("modifies_return", handler_effect.modifies_return)
+                    .attr("early_return", handler_effect.early_return)
+                    .attr("cancels", handler_effect.cancels)
+                    .attr("sets_return_value", handler_effect.sets_return_value)
+                    .attr("conditional_control", handler_effect.conditional_control)
+                    .attr(
+                        "return_value_source",
+                        handler_effect.return_value_source.as_str(),
+                    )
+                    .attr("writes_target_state", handler_effect.writes_target_state)
+                    .attr(
+                        "original_call_count",
+                        i64::from(handler_effect.original_call_count),
+                    )
+                    .attr(
+                        "complexity_score",
+                        i64::from(handler_effect.complexity_score),
+                    )
+                    .attr(
+                        "side_effects",
+                        handler_effect
+                            .side_effects
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    )
+                    // Precision model (plan §0/§5): surface how certain the dataflow
+                    // is and why, so consumers can weight a claim by its precision.
+                    // Cross-layer refinement (§5 CrossLayerPass): a precisely-resolved
+                    // handler on a hot path is raised to `Full` — the analysis is
+                    // complete *and* cross-referenced with hot-path/complexity context.
+                    .attr(
+                        "precision",
+                        effective_precision(body.dataflow.as_ref(), !class.hot_paths.is_empty())
+                            .as_str(),
+                    )
+                    .attr(
+                        "dataflow_confidence",
+                        i64::from(body.dataflow.as_ref().map_or(0, |d| d.confidence)),
+                    )
+                    .attr(
+                        "imprecise_reasons",
+                        body.dataflow.as_ref().map_or(String::new(), |d| {
+                            d.imprecise_reasons
+                                .iter()
+                                .map(|r| r.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        }),
+                    )
+                    .source(SourceRef::inside(
+                        class.archive.clone(),
+                        class.class_path.clone(),
+                    ))
+                    .emit();
                 emitted += 1;
             }
         }
@@ -477,7 +601,10 @@ pub fn emit_scan_with_settings(
             .attr("reasons", risk.reasons.join("; "))
             .attr("mods", risk.mods.join(","))
             .attr("hot_path", risk.hot_path)
-            .attr("unresolved_points", i64::try_from(risk.unresolved_points).unwrap_or(i64::MAX))
+            .attr(
+                "unresolved_points",
+                i64::try_from(risk.unresolved_points).unwrap_or(i64::MAX),
+            )
             .source(SourceRef::file(risk.subject.clone()))
             .emit();
         emitted += 1;
@@ -491,7 +618,10 @@ pub fn emit_scan_with_settings(
             .attr("score", i64::from(cc.score))
             .attr("injection_sites", i64::from(cc.injection_sites))
             .attr("target_count", i64::from(cc.target_count))
-            .attr("peak_handler_complexity", i64::from(cc.peak_handler_complexity))
+            .attr(
+                "peak_handler_complexity",
+                i64::from(cc.peak_handler_complexity),
+            )
             .attr("components", format_components(&cc.components))
             .source(SourceRef::file(cc.mixin_class.clone()))
             .emit();
@@ -523,9 +653,199 @@ pub fn emit_scan_with_settings(
             .attr("inert_handlers", i64::from(b.inert_handlers))
             .attr("effective_handlers", i64::from(b.effective_handlers))
             .attr("inert_instructions", i64::from(b.inert_instructions))
-            .attr("total_handler_instructions", i64::from(b.total_handler_instructions))
+            .attr(
+                "total_handler_instructions",
+                i64::from(b.total_handler_instructions),
+            )
             .attr("components", format_components(&b.components))
             .source(SourceRef::file(b.mod_id.clone()))
+            .emit();
+        emitted += 1;
+    }
+
+    // Phase 2 / Phase 16: typed, site-level facts. Subject is the *stable site id*
+    // (mod id is an attribute), so rules can key on precise evidence.
+    for site in &scan.application_sites {
+        // Phase 15: what was / wasn't verified for this site.
+        let trace = crate::trace::site_trace(site);
+        ctx.store
+            .fact(extractor, kind::MIXIN_APPLICATION_SITE)
+            .subject(site.site_id.clone())
+            .attr("mod", site.mod_id.clone())
+            .attr("mixin", site.mixin_class.clone())
+            .attr("config", site.config_path.clone())
+            .attr("handler_method", site.handler_method.clone())
+            .attr("handler_descriptor", site.handler_descriptor.clone())
+            .attr("operation", site.operation.clone())
+            .attr("target_class", site.target_class.clone())
+            .attr("target_method", site.target_method.clone())
+            .attr("at_target", site.at_target.clone())
+            .attr("at_detail", site.at_detail.clone())
+            .attr("site_key", site.site_key.clone())
+            .attr("namespace", site.namespace.as_str())
+            .attr("name_original", site.target_name.original.clone())
+            .attr("name_canonical", site.target_name.canonical.clone())
+            .attr("name_source", site.target_name.source.as_str())
+            .attr("name_confidence", i64::from(site.target_name.confidence))
+            .attr("target_resolution", site.target_resolution.as_str())
+            .attr("selector_verification", site.selector_verification.as_str())
+            .attr("signature_check", site.signature_check.as_str())
+            .attr("local_capture_status", site.local_capture_status.as_str())
+            .attr("side", site.side.as_str())
+            .attr("activation", site.activation.as_str())
+            .attr("priority", site.priority)
+            .attr("require", site.require.map(i64::from).unwrap_or(-1))
+            .attr("expect", site.expect.map(i64::from).unwrap_or(-1))
+            .attr("allow", site.allow.map(i64::from).unwrap_or(-1))
+            .attr("confidence", i64::from(site.confidence))
+            .attr("imprecision_reasons", site.imprecision_reasons.join("; "))
+            .attr("checked", trace.checked.join(","))
+            .attr("not_checked", trace.not_checked.join(","))
+            .source(SourceRef::inside(
+                site.archive.clone(),
+                site.config_path.clone(),
+            ))
+            .emit();
+        emitted += 1;
+    }
+
+    // Phases 9–10: composition of co-located handlers (order + interaction class).
+    for comp in &scan.compositions {
+        ctx.store
+            .fact(extractor, kind::MIXIN_COMPOSITION)
+            .subject(format!("{}#{}", comp.target_class, comp.site_key))
+            .attr("target_class", comp.target_class.clone())
+            .attr("site_key", comp.site_key.clone())
+            .attr("classification", comp.classification.as_str())
+            .attr("cross_mod", comp.cross_mod)
+            .attr("participant_count", comp.participants.len() as i64)
+            .attr(
+                "order",
+                comp.participants
+                    .iter()
+                    .map(|p| format!("{}:{}({})", p.mod_id, p.operation, p.role.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(" > "),
+            )
+            .attr(
+                "mods",
+                comp.participants
+                    .iter()
+                    .map(|p| p.mod_id.clone())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .attr("detail", comp.detail.clone())
+            .source(SourceRef::file(comp.target_class.clone()))
+            .emit();
+        emitted += 1;
+    }
+
+    // Cross-layer bridge: mixins that mutate runtime resources (Layer F → M/Dynamics).
+    // A mod that rewrites the recipe/loot/tag loader is also a recipe/loot/tag-
+    // modifying mod — feed that as a Layer-B capability, deduped per (mod, domain).
+    let mut resource_caps_seen = std::collections::BTreeSet::new();
+    for m in &scan.resource_mutations {
+        if resource_caps_seen.insert((m.mod_id.clone(), m.domain.clone())) {
+            ctx.store
+                .fact(extractor, kind::MOD_CAPABILITY)
+                .subject(m.mod_id.clone())
+                .attr("capability", format!("modifies_{}", m.domain))
+                .attr(
+                    "reason",
+                    format!("mixin hooks the {} loader (`{}`)", m.domain, m.target_class),
+                )
+                .attr("subsystem", m.subsystem.as_str())
+                .attr("source", "mixin")
+                .source(SourceRef::file(m.mod_id.clone()))
+                .confidence(f32::from(m.confidence) / 100.0)
+                .emit();
+            emitted += 1;
+        }
+    }
+    for m in &scan.resource_mutations {
+        ctx.store
+            .fact(extractor, kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+            .subject(m.domain.clone())
+            .attr("mod", m.mod_id.clone())
+            .attr("mixin", m.mixin_class.clone())
+            .attr("site_id", m.site_id.clone())
+            .attr("target_class", m.target_class.clone())
+            .attr("subsystem", m.subsystem.as_str())
+            .attr("domain", m.domain.clone())
+            .attr("operation", m.operation.clone())
+            .attr("effect", m.effect.clone())
+            .attr("confidence", i64::from(m.confidence))
+            .source(SourceRef::file(m.mixin_class.clone()))
+            .confidence(f32::from(m.confidence) / 100.0)
+            .emit();
+        emitted += 1;
+    }
+
+    // Cross-layer F → B: emit bytecode-grounded capabilities as MOD_CAPABILITY so
+    // every existing capability consumer (perf correlator, risk explainer, log) sees
+    // a mod's true reach, not just its metadata.
+    for cap in &scan.capabilities {
+        ctx.store
+            .fact(extractor, kind::MOD_CAPABILITY)
+            .subject(cap.mod_id.clone())
+            .attr("capability", cap.capability.clone())
+            .attr("reason", cap.reason.clone())
+            .attr("subsystem", cap.subsystem.as_str())
+            .attr("source", "mixin")
+            .source(SourceRef::file(cap.mod_id.clone()))
+            .confidence(f32::from(cap.confidence) / 100.0)
+            .emit();
+        emitted += 1;
+    }
+
+    // Cross-layer F → G: security-sensitive subsystem hooks.
+    for s in &scan.security_surfaces {
+        ctx.store
+            .fact(extractor, kind::MIXIN_SECURITY_SURFACE)
+            .subject(s.mod_id.clone())
+            .attr("mixin", s.mixin_class.clone())
+            .attr("site_id", s.site_id.clone())
+            .attr("target_class", s.target_class.clone())
+            .attr("subsystem", s.subsystem.as_str())
+            .attr("operation", s.operation.clone())
+            .attr("reason", s.reason.clone())
+            .attr("confidence", i64::from(s.confidence))
+            .source(SourceRef::file(s.mixin_class.clone()))
+            .confidence(f32::from(s.confidence) / 100.0)
+            .emit();
+        emitted += 1;
+    }
+
+    // Phase 13: top-level risk diagnoses.
+    for cluster in &scan.risk_clusters {
+        ctx.store
+            .fact(extractor, kind::MIXIN_RISK_CLUSTER)
+            .subject(cluster.id.clone())
+            .attr("kind", cluster.kind.as_str())
+            .attr("target_class", cluster.target_class.clone())
+            .attr("participants", cluster.participants.join(","))
+            .attr("site_count", cluster.site_count as i64)
+            .attr("apply_failures", cluster.apply_failures as i64)
+            .attr("selector_failures", cluster.selector_failures as i64)
+            .attr("signature_failures", cluster.signature_failures as i64)
+            .attr("local_failures", cluster.local_failures as i64)
+            .attr(
+                "worst_composition",
+                cluster
+                    .worst_composition
+                    .map(|c| c.as_str())
+                    .unwrap_or("none"),
+            )
+            .attr("confidence", i64::from(cluster.confidence))
+            .attr("confirmation_level", cluster.confirmation_level.as_str())
+            .attr("severity", cluster.severity.as_str())
+            .attr("actionability", i64::from(cluster.actionability))
+            .attr("headline", cluster.headline.clone())
+            .attr("recommended_action", cluster.recommended_action.clone())
+            .source(SourceRef::file(cluster.target_class.clone()))
             .emit();
         emitted += 1;
     }

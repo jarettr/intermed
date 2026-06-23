@@ -123,17 +123,18 @@ impl DiagnosticEngine {
             .flat_map(|f| f.evidence.iter())
             .map(|e| e.fact)
             .collect();
-        let facts_dropped =
-            store.compact_preserving(&self.settings.facts.retention, &cited_facts);
+        let facts_dropped = store.compact_preserving(&self.settings.facts.retention, &cited_facts);
 
-        let embed_profile = self.jar_cache.as_ref().is_some_and(JarCache::is_enabled);
-        // Measure on-disk size only when the profile is actually surfaced — the
-        // directory walk is wasted work otherwise.
+        // The on-disk cache walk is the only expensive part of profiling, so it
+        // stays gated on the cache being enabled. Per-phase (collector/rule)
+        // timings are always embedded in the report: the unique-id/grouping work
+        // downstream wants per-rule timing regardless of whether a jar cache ran.
+        let measure_disk = self.jar_cache.as_ref().is_some_and(JarCache::is_enabled);
         let cache_stats = self
             .jar_cache
             .as_ref()
             .map(|c| {
-                if embed_profile {
+                if measure_disk {
                     c.stats_with_disk_usage()
                 } else {
                     c.stats()
@@ -155,7 +156,7 @@ impl DiagnosticEngine {
             findings,
             collector_outcomes,
             rule_stats,
-            embed_profile.then(|| profile.clone()),
+            Some(profile.clone()),
         );
         DiagnosticRun {
             report,
@@ -244,7 +245,7 @@ fn mark_partial_analysis(findings: &mut Vec<Finding>) {
                 f.severity = Severity::Warn;
             }
             f.confidence = (f.confidence * 0.6).min(0.6);
-            if !f.explanation.ends_with(')') || !f.explanation.contains("partial scan") {
+            if !f.explanation.contains("partial scan") {
                 f.explanation.push_str(caveat);
             }
             f.machine_tags.push("partial-analysis".to_string());
@@ -291,13 +292,23 @@ mod partial_tests {
         ];
         mark_partial_analysis(&mut findings);
 
-        let dep = findings.iter().find(|f| f.id == "missing-dependency:a->b").unwrap();
-        assert_eq!(dep.severity, Severity::Warn, "whole-pack finding downgraded");
+        let dep = findings
+            .iter()
+            .find(|f| f.id == "missing-dependency:a->b")
+            .unwrap();
+        assert_eq!(
+            dep.severity,
+            Severity::Warn,
+            "whole-pack finding downgraded"
+        );
         assert!(dep.explanation.contains("partial scan"));
         assert!(dep.machine_tags.iter().any(|t| t == "partial-analysis"));
 
         // A non-universe finding (mixin risk on a present jar) is untouched.
-        let mixin = findings.iter().find(|f| f.id.starts_with("mixin-risk:")).unwrap();
+        let mixin = findings
+            .iter()
+            .find(|f| f.id.starts_with("mixin-risk:"))
+            .unwrap();
         assert_eq!(mixin.severity, Severity::Error);
 
         assert!(findings.iter().any(|f| f.id == "analysis-partial"));

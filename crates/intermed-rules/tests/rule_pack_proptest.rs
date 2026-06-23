@@ -1,6 +1,6 @@
 //! Property tests for declarative rule-pack validation invariants.
 
-use intermed_rules::{default_core_pack, validate_rule_pack, RuleKind, RulePack, RuleSpec};
+use intermed_rules::{RuleKind, RulePack, RuleSpec, default_core_pack, validate_rule_pack};
 use proptest::prelude::*;
 
 fn valid_core_pack() -> RulePack {

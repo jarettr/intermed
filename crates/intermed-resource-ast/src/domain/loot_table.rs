@@ -8,7 +8,7 @@ use crate::domain::DomainParse;
 use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary};
 use crate::semantic::namespace::namespace_of;
 
-pub const LOOT_TABLE_AST_VERSION: &str = "loot-table-r1";
+pub const LOOT_TABLE_AST_VERSION: &str = "loot-table-r2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LootTableSummary {
@@ -54,19 +54,32 @@ pub fn parse(value: &Value) -> DomainParse {
     }
 }
 
-/// A loot entry of `type` `item`/`tag` names the resource in its `name` field.
+/// A loot entry names a resource in its `name` field; the *kind* of resource
+/// depends on the entry `type`:
+/// * `minecraft:loot_table` → a reference to **another loot-table file**
+///   (`LootEntry`) — the only kind resolvable to a file (dangling-checkable).
+/// * `minecraft:tag` → an item tag (`UsesTag`).
+/// * everything else (`minecraft:item`, …) → a dropped **item id**, which is
+///   code-registered, *not* a file — so it must NOT be treated as a loot-table
+///   reference (doing so produced thousands of false "dangling reference" notes).
 fn collect_entry(entry: &Value, refs: &mut Vec<ResourceReference>, drops: &mut Vec<String>) {
     let Some(obj) = entry.as_object() else { return };
     let entry_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
     if let Some(name) = obj.get("name").and_then(Value::as_str) {
-        let is_tag = entry_type.ends_with("tag");
         drops.push(name.to_string());
+        let (relation, is_tag) = if entry_type.ends_with("loot_table") {
+            (RefRelation::LootEntry, false)
+        } else if entry_type.ends_with("tag") {
+            (RefRelation::UsesTag, true)
+        } else {
+            (RefRelation::UsesItem, false)
+        };
         refs.push(ResourceReference {
-            relation: RefRelation::LootEntry,
+            relation,
             namespace: namespace_of(name),
             target: name.to_string(),
             required: true,
-            conditioned: false,
+            conditions: Vec::new(),
             is_tag,
         });
     }
@@ -96,8 +109,50 @@ mod tests {
         )
         .unwrap();
         let p = parse(&v);
-        let ResourceSummary::LootTable(s) = &p.summary else { panic!() };
+        let ResourceSummary::LootTable(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.pool_count, 1);
         assert!(s.drops.contains(&"create:zinc_ingot".to_string()));
+        // An item drop is NOT a loot-table file reference (must not be dangling-checked).
+        assert!(
+            p.references
+                .iter()
+                .all(|r| r.relation != RefRelation::LootEntry)
+        );
+        assert!(
+            p.references
+                .iter()
+                .any(|r| r.relation == RefRelation::UsesItem)
+        );
+    }
+
+    #[test]
+    fn sub_table_reference_is_loot_entry() {
+        let v = serde_json::from_str(
+            r#"{"pools":[{"entries":[{"type":"minecraft:loot_table","name":"ad_astra:chests/lunar"}]}]}"#,
+        )
+        .unwrap();
+        let p = parse(&v);
+        // Only a `minecraft:loot_table` entry is a file reference (dangling-checkable).
+        assert!(
+            p.references.iter().any(
+                |r| r.relation == RefRelation::LootEntry && r.target == "ad_astra:chests/lunar"
+            )
+        );
+    }
+
+    #[test]
+    fn tag_entry_is_uses_tag() {
+        let v = serde_json::from_str(
+            r#"{"pools":[{"entries":[{"type":"minecraft:tag","name":"c:ingots"}]}]}"#,
+        )
+        .unwrap();
+        let p = parse(&v);
+        assert!(
+            p.references
+                .iter()
+                .any(|r| r.relation == RefRelation::UsesTag && r.is_tag)
+        );
     }
 }

@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{FactId, SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, Layer, RuleCtx, Target, TargetKind,
 };
@@ -274,23 +274,39 @@ fn emit_mod_mentions(
     let mut emitted = 0;
     for trace in stacktrace::parse_stacktraces(text) {
         let root = trace.caused_by.last().unwrap_or(&trace.exception);
-        let root_mod = trace.mod_refs.first().map(|m| m.mod_id.as_str()).unwrap_or("unknown");
-        ctx.store
+        let root_mod = trace
+            .mod_refs
+            .first()
+            .map(|m| m.mod_id.as_str())
+            .unwrap_or("unknown");
+        // Candidate culprit frame classes (non-vanilla / non-JDK), root cause first,
+        // for the cross-layer `crash-blame` rule to resolve against `package_owner`.
+        let frame_classes = culprit_frame_classes(&trace);
+        let mut crash = ctx
+            .store
             .fact(extractor, kind::LOG_CRASH)
             .subject(root.class.clone())
             .attr("root_cause_exception", root.class.clone())
             .attr("root_cause_mod", root_mod)
             .attr("phase", infer_crash_phase(&trace))
             .attr("severity", crash_severity(&root.class))
-            .attr("line", (trace.line as i64) + 1)
-            .source(SourceRef::at_line(locator.to_string(), (trace.line as u32) + 1))
+            .attr("line", (trace.line as i64) + 1);
+        if !frame_classes.is_empty() {
+            crash = crash.attr("frame_classes", frame_classes.join(","));
+        }
+        crash
+            .source(SourceRef::at_line(
+                locator.to_string(),
+                (trace.line as u32) + 1,
+            ))
             .confidence(if root_mod == "unknown" { 0.75 } else { 0.85 })
             .emit();
         emitted += 1;
 
         for (index, mref) in trace.mod_refs.iter().enumerate() {
             let blame_score = mention_blame_score(mref.via, index);
-            let mut mention = ctx.store
+            let mut mention = ctx
+                .store
                 .fact(extractor, kind::LOG_MENTIONS_MOD)
                 .subject(mref.mod_id.clone())
                 .attr("via", mref.via)
@@ -298,18 +314,25 @@ fn emit_mod_mentions(
                 .attr("root_cause_exception", root.class.clone())
                 .attr("blame_score", blame_score)
                 .attr("line", (trace.line as i64) + 1)
-                .source(SourceRef::at_line(locator.to_string(), (trace.line as u32) + 1))
+                .source(SourceRef::at_line(
+                    locator.to_string(),
+                    (trace.line as u32) + 1,
+                ))
                 .confidence(blame_score as f32);
             if let Some((version, environment, capabilities)) = metadata.get(&mref.mod_id) {
                 mention = mention
                     .attr("version", version.clone())
                     .attr("environment", environment.clone())
-                    .attr("capabilities", serde_json::to_string(capabilities).unwrap_or_default());
+                    .attr(
+                        "capabilities",
+                        serde_json::to_string(capabilities).unwrap_or_default(),
+                    );
             }
             mention.emit();
             emitted += 1;
 
-            let mut error = ctx.store
+            let mut error = ctx
+                .store
                 .fact(extractor, kind::LOG_MOD_ERROR)
                 .subject(mref.mod_id.clone())
                 .attr("root_cause_exception", root.class.clone())
@@ -317,13 +340,19 @@ fn emit_mod_mentions(
                 .attr("severity", crash_severity(&root.class))
                 .attr("blame_score", blame_score)
                 .attr("via", mref.via)
-                .source(SourceRef::at_line(locator.to_string(), (trace.line as u32) + 1))
+                .source(SourceRef::at_line(
+                    locator.to_string(),
+                    (trace.line as u32) + 1,
+                ))
                 .confidence(blame_score as f32);
             if let Some((version, environment, capabilities)) = metadata.get(&mref.mod_id) {
                 error = error
                     .attr("version", version.clone())
                     .attr("environment", environment.clone())
-                    .attr("capabilities", serde_json::to_string(capabilities).unwrap_or_default());
+                    .attr(
+                        "capabilities",
+                        serde_json::to_string(capabilities).unwrap_or_default(),
+                    );
             }
             error.emit();
             emitted += 1;
@@ -359,6 +388,54 @@ fn crash_severity(exception: &str) -> &'static str {
     } else {
         "error"
     }
+}
+
+/// The candidate culprit *class* of one stack frame (`com.foo.Bar.baz(Bar.java:9)`
+/// → `com.foo.Bar`), or `None` for a vanilla/JDK/loader frame that no installed mod
+/// owns. The frame-to-jar blame rule resolves these against `package_owner`.
+fn frame_culprit_class(frame: &str) -> Option<&str> {
+    let head = frame.split('(').next().unwrap_or(frame).trim();
+    let class = &head[..head.rfind('.')?];
+    if class.is_empty() {
+        return None;
+    }
+    const VANILLA_OR_JDK: &[&str] = &[
+        "java.",
+        "javax.",
+        "jdk.",
+        "sun.",
+        "net.minecraft.",
+        "com.mojang.",
+        "net.minecraftforge.",
+        "net.neoforged.",
+        "net.fabricmc.loader.",
+        "org.spongepowered.",
+    ];
+    if VANILLA_OR_JDK.iter().any(|p| class.starts_with(p)) {
+        return None;
+    }
+    Some(class)
+}
+
+/// Distinctive culprit frame classes across a trace (root-cause exception first,
+/// then its causes), deduplicated and bounded — the input to frame-to-jar blame.
+fn culprit_frame_classes(trace: &stacktrace::Stacktrace) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // Root cause's own frames are the most relevant; then the outer exceptions.
+    let exceptions = std::iter::once(&trace.exception).chain(trace.caused_by.iter());
+    for ex in exceptions {
+        for frame in &ex.frames {
+            if let Some(class) = frame_culprit_class(frame) {
+                if !out.iter().any(|c| c == class) {
+                    out.push(class.to_string());
+                    if out.len() >= 12 {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// One matched log line: the first pattern it hit and a truncated excerpt.
@@ -478,8 +555,135 @@ impl intermed_doctor_core::Rule for LogSignalRule {
             out.push(b.build());
         }
         out.extend(mod_mention_findings(ctx));
+        out.extend(crash_blame_findings(ctx));
         out
     }
+}
+
+/// `true` when `class` lives under (or is) package `pkg`, e.g. `com.foo.M.X` under
+/// `com.foo.M`. Allocation-free prefix test.
+fn class_under_package(class: &str, pkg: &str) -> bool {
+    class == pkg
+        || (class.len() > pkg.len()
+            && class.as_bytes()[pkg.len()] == b'.'
+            && class.starts_with(pkg))
+}
+
+/// Frame-to-jar blame (Layer D ↔ B): resolve a crash's stack-frame classes against
+/// the `package_owner` ownership index. A frame under an *exclusively*-owned package
+/// names the mod whose code is on the failing path — precise blame the heuristic log
+/// scan can only guess. A frame under a package owned by ≥2 mods (a shaded/bundled
+/// library) is *ambiguous*: surfaced quietly as candidates, never as a confident blame.
+fn crash_blame_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // package -> owning mods (with one evidence fact id each).
+    let mut owners: BTreeMap<&str, BTreeMap<&str, FactId>> = BTreeMap::new();
+    for f in ctx.store.by_kind(kind::PACKAGE_OWNER) {
+        if let Some(pkg) = f.attr("package") {
+            owners
+                .entry(pkg)
+                .or_default()
+                .entry(f.subject.as_str())
+                .or_insert(f.id);
+        }
+    }
+    if owners.is_empty() {
+        return Vec::new();
+    }
+
+    // Dedup blame per mod (a mod blamed by several crashes → one finding) and per
+    // ambiguous frame class.
+    let mut blamed: BTreeMap<&str, (&str, FactId, FactId)> = BTreeMap::new(); // mod -> (class, owner_fact, crash_fact)
+    let mut ambiguous: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new(); // class -> mods
+
+    for crash in ctx.store.by_kind(kind::LOG_CRASH) {
+        let Some(frames) = crash.attr("frame_classes") else {
+            continue;
+        };
+        for class in frames.split(',').filter(|c| !c.is_empty()) {
+            // Most specific (longest) owning package for this frame class.
+            let best = owners
+                .iter()
+                .filter(|(pkg, _)| class_under_package(class, pkg))
+                .max_by_key(|(pkg, _)| pkg.len());
+            let Some((_, mods)) = best else {
+                continue;
+            };
+            if mods.len() == 1 {
+                let (&mod_id, &owner_fact) = mods.iter().next().unwrap();
+                // Keep the deepest (root-cause-first) blame per mod.
+                blamed
+                    .entry(mod_id)
+                    .or_insert((class, owner_fact, crash.id));
+                break; // this crash's culprit found
+            }
+            ambiguous
+                .entry(class)
+                .or_default()
+                .extend(mods.keys().copied());
+        }
+    }
+
+    let mut out = Vec::new();
+    for (mod_id, (class, owner_fact, crash_fact)) in blamed {
+        out.push(
+            Finding::builder("log-signal", format!("crash-blame:{mod_id}"))
+                .severity(Severity::Warn)
+                .category(Category::Log)
+                .title(format!("Crash stack runs through `{mod_id}`'s code"))
+                .explanation(format!(
+                    "The crash's stack trace passes through `{class}`, a class shipped exclusively \
+                     by `{mod_id}` (frame-to-jar ownership). This mod's code is on the failing path \
+                     — a precise triage lead the heuristic log scan can only approximate. It may be \
+                     the cause or a victim of an upstream mod; start the investigation here."
+                ))
+                .evidence(EvidenceEdge::subject(crash_fact))
+                .evidence(EvidenceEdge::supports(owner_fact))
+                .affects(mod_id.to_string())
+                .fix(FixCandidate::advice(
+                    "Inspect this mod around the named class; reproduce with it removed to confirm \
+                     cause vs. victim.",
+                ))
+                .tag("log")
+                .tag("crash-blame")
+                .tag("frame-to-jar")
+                // Machine-readable resolved frame class — lets `lab eval` join this
+                // blame against a ground-truth crash attribution by exact class, for
+                // calibrated blame-precision measurement.
+                .tag(format!("frame-class:{class}"))
+                .confidence(0.9)
+                .build(),
+        );
+    }
+    for (class, mods) in ambiguous {
+        // Only when no exclusive blame already named one of these mods.
+        if mods
+            .iter()
+            .any(|m| out.iter().any(|f| f.id == format!("crash-blame:{m}")))
+        {
+            continue;
+        }
+        let list: Vec<&str> = mods.iter().copied().collect();
+        out.push(
+            Finding::builder("log-signal", format!("crash-blame-ambiguous:{class}"))
+                .severity(Severity::Note)
+                .category(Category::Log)
+                .title(format!("Crash stack runs through shared code `{class}`"))
+                .explanation(format!(
+                    "The crash passes through `{class}`, which is shipped by multiple mods ({}) — \
+                     typically a shaded/bundled library. Ownership is ambiguous, so this is a weak \
+                     lead: one of these mods bundles the failing code.",
+                    list.join(", ")
+                ))
+                .tag("log")
+                .tag("crash-blame")
+                .tag("ambiguous")
+                .confidence(0.4)
+                .build(),
+        );
+    }
+    out
 }
 
 /// Correlate crash-trace mod mentions (`log_mentions_mod`) with the installed mod
@@ -562,9 +766,9 @@ fn fix_for(sig: &str) -> Option<FixCandidate> {
         signal::SODIUM_CONFLICT => FixCandidate::advice(
             "Keep only one Sodium-family renderer (Sodium, Rubidium, or Embeddium).",
         ),
-        signal::IRIS_SHADER_ERROR => {
-            FixCandidate::advice("Install a compatible Sodium build and matching Iris/shader pack versions.")
-        }
+        signal::IRIS_SHADER_ERROR => FixCandidate::advice(
+            "Install a compatible Sodium build and matching Iris/shader pack versions.",
+        ),
         signal::CREATE_ERROR => FixCandidate::advice(
             "Verify Create, Flywheel, and Registrate versions match your loader and Minecraft version.",
         ),
@@ -604,10 +808,12 @@ mod tests {
         let report = engine.diagnose(&target);
 
         assert_eq!(report.summary.fatal, 1);
-        assert!(report.findings[0]
-            .machine_tags
-            .iter()
-            .any(|t| t == signal::OUT_OF_MEMORY));
+        assert!(
+            report.findings[0]
+                .machine_tags
+                .iter()
+                .any(|t| t == signal::OUT_OF_MEMORY)
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -677,8 +883,11 @@ mod tests {
         let report = engine.diagnose(&target);
 
         assert!(
-            report.findings.iter().any(|f| f.id == "log-mentions-mod:examplemod"
-                && f.machine_tags.iter().any(|t| t == "mod-mention")),
+            report
+                .findings
+                .iter()
+                .any(|f| f.id == "log-mentions-mod:examplemod"
+                    && f.machine_tags.iter().any(|t| t == "mod-mention")),
             "expected a mod-mention finding for examplemod: {:?}",
             report.findings.iter().map(|f| &f.id).collect::<Vec<_>>()
         );
@@ -688,7 +897,7 @@ mod tests {
     #[test]
     fn crash_emits_root_cause_and_weighted_mod_error_facts() {
         use intermed_doctor_core::facts::FactStore;
-        use intermed_doctor_core::{default_settings, CollectCtx, Collector};
+        use intermed_doctor_core::{CollectCtx, Collector, default_settings};
 
         let dir = std::env::temp_dir().join(format!("imd-root-cause-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -726,9 +935,15 @@ mod tests {
         LogCollector.collect(&mut ctx);
 
         let crash = store.by_kind(kind::LOG_CRASH).next().expect("log_crash");
-        assert_eq!(crash.attr("root_cause_exception"), Some("java.lang.NullPointerException"));
+        assert_eq!(
+            crash.attr("root_cause_exception"),
+            Some("java.lang.NullPointerException")
+        );
         assert_eq!(crash.attr("root_cause_mod"), Some("alpha"));
-        let error = store.by_kind(kind::LOG_MOD_ERROR).next().expect("log_mod_error");
+        let error = store
+            .by_kind(kind::LOG_MOD_ERROR)
+            .next()
+            .expect("log_mod_error");
         assert_eq!(error.subject, "alpha");
         assert_eq!(error.attr("version"), Some("1.2.3"));
         assert!(error.attr_f64("blame_score").unwrap() >= 0.9);
@@ -737,8 +952,8 @@ mod tests {
 
     #[test]
     fn installed_mod_mention_is_warn_uninstalled_is_note() {
-        use intermed_doctor_core::facts::FactStore;
         use intermed_doctor_core::RuleCtx;
+        use intermed_doctor_core::facts::FactStore;
 
         let mut store = FactStore::new();
         store
@@ -780,6 +995,101 @@ mod tests {
             .find(|f| f.id == "log-mentions-mod:ghostmod")
             .expect("uninstalled mention finding");
         assert_eq!(ghost.severity, Severity::Note);
+    }
+
+    #[test]
+    fn frame_culprit_class_extracts_mod_classes_and_skips_vanilla() {
+        assert_eq!(
+            frame_culprit_class("com.simibubi.create.Foo.tick(Foo.java:9)"),
+            Some("com.simibubi.create.Foo")
+        );
+        assert_eq!(
+            frame_culprit_class(
+                "net.minecraft.server.MinecraftServer.tick(MinecraftServer.java:1)"
+            ),
+            None
+        );
+        assert_eq!(
+            frame_culprit_class("java.lang.Thread.run(Thread.java:1)"),
+            None
+        );
+        assert_eq!(frame_culprit_class("NoDotsHere"), None);
+    }
+
+    fn blame_target() -> Target {
+        Target {
+            path: ".".into(),
+            kind: TargetKind::LogFile,
+            mods_dir: None,
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        }
+    }
+
+    #[test]
+    fn exclusive_package_owner_yields_high_confidence_crash_blame() {
+        use intermed_doctor_core::RuleCtx;
+        use intermed_doctor_core::facts::FactStore;
+        let mut store = FactStore::new();
+        store
+            .fact("metadata-scanner", kind::PACKAGE_OWNER)
+            .subject("create")
+            .attr("package", "com.simibubi.create")
+            .emit();
+        store
+            .fact("log-analyzer", kind::LOG_CRASH)
+            .subject("java.lang.NullPointerException")
+            .attr(
+                "frame_classes",
+                "com.simibubi.create.content.Foo,com.othermod.Bar",
+            )
+            .emit();
+        let target = blame_target();
+        let findings = crash_blame_findings(&RuleCtx::for_test(&store, &target));
+        let f = findings
+            .iter()
+            .find(|f| f.id == "crash-blame:create")
+            .expect("exclusive blame finding");
+        assert_eq!(f.severity, Severity::Warn);
+        assert!(f.confidence >= 0.85);
+        assert!(f.machine_tags.iter().any(|t| t == "frame-to-jar"));
+    }
+
+    #[test]
+    fn shared_package_owner_is_ambiguous_not_a_confident_blame() {
+        use intermed_doctor_core::RuleCtx;
+        use intermed_doctor_core::facts::FactStore;
+        let mut store = FactStore::new();
+        // Two mods ship the same shaded library package.
+        for m in ["moda", "modb"] {
+            store
+                .fact("metadata-scanner", kind::PACKAGE_OWNER)
+                .subject(m)
+                .attr("package", "com.google.gson")
+                .emit();
+        }
+        store
+            .fact("log-analyzer", kind::LOG_CRASH)
+            .subject("java.lang.IllegalStateException")
+            .attr("frame_classes", "com.google.gson.Gson")
+            .emit();
+        let target = blame_target();
+        let findings = crash_blame_findings(&RuleCtx::for_test(&store, &target));
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id.starts_with("crash-blame:moda")
+                    || f.id.starts_with("crash-blame:modb")),
+            "ambiguous ownership must not produce a confident blame"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id.starts_with("crash-blame-ambiguous:")),
+            "ambiguous ownership should surface a weak lead"
+        );
     }
 
     #[test]

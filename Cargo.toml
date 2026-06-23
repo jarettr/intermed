@@ -13,6 +13,7 @@ members = [
     "crates/intermed-rules",
     "crates/intermed-cli",
     # ── Later phases: structured stubs (real Collector/Rule contracts) ─────
+    "crates/intermed-resource-identity",# Canonical resource identity (Layer E + M)
     "crates/intermed-vfs",              # Layer E  — Phase 3
     "crates/intermed-resource-ast",     # Layer M  — resource/data semantics (AST)
     "crates/intermed-packops",          # Layer E  — Phase 3
@@ -22,13 +23,14 @@ members = [
     "crates/intermed-sbom",             # Layer H  — Phase 6
     "crates/intermed-spark-bridge",     # Layer I  — Phase 7
     "crates/intermed-lab",              # Layer K  — Phase 8
-    "crates/intermed-runtime-preflight",# Layer L  — Phase 9
     "crates/intermed-duckdb",           # Layer J  — DuckDB SQL backend (feature-gated)
+    "crates/intermed-columnar",         # In-process columnar (Arrow) query engine — the default rule backend
+    "crates/intermed-query-bridge",     # Test-time equivalence guard: RuleSpec → IR lowering + engine/interpreter parity
 ]
 
 [workspace.package]
-version = "0.1.0"
-edition = "2021"
+version = "0.1.0-alpha"
+edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/intermed/intermed"
@@ -68,6 +70,8 @@ clap = { version = "4", features = ["derive"] }
 # Internal crates
 intermed-facts = { path = "crates/intermed-facts" }
 intermed-evidence = { path = "crates/intermed-evidence" }
+intermed-columnar = { path = "crates/intermed-columnar" }
+intermed-query-bridge = { path = "crates/intermed-query-bridge" }
 intermed-report = { path = "crates/intermed-report" }
 intermed-doctor-core = { path = "crates/intermed-doctor-core" }
 intermed-config = { path = "crates/intermed-config" }
@@ -75,6 +79,7 @@ intermed-minecraft-scan = { path = "crates/intermed-minecraft-scan" }
 intermed-log = { path = "crates/intermed-log" }
 intermed-deps = { path = "crates/intermed-deps" }
 intermed-rules = { path = "crates/intermed-rules" }
+intermed-resource-identity = { path = "crates/intermed-resource-identity" }
 intermed-vfs = { path = "crates/intermed-vfs" }
 intermed-resource-ast = { path = "crates/intermed-resource-ast" }
 intermed-packops = { path = "crates/intermed-packops" }
@@ -84,7 +89,6 @@ intermed-security-audit = { path = "crates/intermed-security-audit" }
 intermed-sbom = { path = "crates/intermed-sbom" }
 intermed-spark-bridge = { path = "crates/intermed-spark-bridge" }
 intermed-lab = { path = "crates/intermed-lab" }
-intermed-runtime-preflight = { path = "crates/intermed-runtime-preflight" }
 intermed-duckdb = { path = "crates/intermed-duckdb" }
 
 [profile.release]

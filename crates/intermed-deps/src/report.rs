@@ -94,7 +94,8 @@ mod tests {
     fn unsat_text_hides_synthetic_modpack_root() {
         let raw = format!(
             "Because {} depends on iris, {} is forbidden.",
-            crate::graph::MODPACK_ROOT_ID, crate::graph::MODPACK_ROOT_ID
+            crate::graph::MODPACK_ROOT_ID,
+            crate::graph::MODPACK_ROOT_ID
         );
         let text = sanitize_modpack_root(&raw);
         assert!(!text.contains(crate::graph::MODPACK_ROOT_ID));

@@ -15,9 +15,7 @@ use crate::store::{DuckError, DuckStore, QueryResult};
 pub fn parse_since(input: &str) -> Result<Duration, AnalyticsError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Err(AnalyticsError::InvalidSince(
-            "empty duration".to_string(),
-        ));
+        return Err(AnalyticsError::InvalidSince("empty duration".to_string()));
     }
     let (num, unit) = trimmed.split_at(trimmed.len().saturating_sub(1));
     let value: i64 = num
@@ -135,6 +133,22 @@ pub struct MixinOverlapRank {
     pub run_count: usize,
 }
 
+/// A `(domain, class)` resource-collision count — which kinds of override are
+/// most common across stored runs (roadmap §14).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceCollisionStat {
+    pub domain: String,
+    pub class: String,
+    pub overrides: usize,
+}
+
+/// A semantic-diff-kind count (recipe-output-override, registry-object-override, …).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticDiffStat {
+    pub diff_kind: String,
+    pub occurrences: usize,
+}
+
 #[derive(Debug, Error)]
 pub enum AnalyticsError {
     #[error("duckdb: {0}")]
@@ -161,7 +175,7 @@ impl AnalyticsStore {
     /// Findings that recur across runs within the relative `since` window.
     pub fn history_conflicts(&self, since: &str) -> Result<Vec<RecurringConflict>, AnalyticsError> {
         let duration = parse_since(since)?;
-        let cutoff = (Utc::now() - duration).to_rfc3339();
+        let cutoff = escape_sql_literal(&(Utc::now() - duration).to_rfc3339());
         let sql = format!(
             r"
             SELECT
@@ -207,6 +221,69 @@ impl AnalyticsStore {
         map_risk_patterns(&self.store.query(&sql)?)
     }
 
+    /// Resource collision counts grouped by `(domain, class)` across stored runs —
+    /// which kinds of override dominate this pack's history (roadmap §14).
+    pub fn resource_collision_stats(&self) -> Result<Vec<ResourceCollisionStat>, AnalyticsError> {
+        let sql = r"
+            SELECT domain, class, COUNT(*) AS overrides
+            FROM (
+                SELECT f.run_id, f.fact_id,
+                    MAX(CASE WHEN a.key = 'domain' THEN a.val_str END) AS domain,
+                    MAX(CASE WHEN a.key = 'class'  THEN a.val_str END) AS class
+                FROM facts f
+                JOIN fact_attributes a ON a.run_id = f.run_id AND a.fact_id = f.fact_id
+                WHERE f.kind = 'resource_collision'
+                GROUP BY f.run_id, f.fact_id
+            )
+            WHERE domain IS NOT NULL AND class IS NOT NULL
+            GROUP BY domain, class
+            ORDER BY overrides DESC, domain, class
+        ";
+        let result = self.store.query(sql)?;
+        let mut out = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            if row.len() < 3 {
+                return Err(AnalyticsError::MalformedResult);
+            }
+            out.push(ResourceCollisionStat {
+                domain: row[0].clone(),
+                class: row[1].clone(),
+                overrides: row[2].parse().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Layer-M semantic-diff counts grouped by `diff_kind` across stored runs.
+    pub fn semantic_diff_stats(&self) -> Result<Vec<SemanticDiffStat>, AnalyticsError> {
+        let sql = r"
+            SELECT diff_kind, COUNT(*) AS occurrences
+            FROM (
+                SELECT f.run_id, f.fact_id,
+                    MAX(CASE WHEN a.key = 'diff_kind' THEN a.val_str END) AS diff_kind
+                FROM facts f
+                JOIN fact_attributes a ON a.run_id = f.run_id AND a.fact_id = f.fact_id
+                WHERE f.kind = 'resource_semantic_diff'
+                GROUP BY f.run_id, f.fact_id
+            )
+            WHERE diff_kind IS NOT NULL
+            GROUP BY diff_kind
+            ORDER BY occurrences DESC, diff_kind
+        ";
+        let result = self.store.query(sql)?;
+        let mut out = Vec::with_capacity(result.rows.len());
+        for row in &result.rows {
+            if row.len() < 2 {
+                return Err(AnalyticsError::MalformedResult);
+            }
+            out.push(SemanticDiffStat {
+                diff_kind: row[0].clone(),
+                occurrences: row[1].parse().unwrap_or(0),
+            });
+        }
+        Ok(out)
+    }
+
     /// Mixin-category finding counts per run (time series).
     pub fn trends_mixin_risk(&self) -> Result<Vec<MixinRiskTrendPoint>, AnalyticsError> {
         let sql = r"
@@ -225,7 +302,10 @@ impl AnalyticsStore {
     }
 
     /// Top-N most frequent mixin overlaps aggregated across all runs.
-    pub fn top_mixin_overlaps(&self, limit: usize) -> Result<Vec<MixinOverlapRank>, AnalyticsError> {
+    pub fn top_mixin_overlaps(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MixinOverlapRank>, AnalyticsError> {
         let sql = format!(
             r"
             SELECT
@@ -281,6 +361,8 @@ impl AnalyticsStore {
         run_a: &str,
         run_b: &str,
     ) -> Result<HistoryDiffReport, AnalyticsError> {
+        let run_a_esc = escape_sql_literal(run_a);
+        let run_b_esc = escape_sql_literal(run_b);
         let sql = format!(
             r"
             WITH a AS (
@@ -294,7 +376,7 @@ impl AnalyticsStore {
                 FROM findings f
                 LEFT JOIN finding_affects af
                   ON f.run_id = af.run_id AND f.finding_id = af.finding_id
-                WHERE f.run_id = '{run_a}'
+                WHERE f.run_id = '{run_a_esc}'
                 GROUP BY f.finding_id, f.rule_id, f.severity, f.category, f.title
             ),
             b AS (
@@ -308,7 +390,7 @@ impl AnalyticsStore {
                 FROM findings f
                 LEFT JOIN finding_affects af
                   ON f.run_id = af.run_id AND f.finding_id = af.finding_id
-                WHERE f.run_id = '{run_b}'
+                WHERE f.run_id = '{run_b_esc}'
                 GROUP BY f.finding_id, f.rule_id, f.severity, f.category, f.title
             )
             SELECT
@@ -357,10 +439,11 @@ impl AnalyticsStore {
     }
 
     fn run_summary(&self, run_id: &str) -> Result<Option<RunSummary>, AnalyticsError> {
+        let run_id_esc = escape_sql_literal(run_id);
         let sql = format!(
             r"
             SELECT run_id, generated_at, target_path, error_count, warn_count
-            FROM runs WHERE run_id = '{run_id}'
+            FROM runs WHERE run_id = '{run_id_esc}'
             LIMIT 1
             "
         );
@@ -374,10 +457,8 @@ impl AnalyticsStore {
     /// Delete runs older than the relative `keep` window. Returns rows removed.
     pub fn history_prune(&self, keep: &str) -> Result<usize, AnalyticsError> {
         let duration = parse_since(keep)?;
-        let cutoff = (Utc::now() - duration).to_rfc3339();
-        let count_sql = format!(
-            "SELECT COUNT(*) FROM runs WHERE generated_at < '{cutoff}'"
-        );
+        let cutoff = escape_sql_literal(&(Utc::now() - duration).to_rfc3339());
+        let count_sql = format!("SELECT COUNT(*) FROM runs WHERE generated_at < '{cutoff}'");
         let count = self
             .store
             .query(&count_sql)?
@@ -546,6 +627,10 @@ fn map_overlap_ranks(result: &QueryResult) -> Result<Vec<MixinOverlapRank>, Anal
         });
     }
     Ok(out)
+}
+
+fn escape_sql_literal(val: &str) -> String {
+    val.replace('\'', "''")
 }
 
 #[cfg(test)]

@@ -1,0 +1,79 @@
+[package]
+name = "intermed-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.intermed-mixin-intel]
+path = "../crates/intermed-mixin-intel"
+
+[dependencies.intermed-resource-ast]
+path = "../crates/intermed-resource-ast"
+
+[dependencies.intermed-deps]
+path = "../crates/intermed-deps"
+
+[dependencies.intermed-log]
+path = "../crates/intermed-log"
+
+# Fuzz targets exercise the parsers that ingest untrusted bytes from mod jars —
+# the exact surfaces the three robustness bugs (Tiny underflow, log UTF-8 boundary,
+# parse panics) lived in. Each target must never panic on arbitrary input.
+
+[[bin]]
+name = "tiny_mappings"
+path = "fuzz_targets/tiny_mappings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "class_parser"
+path = "fuzz_targets/class_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runtime_log"
+path = "fuzz_targets/runtime_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_ast"
+path = "fuzz_targets/resource_ast.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_json"
+path = "fuzz_targets/resource_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "deps_semver"
+path = "fuzz_targets/deps_semver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_stacktrace"
+path = "fuzz_targets/log_stacktrace.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace so the fuzz crate builds standalone.
+[workspace]

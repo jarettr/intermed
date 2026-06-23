@@ -49,8 +49,14 @@ fn forge_identity(text: &str, loader: &str) -> Option<ArtifactIdentity> {
     let v: toml::Value = toml::from_str(text).ok()?;
     let entry = v.get("mods").and_then(|m| m.as_array())?.first()?;
     Some(ArtifactIdentity {
-        mod_id: entry.get("modId").and_then(|x| x.as_str()).map(str::to_string),
-        version: entry.get("version").and_then(|x| x.as_str()).map(str::to_string),
+        mod_id: entry
+            .get("modId")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
+        version: entry
+            .get("version")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         loader: Some(loader.to_string()),
     })
 }
@@ -59,7 +65,10 @@ fn json_identity(text: &str, loader: &str) -> Option<ArtifactIdentity> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     Some(ArtifactIdentity {
         mod_id: v.get("id").and_then(|x| x.as_str()).map(str::to_string),
-        version: v.get("version").and_then(|x| x.as_str()).map(str::to_string),
+        version: v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         loader: Some(loader.to_string()),
     })
 }
@@ -68,7 +77,10 @@ fn yaml_plugin_identity(text: &str, loader: &str) -> Option<ArtifactIdentity> {
     let v: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
     Some(ArtifactIdentity {
         mod_id: v.get("name").and_then(|x| x.as_str()).map(str::to_string),
-        version: v.get("version").and_then(|x| x.as_str()).map(str::to_string),
+        version: v
+            .get("version")
+            .and_then(|x| x.as_str())
+            .map(str::to_string),
         loader: Some(loader.to_string()),
     })
 }
@@ -146,8 +158,8 @@ pub fn mod_id_or_stem(archive: &mut ZipArchive<File>, archive_path: &str) -> Str
 mod tests {
     use super::*;
     use std::io::Write;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     fn jar_with(entries: &[(&str, &str)]) -> ZipArchive<File> {
         let dir = std::env::temp_dir().join(format!(
@@ -212,6 +224,9 @@ mod tests {
     fn falls_back_to_stem_when_opaque() {
         let mut z = jar_with(&[("com/example/Foo.class", "x")]);
         assert!(detect_from_zip(&mut z).is_unidentified());
-        assert_eq!(mod_id_or_stem(&mut z, "mods/mystery-1.0.jar"), "mystery-1.0");
+        assert_eq!(
+            mod_id_or_stem(&mut z, "mods/mystery-1.0.jar"),
+            "mystery-1.0"
+        );
     }
 }

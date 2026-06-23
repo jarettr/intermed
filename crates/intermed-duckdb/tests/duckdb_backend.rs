@@ -1,15 +1,13 @@
 //! Integration tests for the embedded DuckDB backend (requires `duckdb` feature).
 
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::report::{DoctorReport, Summary, TargetView};
 use intermed_doctor_core::target::{Environment, Target, TargetKind};
 use intermed_doctor_core::{Rule, RuleCtx};
-use intermed_duckdb::{schema::compute_run_id, DuckStore, DuckdbRulePack};
+use intermed_duckdb::{DuckStore, DuckdbRulePack, schema::compute_run_id};
 use intermed_evidence::{Category, Severity};
 use intermed_facts::SourceRef;
-use intermed_rules::{
-    DuplicateIdRule, LoaderMismatchRule, SideMismatchRule, SouffleRulePack,
-};
+use intermed_rules::{DuplicateIdRule, LoaderMismatchRule, SideMismatchRule, SouffleRulePack};
 use intermed_vfs::ResourceConflictRule;
 
 fn duplicate_mod_store() -> FactStore {
@@ -35,9 +33,9 @@ fn test_target() -> &'static Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     });
     &TARGET
@@ -79,7 +77,11 @@ fn persist_run_survives_duplicate_fact_ids_in_batch() {
         deferred_layers: Vec::new(),
         profile: None,
     };
-    let run_id = compute_run_id(&report.generated_at, &report.target.path, &report.tool_version);
+    let run_id = compute_run_id(
+        &report.generated_at,
+        &report.target.path,
+        &report.tool_version,
+    );
 
     let path = std::env::temp_dir().join(format!(
         "intermed-duckdb-dedup-{}-{}.duckdb",
@@ -91,7 +93,8 @@ fn persist_run_survives_duplicate_fact_ids_in_batch() {
     ));
     let duck = DuckStore::open(&path).unwrap();
     duck.persist_run(&report, &facts).expect("first persist");
-    duck.persist_run(&report, &facts).expect("idempotent re-persist");
+    duck.persist_run(&report, &facts)
+        .expect("idempotent re-persist");
 
     let count = duck
         .query(&format!(
@@ -135,7 +138,11 @@ fn persist_many_mixin_effects_is_idempotent() {
         deferred_layers: Vec::new(),
         profile: None,
     };
-    let run_id = compute_run_id(&report.generated_at, &report.target.path, &report.tool_version);
+    let run_id = compute_run_id(
+        &report.generated_at,
+        &report.target.path,
+        &report.tool_version,
+    );
 
     let path = std::env::temp_dir().join(format!(
         "intermed-duckdb-mixin-{}-{}.duckdb",
@@ -186,7 +193,11 @@ fn persist_run_is_idempotent() {
         deferred_layers: Vec::new(),
         profile: None,
     };
-    let run_id = compute_run_id(&report.generated_at, &report.target.path, &report.tool_version);
+    let run_id = compute_run_id(
+        &report.generated_at,
+        &report.target.path,
+        &report.tool_version,
+    );
 
     let path = std::env::temp_dir().join(format!(
         "intermed-duckdb-idem-{}-{}.duckdb",
@@ -201,11 +212,15 @@ fn persist_run_is_idempotent() {
     duck.persist_run(&report, &facts).unwrap();
 
     let runs = duck
-        .query(&format!("SELECT COUNT(*) FROM runs WHERE run_id = '{run_id}'"))
+        .query(&format!(
+            "SELECT COUNT(*) FROM runs WHERE run_id = '{run_id}'"
+        ))
         .unwrap();
     assert_eq!(runs.rows[0][0], "1");
     let fact_count = duck
-        .query(&format!("SELECT COUNT(*) FROM facts WHERE run_id = '{run_id}'"))
+        .query(&format!(
+            "SELECT COUNT(*) FROM facts WHERE run_id = '{run_id}'"
+        ))
         .unwrap();
     assert_eq!(fact_count.rows[0][0], "1");
 
@@ -247,19 +262,26 @@ fn readonly_open_rejects_writes_but_allows_select() {
             .unwrap()
             .as_nanos()
     ));
-    DuckStore::open(&path).unwrap().persist_run(&report, &facts).unwrap();
+    DuckStore::open(&path)
+        .unwrap()
+        .persist_run(&report, &facts)
+        .unwrap();
 
     let ro = DuckStore::open_readonly(&path).unwrap();
     // SELECT works.
-    assert_eq!(ro.query("SELECT COUNT(*) FROM facts").unwrap().rows[0][0], "1");
+    assert_eq!(
+        ro.query("SELECT COUNT(*) FROM facts").unwrap().rows[0][0],
+        "1"
+    );
     // Every mutating statement is rejected by the engine.
     assert!(ro.query("DROP TABLE facts").is_err());
     assert!(ro.query("DELETE FROM runs").is_err());
-    assert!(ro
-        .query("INSERT INTO runs (run_id) VALUES ('x')")
-        .is_err());
+    assert!(ro.query("INSERT INTO runs (run_id) VALUES ('x')").is_err());
     // Data survived.
-    assert_eq!(ro.query("SELECT COUNT(*) FROM facts").unwrap().rows[0][0], "1");
+    assert_eq!(
+        ro.query("SELECT COUNT(*) FROM facts").unwrap().rows[0][0],
+        "1"
+    );
 
     std::fs::remove_file(path).ok();
 }
@@ -269,7 +291,7 @@ fn duplicate_id_matches_imperative_rule() {
     let store = duplicate_mod_store();
     let ctx = ctx_from_store(&store);
     let imperative = DuplicateIdRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::new().evaluate(&ctx);
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
 
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
@@ -288,8 +310,8 @@ fn duplicate_id_matches_souffle_when_available() {
     }
     let store = duplicate_mod_store();
     let ctx = ctx_from_store(&store);
-    let souffle = SouffleRulePack::new().evaluate(&ctx);
-    let duckdb = DuckdbRulePack::new().evaluate(&ctx);
+    let souffle = SouffleRulePack::default().evaluate(&ctx);
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
     assert_eq!(souffle.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(souffle[0].id, duckdb[0].id);
@@ -306,7 +328,7 @@ fn mixin_overlap_sql_backend_surfaces_finding() {
         .attr("hot_path", false)
         .emit();
     let ctx = ctx_from_store(&store);
-    let findings = DuckdbRulePack::new().evaluate(&ctx);
+    let findings = DuckdbRulePack::default().evaluate(&ctx);
     assert_eq!(findings.len(), 1);
     assert_eq!(
         findings[0].id,
@@ -332,7 +354,7 @@ fn loader_mismatch_matches_imperative_rule() {
         .emit();
     let ctx = ctx_from_store(&store);
     let imperative = LoaderMismatchRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::new().evaluate(&ctx);
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(imperative[0].id, duckdb[0].id);
@@ -354,7 +376,7 @@ fn side_mismatch_matches_imperative_rule() {
         .emit();
     let ctx = ctx_from_store(&store);
     let imperative = SideMismatchRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::new().evaluate(&ctx);
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(imperative[0].id, duckdb[0].id);
@@ -378,7 +400,7 @@ fn resource_conflict_matches_vfs_rule() {
         .emit();
     let ctx = ctx_from_store(&store);
     let vfs = ResourceConflictRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::new().evaluate(&ctx);
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
     assert_eq!(vfs.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(vfs[0].id, duckdb[0].id);
@@ -406,21 +428,26 @@ fn security_signals_match_imperative_aggregation() {
     }
     let ctx = ctx_from_store(&store);
     let imperative = intermed_security_audit::rule().evaluate(&ctx);
-    let duckdb: Vec<_> = DuckdbRulePack::new()
+    let duckdb: Vec<_> = DuckdbRulePack::default()
         .evaluate(&ctx)
         .into_iter()
         .filter(|f| f.id.starts_with("security-api-risk:"))
         .collect();
 
     assert!(
-        !DuckdbRulePack::new()
+        !DuckdbRulePack::default()
             .evaluate(&ctx)
             .iter()
             .any(|f| f.id == "duckdb-backend-failed"),
         "duckdb security path must bind cleanly"
     );
     assert_eq!(imperative.len(), 1);
-    assert_eq!(duckdb.len(), 1, "duckdb security findings: {:?}", duckdb.iter().map(|f| &f.id).collect::<Vec<_>>());
+    assert_eq!(
+        duckdb.len(),
+        1,
+        "duckdb security findings: {:?}",
+        duckdb.iter().map(|f| &f.id).collect::<Vec<_>>()
+    );
     assert_eq!(imperative[0].id, duckdb[0].id);
     assert_eq!(imperative[0].severity, duckdb[0].severity);
     assert_eq!(imperative[0].category, duckdb[0].category);
@@ -471,7 +498,7 @@ fn sbom_correlation_flags_only_low_trust_capability() {
         .emit();
 
     let ctx = ctx_from_store(&store);
-    let findings = DuckdbRulePack::new().evaluate(&ctx);
+    let findings = DuckdbRulePack::default().evaluate(&ctx);
 
     // The backend must bind/run every query cleanly, not bail with the fatal
     // failure finding (regression guard for the GROUP BY-on-aggregate bug).
@@ -485,7 +512,11 @@ fn sbom_correlation_flags_only_low_trust_capability() {
         .iter()
         .filter(|f| f.id == "low-trust-capability:shady.jar")
         .collect();
-    assert_eq!(correlation.len(), 1, "expected the low-trust archive to be flagged");
+    assert_eq!(
+        correlation.len(),
+        1,
+        "expected the low-trust archive to be flagged"
+    );
     assert_eq!(correlation[0].severity, Severity::Warn);
     assert_eq!(correlation[0].category, Category::Security);
     assert!(
@@ -566,7 +597,10 @@ fn risk_patterns_view_and_method_roll_up_findings() {
         schema: "intermed-doctor-report-v1".into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
-        target: TargetView { path: "/mods".into(), kind: TargetKind::ModsDir },
+        target: TargetView {
+            path: "/mods".into(),
+            kind: TargetKind::ModsDir,
+        },
         environment: Environment::default(),
         summary: Summary::default(),
         findings,
@@ -585,12 +619,18 @@ fn risk_patterns_view_and_method_roll_up_findings() {
     assert_eq!(patterns.len(), 2);
     assert_eq!(patterns[0].rule_id, "duplicate-id");
     assert_eq!(patterns[0].severity_rank, 3); // error
-    assert!(patterns.iter().any(|p| p.rule_id == "mixin-risk" && p.category == "mixin"));
+    assert!(
+        patterns
+            .iter()
+            .any(|p| p.rule_id == "mixin-risk" && p.category == "mixin")
+    );
 
     // The view is also directly queryable (CREATE OR REPLACE VIEW landed).
     let view = duck.query("SELECT COUNT(*) FROM risk_patterns").unwrap();
     assert_eq!(view.rows[0][0], "2");
-    let hc = duck.query("SELECT COUNT(*) FROM historical_conflicts").unwrap();
+    let hc = duck
+        .query("SELECT COUNT(*) FROM historical_conflicts")
+        .unwrap();
     assert_eq!(hc.rows[0][0], "2"); // duplicate-id + mixin-overlap both qualify
 
     std::fs::remove_file(path).ok();

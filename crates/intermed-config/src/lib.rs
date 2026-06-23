@@ -19,7 +19,7 @@
 //! which home/project files happen to exist; the named file is still merged over
 //! built-in defaults so partial files are allowed.
 //!
-//! See `docs/CONFIG.md` for the full key reference.
+//! See `docs/reference/configuration.md` for the full key reference.
 
 mod sections;
 
@@ -33,13 +33,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::{
+    DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES, DEFAULT_FINGERPRINT_REVERIFY_DAYS,
+    DEFAULT_PRUNE_INTERVAL_DAYS, JarCacheConfig,
     settings::{
         DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel, MetadataSettings,
-        MixinLevel, MixinSettings, ResourceAstLevel, ResourceSettings, ScanSettings, SbomSettings,
+        MixinLevel, MixinSettings, ResourceAstLevel, ResourceSettings, SbomSettings, ScanSettings,
         SecuritySettings,
     },
-    JarCacheConfig, DEFAULT_CACHE_MAX_AGE_DAYS, DEFAULT_CACHE_MAX_BYTES,
-    DEFAULT_FINGERPRINT_REVERIFY_DAYS, DEFAULT_PRUNE_INTERVAL_DAYS,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -267,7 +267,10 @@ fn read_layer(path: &Path) -> Result<toml::Value, ConfigError> {
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
-    let schema = value.get("schema").and_then(toml::Value::as_str).unwrap_or("");
+    let schema = value
+        .get("schema")
+        .and_then(toml::Value::as_str)
+        .unwrap_or("");
     if schema != CONFIG_SCHEMA {
         return Err(ConfigError::UnsupportedSchema {
             path: path.to_path_buf(),
@@ -299,10 +302,12 @@ fn deep_merge(base: &mut toml::Value, overlay: toml::Value) {
 /// Deserialize the merged table over built-in defaults (serde `default`s fill
 /// any key no layer set).
 fn from_merged_value(value: toml::Value) -> Result<IntermedConfig, ConfigError> {
-    value.try_into().map_err(|e: toml::de::Error| ConfigError::Parse {
-        path: PathBuf::from("<merged-config>"),
-        message: e.to_string(),
-    })
+    value
+        .try_into()
+        .map_err(|e: toml::de::Error| ConfigError::Parse {
+            path: PathBuf::from("<merged-config>"),
+            message: e.to_string(),
+        })
 }
 
 fn parse_mixin_level(raw: &str) -> MixinLevel {
@@ -380,8 +385,14 @@ fn apply_env(cfg: &mut IntermedConfig) {
             cfg.mixin.level = v;
         }
     }
-    env_bool_opt("INTERMED_MIXIN_HANDLER_EFFECTS", &mut cfg.mixin.handler_effects);
-    env_bool_opt("INTERMED_MIXIN_RECOMMENDATIONS", &mut cfg.mixin.recommendations);
+    env_bool_opt(
+        "INTERMED_MIXIN_HANDLER_EFFECTS",
+        &mut cfg.mixin.handler_effects,
+    );
+    env_bool_opt(
+        "INTERMED_MIXIN_RECOMMENDATIONS",
+        &mut cfg.mixin.recommendations,
+    );
     if let Ok(v) = env::var("INTERMED_RESOURCE_LEVEL") {
         if !v.trim().is_empty() {
             cfg.resource.level = v;
@@ -483,12 +494,14 @@ mod tests {
 
     #[test]
     fn deep_merge_higher_layer_overrides_same_key() {
-        let mut home =
-            toml::from_str::<toml::Value>("schema = \"intermed-config-v1\"\n[cache]\nmax_size_mib = 1024\n")
-                .unwrap();
-        let project =
-            toml::from_str::<toml::Value>("schema = \"intermed-config-v1\"\n[cache]\nmax_size_mib = 8192\n")
-                .unwrap();
+        let mut home = toml::from_str::<toml::Value>(
+            "schema = \"intermed-config-v1\"\n[cache]\nmax_size_mib = 1024\n",
+        )
+        .unwrap();
+        let project = toml::from_str::<toml::Value>(
+            "schema = \"intermed-config-v1\"\n[cache]\nmax_size_mib = 8192\n",
+        )
+        .unwrap();
         deep_merge(&mut home, project);
         let cfg = from_merged_value(home).unwrap();
         // Project (higher precedence) wins for the shared key.

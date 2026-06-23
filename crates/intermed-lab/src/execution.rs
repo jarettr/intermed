@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::LabError;
 use crate::corpus::{CorpusEnvironment, CorpusLock};
 use crate::run::RawSmokeOutput;
-use crate::LabError;
 
 /// Everything required to boot one lab environment (loader + MC + side).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +82,11 @@ pub trait ServerProcessRunner: Send + Sync {
     fn launch(&self, spec: &EnvironmentSpec) -> Result<RunningProcess, LabError>;
 
     /// Block until exit or `spec.time_budget`, returning captured log text.
-    fn wait(&self, spec: &EnvironmentSpec, process: RunningProcess) -> Result<ProcessOutcome, LabError>;
+    fn wait(
+        &self,
+        spec: &EnvironmentSpec,
+        process: RunningProcess,
+    ) -> Result<ProcessOutcome, LabError>;
 }
 
 /// Map a [`ProcessOutcome`] into the shared smoke-output schema.

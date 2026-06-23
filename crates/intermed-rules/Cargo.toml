@@ -10,6 +10,7 @@ description = "Layer J (Phase 1, imperative) — cross-cutting rules over metada
 intermed-doctor-core.workspace = true
 intermed-evidence.workspace = true
 intermed-log.workspace = true
+intermed-columnar.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true

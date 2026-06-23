@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Relation, Severity};
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::evidence::{
+    Category, EvidenceEdge, Finding, FixCandidate, Relation, Severity,
+};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{CollectCtx, Collector, CollectorOutcome, Layer, Rule, RuleCtx, Target};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -28,8 +30,8 @@ pub fn collector() -> impl Collector {
 }
 
 pub use config::{
-    PerformanceThresholds, DEFAULT_HIGH_CPU_PERCENT, DEFAULT_HOT_METHOD_FLOOR_PERCENT,
-    DEFAULT_TICK_SPIKE_MS,
+    DEFAULT_HIGH_CPU_PERCENT, DEFAULT_HOT_METHOD_FLOOR_PERCENT, DEFAULT_TICK_SPIKE_MS,
+    PerformanceThresholds,
 };
 
 /// Layer-I performance correlation rule (default thresholds).
@@ -39,9 +41,7 @@ pub fn rule() -> impl Rule {
 
 /// Layer-I performance correlation rule with explicit thresholds.
 pub fn rule_with_thresholds(thresholds: PerformanceThresholds) -> impl Rule {
-    PerformanceRules {
-        thresholds,
-    }
+    PerformanceRules { thresholds }
 }
 
 /// Correlation plus user-visible notices when Spark data is missing or failed.
@@ -61,6 +61,7 @@ impl Rule for PerformanceRules {
         .evaluate(ctx);
         out.extend(perf_tick_mixin_hotpath_findings(ctx));
         out.extend(perf_hot_mod_resource_findings(ctx));
+        out.extend(perf_resource_category_hotspot_findings(ctx));
         out.extend(perf_hot_method_log_findings(ctx));
         out.extend(performance_notice_findings(ctx));
         out.extend(performance_fallback_findings(ctx));
@@ -93,7 +94,9 @@ fn perf_tick_heavy_handler_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let cap = f.attr("capability").unwrap_or("");
         let heavy = cap == "heavy_tick_handler";
         if heavy || cap == "hooks_game_tick" {
-            let entry = tick_mods.entry(f.subject.as_str()).or_insert((false, Vec::new()));
+            let entry = tick_mods
+                .entry(f.subject.as_str())
+                .or_insert((false, Vec::new()));
             entry.0 |= heavy;
             entry.1.push(f.id);
         }
@@ -105,7 +108,11 @@ fn perf_tick_heavy_handler_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let spike_facts: Vec<_> = ctx.store.by_kind(kind::TICK_SPIKE).map(|f| f.id).collect();
     let mut out = Vec::new();
     for (mod_id, (heavy, cap_ids)) in tick_mods {
-        let severity = if heavy { Severity::Warn } else { Severity::Note };
+        let severity = if heavy {
+            Severity::Warn
+        } else {
+            Severity::Note
+        };
         let what = if heavy {
             "a heavy tick-event handler (large / looping / allocating bytecode)"
         } else {
@@ -149,7 +156,10 @@ fn perf_log_correlation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         .store
         .by_kind(kind::HOT_MOD)
         .map(|f| {
-            let pct = f.attr("percent").and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
+            let pct = f
+                .attr("percent")
+                .and_then(|p| p.parse::<f64>().ok())
+                .unwrap_or(0.0);
             (f.subject.as_str(), (pct, f.id))
         })
         .collect();
@@ -228,7 +238,10 @@ fn perf_tick_log_correlation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         .filter(|f| {
             matches!(
                 f.subject.as_str(),
-                "MixinApplyError" | "ModLoadingFailure" | "MissingDependency" | "ClassNotFound"
+                "MixinApplyError"
+                    | "ModLoadingFailure"
+                    | "MissingDependency"
+                    | "ClassNotFound"
                     | "NoClassDefFound"
             )
         })
@@ -487,6 +500,20 @@ struct MixinIndex {
     by_mod: BTreeMap<String, ModMixinInfo>,
     /// Alternate class names (intermediary, named, simple) → canonical `by_class` key.
     class_aliases: BTreeMap<String, String>,
+    /// Site-level method index (plan Phase 12 match quality): target class → target
+    /// method *simple name* → the mixin work on that exact method. Lets a hot-method
+    /// correlation tell an exact method/site match from a coarse class-only one.
+    methods_by_class: BTreeMap<String, BTreeMap<String, MethodMixinInfo>>,
+}
+
+/// Mixin work on one exact target method (Phase 12). Distinguishes a high-quality
+/// hot-method match (a destructive op on the profiled method) from a class-only one.
+#[derive(Default, Clone)]
+struct MethodMixinInfo {
+    operations: BTreeSet<String>,
+    /// At least one operation rewrites/replaces this method's behaviour.
+    destructive: bool,
+    fact_ids: Vec<intermed_doctor_core::facts::FactId>,
 }
 
 /// What mixins do to one target class, aggregated across mods.
@@ -519,10 +546,7 @@ impl MixinIndex {
             let Some(target) = f.attr("target") else {
                 continue;
             };
-            let canonical = f
-                .attr("target_named")
-                .unwrap_or(target)
-                .to_string();
+            let canonical = f.attr("target_named").unwrap_or(target).to_string();
             let entry = index.by_class.entry(canonical.clone()).or_default();
             entry.mods.insert(f.subject.clone());
             if let Some(mixin) = f.attr("mixin") {
@@ -552,6 +576,40 @@ impl MixinIndex {
                 entry.operations.insert(op.to_string());
             }
             entry.mods.insert(f.subject.clone());
+            entry.fact_ids.push(f.id);
+        }
+
+        // Site-level method index (Phase 12): which exact methods a mixin targets,
+        // and whether it does so destructively. Drives match-quality gating below.
+        for f in store.by_kind(kind::MIXIN_APPLICATION_SITE) {
+            let Some(target_class) = f.attr("target_class") else {
+                continue;
+            };
+            let method = f.attr("target_method").unwrap_or("");
+            let method_simple = method.split(['(', ' ', ':']).next().unwrap_or(method);
+            if method_simple.is_empty() {
+                continue;
+            }
+            let op = f.attr("operation").unwrap_or("");
+            let entry = index
+                .methods_by_class
+                .entry(target_class.to_string())
+                .or_default()
+                .entry(method_simple.to_string())
+                .or_default();
+            entry.operations.insert(op.to_string());
+            if matches!(
+                op,
+                "overwrite"
+                    | "redirect"
+                    | "wrap-operation"
+                    | "modify-variable"
+                    | "modify-arg"
+                    | "modify-args"
+                    | "modify-return-value"
+            ) {
+                entry.destructive = true;
+            }
             entry.fact_ids.push(f.id);
         }
 
@@ -642,6 +700,21 @@ impl MixinIndex {
             None => Vec::new(),
         }
     }
+
+    /// Does a mixin target the *exact* profiled method (Phase 12 match quality)?
+    /// Resolves class aliases, then looks the method up by simple name. Returns the
+    /// per-method mixin info (operations, destructiveness, site fact ids) when found.
+    fn match_method(&self, class: &str, method: &str) -> Option<&MethodMixinInfo> {
+        let key = self
+            .class_aliases
+            .get(class)
+            .map(String::as_str)
+            .unwrap_or(class);
+        let method_simple = method.split(['(', ' ', ':']).next().unwrap_or(method);
+        self.methods_by_class
+            .get(key)
+            .and_then(|m| m.get(method_simple))
+    }
 }
 
 impl Rule for PerformanceCorrelationRule {
@@ -673,7 +746,35 @@ impl Rule for PerformanceCorrelationRule {
             correlated_classes.insert(class.to_string());
 
             let merged = MixinTargetInfo::merge(matches.into_iter());
-            let severity = hot_method_severity(percent, &merged, self.thresholds);
+            let mut severity = hot_method_severity(percent, &merged, self.thresholds);
+
+            // Phase 12 match quality: does a mixin target this *exact* hot method?
+            // An exact, destructive method match pins the cost to the woven method
+            // (high quality); a class-only match stays coarse and is labelled so.
+            let method_match = index.match_method(class, method);
+            let exact_destructive = method_match.is_some_and(|m| m.destructive);
+            let (quality_tag, quality_note) = match method_match {
+                Some(m) if m.destructive => (
+                    "exact-method-match",
+                    format!(
+                        " A mixin {} targets this exact method, so the weaving cost lands directly on the hot path.",
+                        m.operations.iter().cloned().collect::<Vec<_>>().join("/")
+                    ),
+                ),
+                Some(_) => (
+                    "exact-method-match",
+                    " A mixin targets this exact method (non-destructive — observation/transform).".to_string(),
+                ),
+                None => (
+                    "class-level-correlation",
+                    " No mixin targets this exact method — correlation is at class granularity only, so the hot cost may be unrelated to the mixin work.".to_string(),
+                ),
+            };
+            // An exact destructive match on a costly method justifies at least Warn;
+            // a class-only correlation is never escalated above what the base allows.
+            if exact_destructive && percent >= self.thresholds.hot_method_floor_percent {
+                severity = severity.max(Severity::Warn);
+            }
 
             let mut builder = Finding::builder(self.id(), format!("perf-mixin:{class}:{method}"))
                 .severity(severity)
@@ -682,19 +783,29 @@ impl Rule for PerformanceCorrelationRule {
                     "Hot method `{class}.{method}` is modified by {} mixin(s)",
                     merged.mixins.len().max(1)
                 ))
-                .explanation(hot_method_explanation(class, method, percent, &merged))
+                .explanation(format!(
+                    "{}{quality_note}",
+                    hot_method_explanation(class, method, percent, &merged)
+                ))
                 .evidence(EvidenceEdge::subject(f.id))
                 .affects(class)
                 .fix(FixCandidate::advice(hot_method_advice(&merged)))
                 .tag("performance")
                 .tag("mixin")
-                .tag("cross-layer");
+                .tag("cross-layer")
+                .tag(quality_tag);
             for mod_id in &merged.mods {
                 builder = builder.affects(mod_id.clone());
             }
             // Cross-layer evidence: link the supporting mixin facts.
             for fact_id in &merged.fact_ids {
                 builder = builder.evidence(EvidenceEdge::supports(*fact_id));
+            }
+            // Plus the exact site facts when we have a method-level match.
+            if let Some(m) = method_match {
+                for id in &m.fact_ids {
+                    builder = builder.evidence(EvidenceEdge::supports(*id));
+                }
             }
             out.push(builder.build());
         }
@@ -871,32 +982,152 @@ fn perf_hot_mod_resource_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             continue;
         }
         let paths: Vec<&str> = related.iter().map(|c| c.subject.as_str()).collect();
-        let mut builder = Finding::builder("performance", format!("perf-hot-mod-resource:{mod_id}"))
-            .severity(Severity::Warn)
-            .category(Category::Performance)
-            .confidence(0.74)
-            .title(format!(
-                "Hot mod `{mod_id}` ({percent:.1}% CPU) also collides on {} resource path(s)",
-                paths.len()
-            ))
-            .explanation(format!(
-                "Spark attributes {percent:.1}% CPU to `{mod_id}` and it is among the writers \
+        let mut builder = Finding::builder(
+            "performance",
+            format!("perf-hot-mod-resource:{mod_id}"),
+        )
+        .severity(Severity::Warn)
+        .category(Category::Performance)
+        .confidence(0.74)
+        .title(format!(
+            "Hot mod `{mod_id}` ({percent:.1}% CPU) also collides on {} resource path(s)",
+            paths.len()
+        ))
+        .explanation(format!(
+            "Spark attributes {percent:.1}% CPU to `{mod_id}` and it is among the writers \
                  for conflicting resource path(s): {}. Heavy tick cost plus pack resource \
                  contention often points at the same mod — try disabling it and re-profiling.",
-                paths.join(", ")
-            ))
-            .evidence(EvidenceEdge::subject(hot.id))
-            .affects(mod_id)
-            .fix(FixCandidate::advice(
-                "Resolve the resource collision or temporarily remove this mod, then re-profile.",
-            ))
-            .tag("performance")
-            .tag("vfs")
-            .tag("correlation");
+            paths.join(", ")
+        ))
+        .evidence(EvidenceEdge::subject(hot.id))
+        .affects(mod_id)
+        .fix(FixCandidate::advice(
+            "Resolve the resource collision or temporarily remove this mod, then re-profile.",
+        ))
+        .tag("performance")
+        .tag("vfs")
+        .tag("correlation");
         for c in related {
             builder = builder.evidence(EvidenceEdge::supports(c.id));
         }
         out.push(builder.build());
+    }
+    out
+}
+
+/// The resource category a CPU hotspot is attributed to, with its finding shape.
+struct ResourceHotspot {
+    /// Substrings that place a `resource_writer` path in this category.
+    matches: fn(&str) -> bool,
+    /// Finding id stem (`<stem>:{mod}`).
+    id: &'static str,
+    /// Human label for the subsystem the hotspot likely lives in.
+    subsystem: &'static str,
+    /// Extra advice line specific to this category.
+    advice: &'static str,
+}
+
+fn is_worldgen_path(p: &str) -> bool {
+    p.contains("/worldgen/")
+}
+fn is_atlas_path(p: &str) -> bool {
+    p.contains("/atlases/")
+}
+fn is_model_path(p: &str) -> bool {
+    p.starts_with("assets/") && (p.contains("/models/") || p.contains("/blockstates/"))
+}
+fn is_reload_data_path(p: &str) -> bool {
+    p.starts_with("data/")
+        && (p.contains("/recipe")
+            || p.contains("/loot_table")
+            || p.contains("/tags/")
+            || p.contains("/advancement"))
+}
+
+/// Cross-layer Layer-I (Spark hotspots) ↔ Layer-M (resource writers) — "cluster E".
+///
+/// A mod that Spark attributes CPU to AND that ships a lot of one resource category
+/// gives a directed hint about *where* the hot work is: a worldgen-heavy hot mod is
+/// likely hot in worldgen, a model-heavy one in model baking, etc. This narrows a
+/// bare "hot mod" finding to a subsystem the user can act on. Emits at most one
+/// finding per (mod, category); only fires above the hot-method floor so trivial
+/// CPU shares do not generate noise.
+fn perf_resource_category_hotspot_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    const CATEGORIES: &[ResourceHotspot] = &[
+        ResourceHotspot {
+            matches: is_worldgen_path,
+            id: "worldgen-hotspot",
+            subsystem: "world generation",
+            advice: "Profile chunk generation specifically (Spark's worldgen sampler) and check this \
+                     mod's features/biomes for expensive density functions.",
+        },
+        ResourceHotspot {
+            matches: is_atlas_path,
+            id: "atlas-hotspot",
+            subsystem: "texture-atlas stitching",
+            advice: "Large or numerous atlas sources slow stitching at resource load; check this mod's \
+                     atlas sources and sprite counts.",
+        },
+        ResourceHotspot {
+            matches: is_model_path,
+            id: "model-bake-hotspot",
+            subsystem: "model baking",
+            advice: "Many models/blockstates inflate model bake time; check for generated or \
+                     multipart-heavy blockstates from this mod.",
+        },
+        ResourceHotspot {
+            matches: is_reload_data_path,
+            id: "resource-reload-hotspot",
+            subsystem: "datapack reload",
+            advice: "Many reloadable data files lengthen `/reload`; check this mod's recipe/loot/tag \
+                     volume if reloads stall.",
+        },
+    ];
+
+    // Resource writer counts per (mod, category index).
+    let writers: Vec<_> = ctx.store.by_kind(kind::RESOURCE_WRITER).collect();
+    if writers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for hot in ctx.store.by_kind(kind::HOT_MOD) {
+        let mod_id = hot.subject.as_str();
+        let percent = hot.attr_f64("percent").unwrap_or(0.0);
+        for cat in CATEGORIES {
+            let related: Vec<_> = writers
+                .iter()
+                .filter(|w| w.subject == mod_id && w.attr("path").is_some_and(|p| (cat.matches)(p)))
+                .collect();
+            if related.is_empty() {
+                continue;
+            }
+            let n = related.len();
+            let mut builder = Finding::builder("performance", format!("{}:{mod_id}", cat.id))
+                .severity(Severity::Note)
+                .category(Category::Performance)
+                .confidence(0.6)
+                .title(format!(
+                    "Hot mod `{mod_id}` ({percent:.1}% CPU) is heavy in {}",
+                    cat.subsystem
+                ))
+                .explanation(format!(
+                    "Spark attributes {percent:.1}% CPU to `{mod_id}`, which also ships {n} \
+                     {}-related resource file(s). The hotspot is plausibly in {} rather than its \
+                     tick logic — a directed place to look before disabling the whole mod.",
+                    cat.subsystem, cat.subsystem
+                ))
+                .evidence(EvidenceEdge::subject(hot.id))
+                .affects(mod_id)
+                .fix(FixCandidate::advice(cat.advice))
+                .tag("performance")
+                .tag("resource")
+                .tag("correlation");
+            for w in related.iter().take(8) {
+                builder = builder.evidence(EvidenceEdge::supports(w.id));
+            }
+            out.push(builder.build());
+        }
     }
     out
 }
@@ -979,7 +1210,12 @@ fn performance_fallback_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     if has_perf {
         return Vec::new();
     }
-    if ctx.store.by_kind(kind::SPARK_IMPORT_FAILURE).next().is_some() {
+    if ctx
+        .store
+        .by_kind(kind::SPARK_IMPORT_FAILURE)
+        .next()
+        .is_some()
+    {
         return Vec::new();
     }
 
@@ -1402,6 +1638,81 @@ mod tests {
         assert!(f.affected_components.iter().any(|c| c == "lithium"));
     }
 
+    fn emit_site(store: &mut FactStore, mod_id: &str, target_class: &str, method: &str, op: &str) {
+        store
+            .fact("mixin-analyzer", kind::MIXIN_APPLICATION_SITE)
+            .subject(format!("{mod_id}::M::h->{target_class}#{method}"))
+            .attr("mod", mod_id)
+            .attr("mixin", format!("{mod_id}.M"))
+            .attr("target_class", target_class)
+            .attr("target_method", method)
+            .attr("operation", op)
+            .emit();
+    }
+
+    #[test]
+    fn exact_method_match_is_higher_quality_than_class_only() {
+        // A destructive mixin on the *exact* hot method ⇒ exact-method-match + Warn.
+        let mut store = FactStore::new();
+        emit_mixin_target(
+            &mut store,
+            "modx",
+            "net.minecraft.server.MinecraftServer",
+            "M",
+        );
+        emit_site(
+            &mut store,
+            "modx",
+            "net.minecraft.server.MinecraftServer",
+            "tick()V",
+            "redirect",
+        );
+        emit_hot_method(
+            &mut store,
+            "net.minecraft.server.MinecraftServer",
+            "tick",
+            30.0,
+        );
+        let findings = evaluate(&store);
+        let f = findings
+            .iter()
+            .find(|f| f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick")
+            .expect("correlation finding");
+        assert!(f.machine_tags.iter().any(|t| t == "exact-method-match"));
+        assert!(f.severity >= Severity::Warn);
+
+        // A mixin on a *different* method of the same class ⇒ class-level only.
+        let mut store2 = FactStore::new();
+        emit_mixin_target(
+            &mut store2,
+            "mody",
+            "net.minecraft.server.MinecraftServer",
+            "M",
+        );
+        emit_site(
+            &mut store2,
+            "mody",
+            "net.minecraft.server.MinecraftServer",
+            "loadWorld()V",
+            "redirect",
+        );
+        emit_hot_method(
+            &mut store2,
+            "net.minecraft.server.MinecraftServer",
+            "tick",
+            30.0,
+        );
+        let f2 = evaluate(&store2)
+            .into_iter()
+            .find(|f| f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick")
+            .expect("correlation finding");
+        assert!(
+            f2.machine_tags
+                .iter()
+                .any(|t| t == "class-level-correlation")
+        );
+    }
+
     #[test]
     fn dead_code_regression_hotspot_only_used_to_break_correlation() {
         // Before the fix, the rule read a non-existent `target` attr off
@@ -1421,9 +1732,11 @@ mod tests {
             42.0,
         );
 
-        assert!(evaluate(&store)
-            .iter()
-            .all(|f| !f.id.starts_with("perf-mixin:")));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .all(|f| !f.id.starts_with("perf-mixin:"))
+        );
     }
 
     #[test]
@@ -1469,9 +1782,11 @@ mod tests {
         );
         emit_hot_method(&mut store, "WorldRenderer", "render", 30.0);
 
-        assert!(evaluate(&store)
-            .iter()
-            .any(|f| f.id == "perf-mixin:WorldRenderer:render"));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .any(|f| f.id == "perf-mixin:WorldRenderer:render")
+        );
     }
 
     #[test]
@@ -1490,9 +1805,11 @@ mod tests {
             "tick",
             0.5,
         );
-        assert!(evaluate(&store)
-            .iter()
-            .all(|f| !f.id.starts_with("perf-mixin:")));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .all(|f| !f.id.starts_with("perf-mixin:"))
+        );
 
         // The same class at 6% (above the 5% floor) does correlate.
         let mut store = FactStore::new();
@@ -1508,9 +1825,11 @@ mod tests {
             "tick",
             6.0,
         );
-        assert!(evaluate(&store)
-            .iter()
-            .any(|f| f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick"));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .any(|f| f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick")
+        );
     }
 
     #[test]
@@ -1530,18 +1849,22 @@ mod tests {
             .attr("method", "tick")
             .attr("percent", "41.00")
             .emit();
-        assert!(evaluate(&store)
-            .iter()
-            .all(|f| !f.id.starts_with("perf-mixin:")));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .all(|f| !f.id.starts_with("perf-mixin:"))
+        );
     }
 
     #[test]
     fn hot_method_without_mixin_does_not_correlate() {
         let mut store = FactStore::new();
         emit_hot_method(&mut store, "net.minecraft.util.Mth", "sqrt", 80.0);
-        assert!(evaluate(&store)
-            .iter()
-            .all(|f| !f.id.starts_with("perf-mixin:")));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .all(|f| !f.id.starts_with("perf-mixin:"))
+        );
     }
 
     #[test]
@@ -1610,9 +1933,11 @@ mod tests {
             .subject("tick-10ms")
             .attr("ms", 10i64)
             .emit();
-        assert!(evaluate(&store)
-            .iter()
-            .all(|f| !f.id.starts_with("tick-spike:")));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .all(|f| !f.id.starts_with("tick-spike:"))
+        );
     }
 
     #[test]
@@ -1632,17 +1957,21 @@ mod tests {
             "tick",
             22.5,
         );
-        assert!(evaluate(&store).iter().any(|f| {
-            f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick"
-        }));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .any(|f| { f.id == "perf-mixin:net.minecraft.server.MinecraftServer:tick" })
+        );
     }
 
     #[test]
     fn performance_inactive_note_when_no_spark_facts() {
         let store = FactStore::new();
-        assert!(evaluate(&store)
-            .iter()
-            .any(|f| f.id == "performance-inactive"));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .any(|f| f.id == "performance-inactive")
+        );
     }
 
     #[test]
@@ -1653,18 +1982,17 @@ mod tests {
             .subject("/tmp/bad.json")
             .attr("reason", "parse error")
             .emit();
-        assert!(evaluate(&store)
-            .iter()
-            .any(|f| f.id == "spark-import-failure:/tmp/bad.json"));
+        assert!(
+            evaluate(&store)
+                .iter()
+                .any(|f| f.id == "spark-import-failure:/tmp/bad.json")
+        );
     }
 
     #[test]
     fn tick_spike_with_log_mention_flags_tick_log_suspect() {
         let mut store = FactStore::new();
-        store
-            .fact("metadata", kind::MOD)
-            .subject("laggy")
-            .emit();
+        store.fact("metadata", kind::MOD).subject("laggy").emit();
         store
             .fact(EXTRACTOR, kind::TICK_SPIKE)
             .subject("tick-120ms")
@@ -1677,13 +2005,21 @@ mod tests {
             .emit();
 
         let findings = evaluate(&store);
-        assert!(findings.iter().any(|f| f.id == "perf-tick-log-suspect:laggy"));
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.id == "perf-tick-log-suspect:laggy")
+        );
     }
 
     #[test]
     fn heavy_tick_handler_with_spikes_is_flagged_warn() {
         let mut store = FactStore::new();
-        store.fact(EXTRACTOR, kind::TICK_SPIKE).subject("80").attr("ms", 80i64).emit();
+        store
+            .fact(EXTRACTOR, kind::TICK_SPIKE)
+            .subject("80")
+            .attr("ms", 80i64)
+            .emit();
         store
             .fact("metadata-scanner", kind::MOD_CAPABILITY)
             .subject("laggymod")
@@ -1717,9 +2053,11 @@ mod tests {
             .subject("laggymod")
             .attr("capability", "heavy_tick_handler")
             .emit();
-        assert!(!evaluate(&store)
-            .iter()
-            .any(|f| f.id.starts_with("perf-tick-handler:")));
+        assert!(
+            !evaluate(&store)
+                .iter()
+                .any(|f| f.id.starts_with("perf-tick-handler:"))
+        );
     }
 
     #[test]
@@ -1745,13 +2083,63 @@ mod tests {
 
         let findings = evaluate(&store);
         assert!(
-            findings.iter().any(|f| f.id == "perf-log-suspect:laggymod"
-                && f.severity == Severity::Warn),
+            findings
+                .iter()
+                .any(|f| f.id == "perf-log-suspect:laggymod" && f.severity == Severity::Warn),
             "expected prime-suspect finding for laggymod"
         );
         assert!(
             !findings.iter().any(|f| f.id == "perf-log-suspect:fastmod"),
             "a hot mod absent from logs must not correlate"
         );
+    }
+
+    #[test]
+    fn hot_mod_shipping_worldgen_data_gets_a_directed_hotspot() {
+        let mut store = FactStore::new();
+        store
+            .fact(EXTRACTOR, kind::HOT_MOD)
+            .subject("wgmod")
+            .attr("percent", 28.0)
+            .emit();
+        store
+            .fact("vfs", kind::RESOURCE_WRITER)
+            .subject("wgmod")
+            .attr("path", "data/wgmod/worldgen/configured_feature/x.json")
+            .attr("json", true)
+            .emit();
+
+        let f = evaluate(&store)
+            .into_iter()
+            .find(|f| f.id == "worldgen-hotspot:wgmod")
+            .expect("cluster-E worldgen hotspot");
+        assert_eq!(f.severity, Severity::Note);
+        assert!(f.machine_tags.iter().any(|t| t == "resource"));
+        assert!(f.explanation.contains("world generation"));
+    }
+
+    #[test]
+    fn hot_mod_without_matching_resources_has_no_directed_hotspot() {
+        // A hot mod that ships no categorized resources must not get a cluster-E hint.
+        let mut store = FactStore::new();
+        store
+            .fact(EXTRACTOR, kind::HOT_MOD)
+            .subject("ticky")
+            .attr("percent", 40.0)
+            .emit();
+        store
+            .fact("vfs", kind::RESOURCE_WRITER)
+            .subject("ticky")
+            .attr("path", "META-INF/MANIFEST.MF")
+            .attr("json", false)
+            .emit();
+
+        assert!(evaluate(&store).into_iter().all(|f| {
+            !f.id.ends_with(":ticky")
+                || !(f.id.starts_with("worldgen-hotspot")
+                    || f.id.starts_with("atlas-hotspot")
+                    || f.id.starts_with("model-bake-hotspot")
+                    || f.id.starts_with("resource-reload-hotspot"))
+        }));
     }
 }

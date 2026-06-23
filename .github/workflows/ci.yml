@@ -45,3 +45,18 @@ jobs:
         run: cargo test -p intermed-duckdb --features duckdb
       - name: CLI duckdb e2e
         run: cargo test -p intermed-cli --features duckdb --test duckdb_e2e
+
+  # Dependency security audit (RustSec advisory DB). Fails the build on a known
+  # vulnerability; accepted unmaintained-only advisories are listed in
+  # .cargo/audit.toml so the check stays green while a real new advisory surfaces.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit dependencies
+        run: cargo audit

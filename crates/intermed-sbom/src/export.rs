@@ -20,11 +20,7 @@ pub fn export_scan(scan: &SbomScan, format: SbomExportFormat) -> Result<String, 
 }
 
 fn spdx_json(scan: &SbomScan) -> Result<String, String> {
-    let packages: Vec<SpdxPackage> = scan
-        .records
-        .iter()
-        .map(spdx_package_from_record)
-        .collect();
+    let packages: Vec<SpdxPackage> = scan.records.iter().map(spdx_package_from_record).collect();
     let doc = SpdxDocument {
         spdx_version: "SPDX-2.3",
         data_license: "CC0-1.0",

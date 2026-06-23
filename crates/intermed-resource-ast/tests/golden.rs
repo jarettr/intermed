@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use intermed_resource_ast::{parse_resource, ResourceLevel};
+use intermed_resource_ast::{ResourceLevel, parse_resource};
 use serde_json::json;
 
 /// (fixture file, the resource path it represents in a jar).

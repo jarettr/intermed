@@ -85,7 +85,10 @@ pub fn collect_nested_annotations<'a>(
 }
 
 /// Read the first string value for `element_name` on an annotation.
-pub fn annotation_string_element(annotation: &Annotation<'_>, element_name: &str) -> Option<String> {
+pub fn annotation_string_element(
+    annotation: &Annotation<'_>,
+    element_name: &str,
+) -> Option<String> {
     for element in &annotation.elements {
         if element.name.as_ref() != element_name {
             continue;

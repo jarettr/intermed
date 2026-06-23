@@ -61,7 +61,7 @@ fn collect_models(v: &Value, refs: &mut Vec<ResourceReference>) {
                     namespace: namespace_of(model),
                     target: model.to_string(),
                     required: true,
-                    conditioned: false,
+                    conditions: Vec::new(),
                     is_tag: false,
                 });
             }
@@ -93,9 +93,15 @@ mod tests {
         )
         .unwrap();
         let p = parse(&v);
-        let ResourceSummary::Blockstate(s) = &p.summary else { panic!() };
+        let ResourceSummary::Blockstate(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.variant_count, 2);
         assert_eq!(s.model_count, 2);
-        assert!(p.references.iter().all(|r| r.relation == RefRelation::UsesModel));
+        assert!(
+            p.references
+                .iter()
+                .all(|r| r.relation == RefRelation::UsesModel)
+        );
     }
 }

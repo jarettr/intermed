@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::classify::FailureCategory;
 use crate::corpus::CorpusEnvironment;
-use crate::run::{read_run, LabRun, SmokeStatus};
-use crate::{write_atomic, write_json_atomic, LabError};
+use crate::run::{LabRun, SmokeStatus, read_run};
+use crate::{LabError, write_atomic, write_json_atomic};
 
 /// Schema tag for the compatibility matrix.
 pub const COMPAT_MATRIX_SCHEMA: &str = "intermed-compatibility-matrix-v1";
@@ -281,7 +281,7 @@ fn escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::{SmokeResult, LAB_RUN_SCHEMA};
+    use crate::run::{LAB_RUN_SCHEMA, SmokeResult};
 
     fn run() -> LabRun {
         LabRun {

@@ -78,15 +78,22 @@ mod tests {
     fn lang_json_parses_entries() {
         let v = serde_json::from_str(r#"{"item.b":"B","item.a":"A"}"#).unwrap();
         let p = parse_json(&v);
-        let ResourceSummary::Lang(s) = &p.summary else { panic!() };
+        let ResourceSummary::Lang(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.format, "json");
-        assert_eq!(s.entries, vec![("item.a".into(), "A".into()), ("item.b".into(), "B".into())]);
+        assert_eq!(
+            s.entries,
+            vec![("item.a".into(), "A".into()), ("item.b".into(), "B".into())]
+        );
     }
 
     #[test]
     fn lang_properties_parses_entries() {
         let p = parse_properties(b"item.a=A\nitem.b=B\n");
-        let ResourceSummary::Lang(s) = &p.summary else { panic!() };
+        let ResourceSummary::Lang(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.format, "properties");
         assert_eq!(s.key_count, 2);
     }

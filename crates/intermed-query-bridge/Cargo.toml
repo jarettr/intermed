@@ -1,0 +1,16 @@
+[package]
+name = "intermed-query-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Test-time equivalence guard: lowers declarative RuleSpecs to the columnar query IR and compares the engine against the interpreter's matching on real packs."
+
+[dependencies]
+intermed-facts = { workspace = true }
+intermed-rules = { workspace = true }
+intermed-columnar = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+intermed-doctor-core = { workspace = true }

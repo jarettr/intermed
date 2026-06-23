@@ -1,6 +1,6 @@
 //! Cross-layer rule: low provenance (Layer H) + dangerous capability (Layer G).
 
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 use intermed_sbom::correlation_rule;
 
@@ -9,9 +9,9 @@ fn dummy_target() -> Target {
         path: ".".into(),
         kind: TargetKind::ModsDir,
         mods_dir: None,
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     }
 }

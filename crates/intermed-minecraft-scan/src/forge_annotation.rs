@@ -9,7 +9,7 @@ use std::io::Read;
 
 use cafebabe::attributes::{Annotation, AnnotationElementValue, AttributeData};
 use cafebabe::constant_pool::{ConstantPoolItem, LiteralConstant};
-use cafebabe::{parse_class_with_options, ParseOptions};
+use cafebabe::{ParseOptions, parse_class_with_options};
 
 use intermed_doctor_core::Loader;
 
@@ -47,7 +47,10 @@ pub fn discover_mod_entrypoints(
             if out.iter().any(|(id, _)| id == &mod_id) {
                 continue;
             }
-            let entry_class = name.strip_suffix(".class").unwrap_or(&name).replace('/', ".");
+            let entry_class = name
+                .strip_suffix(".class")
+                .unwrap_or(&name)
+                .replace('/', ".");
             out.push((mod_id, entry_class));
         }
     }
@@ -110,6 +113,7 @@ pub fn discover_mods_from_jar(archive: &mut zip::ZipArchive<std::fs::File>) -> V
                 data_signals: crate::metadata::DataSignals::default(),
                 bytecode: crate::metadata::BytecodeSignals::default(),
                 secondary: None,
+                package_roots: Vec::new(),
             });
         }
     }
@@ -129,7 +133,8 @@ fn extract_mod_annotation(class_bytes: &[u8]) -> Option<(String, Loader)> {
             };
             for annotation in annotations {
                 if let Some(id) = mod_id_from_annotation(annotation) {
-                    let loader = loader_from_mod_descriptor(&annotation.type_descriptor.to_string());
+                    let loader =
+                        loader_from_mod_descriptor(&annotation.type_descriptor.to_string());
                     return Some((id, loader));
                 }
             }
@@ -221,7 +226,13 @@ fn pool_contains_utf8(haystack: &[u8], needle: &str) -> bool {
         }
         let len = u16::from_be_bytes([haystack[i + 1], haystack[i + 2]]) as usize;
         let start = i + 3;
-        let end = start + len;
+        // `checked_add` to match the twin loop in `forge_mod_ids` (no 64-bit
+        // overflow is reachable since `len` is a `u16`, but keep the two scanners
+        // consistent).
+        let Some(end) = start.checked_add(len) else {
+            i += 1;
+            continue;
+        };
         if end > haystack.len() {
             i += 1;
             continue;

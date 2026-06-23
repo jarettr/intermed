@@ -2,9 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::model::{RuleKind, RulePack, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2};
-use crate::template::{parse_category, parse_severity};
 use crate::RulePackError;
+use crate::model::{RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RuleKind, RulePack};
+use crate::template::{parse_category, parse_severity};
 
 /// Validate pack schema, rule ids, and per-kind required fields.
 pub fn validate_rule_pack(pack: &RulePack) -> Result<(), RulePackError> {
@@ -181,12 +181,19 @@ fn validate_rule_shape(rule: &crate::model::RuleSpec) -> Result<(), RulePackErro
     Ok(())
 }
 
-fn validate_fact_source(rule_id: &str, source: &crate::model::FactSource) -> Result<(), RulePackError> {
+fn validate_fact_source(
+    rule_id: &str,
+    source: &crate::model::FactSource,
+) -> Result<(), RulePackError> {
     if source.kind.trim().is_empty() {
-        return Err(RulePackError(format!("{rule_id}: fact source kind is empty")));
+        return Err(RulePackError(format!(
+            "{rule_id}: fact source kind is empty"
+        )));
     }
     if source.alias.trim().is_empty() {
-        return Err(RulePackError(format!("{rule_id}: fact source alias is empty")));
+        return Err(RulePackError(format!(
+            "{rule_id}: fact source alias is empty"
+        )));
     }
     Ok(())
 }

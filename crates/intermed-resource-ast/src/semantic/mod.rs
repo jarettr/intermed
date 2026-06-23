@@ -6,5 +6,6 @@
 
 pub mod diff;
 pub mod facts;
+pub mod impact;
 pub mod namespace;
 pub mod refs;

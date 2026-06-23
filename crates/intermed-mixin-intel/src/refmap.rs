@@ -53,7 +53,7 @@ impl Refmap {
 /// namespace that is stable across every Fabric mod (yarn/named names are
 /// per-mapping-version and effectively mod-private), so it is the canonical
 /// comparison namespace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Namespace {
     /// `method_NNNN` / `field_NNNN` — Fabric-wide stable.
@@ -61,6 +61,7 @@ pub enum Namespace {
     /// A human/yarn name with no resolvable bridge to intermediary in this jar.
     Named,
     /// Empty or unclassifiable.
+    #[default]
     Unknown,
 }
 
@@ -75,9 +76,9 @@ impl Namespace {
 }
 
 /// True when `name` (the bare name, no descriptor) is an intermediary token
-/// (`method_<digits>` or `field_<digits>`) — the cross-mod-stable form.
+/// (`method_<digits>`, `field_<digits>`, or `class_<digits>`) — the cross-mod-stable form.
 pub fn is_intermediary_name(name: &str) -> bool {
-    for prefix in ["method_", "field_"] {
+    for prefix in ["method_", "field_", "class_"] {
         if let Some(rest) = name.strip_prefix(prefix) {
             return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
         }
@@ -142,11 +143,18 @@ impl TinyMappings {
         // The first namespace is the row "source"; resolve intermediary/named by
         // name so 2-ns (intermediary,named) and 3-ns (official,intermediary,named)
         // Tiny files both work.
-        let inter_idx = namespaces.iter().position(|n| n == "intermediary").unwrap_or(0);
+        let inter_idx = namespaces
+            .iter()
+            .position(|n| n == "intermediary")
+            .unwrap_or(0);
         let named_idx = namespaces
             .iter()
             .position(|n| n == "named")
-            .unwrap_or(namespaces.len() - 1);
+            // Lazy fallback: the argument to `unwrap_or` is eager, so on an
+            // empty (truncated) namespace list `namespaces.len() - 1` would
+            // underflow before the guard above could ever matter. `saturating_sub`
+            // keeps it safe even if that guard is removed.
+            .unwrap_or_else(|| namespaces.len().saturating_sub(1));
         let named_ns = namespaces[named_idx].clone();
 
         let mut out = Self {
@@ -178,7 +186,11 @@ impl TinyMappings {
                         continue;
                     }
                     let src = names[0].to_string();
-                    let inter = names.get(inter_idx).copied().unwrap_or(names[0]).to_string();
+                    let inter = names
+                        .get(inter_idx)
+                        .copied()
+                        .unwrap_or(names[0])
+                        .to_string();
                     class_inter = Some(inter.clone());
                     for (i, ns) in namespaces.iter().enumerate() {
                         let mapped = names.get(i).copied().unwrap_or(names[0]);
@@ -198,7 +210,9 @@ impl TinyMappings {
                 // Member rows nested one tab under the current class. Layout:
                 // `<tab>m<tab><descriptor><tab><ns0name><tab><ns1name>…`.
                 (1, Some(tag @ ("m" | "f"))) => {
-                    let Some(ref owner) = class_inter else { continue };
+                    let Some(ref owner) = class_inter else {
+                        continue;
+                    };
                     // cols[0]=tag, cols[1]=descriptor, cols[2..]=names per namespace.
                     if cols.len() < 3 {
                         continue;
@@ -370,7 +384,12 @@ impl MappingContext {
     }
 
     /// Express a resolved site in the intermediary namespace when possible.
-    fn canonicalize(&self, class_slash: &str, original: &str, display: &str) -> (String, Namespace) {
+    fn canonicalize(
+        &self,
+        class_slash: &str,
+        original: &str,
+        display: &str,
+    ) -> (String, Namespace) {
         // 1. An intermediary token among the candidates is already canonical.
         for cand in [display, original] {
             let (name, desc) = split_method_name_descriptor(cand);
@@ -454,7 +473,8 @@ mod tests {
             }
         }"#;
         let map = Refmap::parse(json).unwrap();
-        let (resolved, mapped) = map.resolve_method("net.minecraft.server.MinecraftServer", "method_1574");
+        let (resolved, mapped) =
+            map.resolve_method("net.minecraft.server.MinecraftServer", "method_1574");
         assert_eq!(resolved, "tick()V");
         assert!(mapped);
     }
@@ -497,7 +517,10 @@ mod tests {
                     \t\tp\t0\t\tcount\n\
                     \t\tc\tThis is a comment\n";
         let map = TinyMappings::parse(tiny).unwrap();
-        assert_eq!(map.resolve_method("net/minecraft/class_1", "method_2"), Some("bar".to_string()));
+        assert_eq!(
+            map.resolve_method("net/minecraft/class_1", "method_2"),
+            Some("bar".to_string())
+        );
         // The deeper `c` comment must not have registered a bogus class.
         assert_eq!(map.to_intermediary_class("This is a comment"), None);
     }
@@ -515,9 +538,8 @@ mod tests {
             map.to_named_class("net/minecraft/class_3215"),
             Some("net.minecraft.server.MinecraftServer".to_string())
         );
-        let owners = map.expand_target_owner_slash(&[
-            "net.minecraft.server.MinecraftServer".to_string()
-        ]);
+        let owners =
+            map.expand_target_owner_slash(&["net.minecraft.server.MinecraftServer".to_string()]);
         assert!(owners.contains("net/minecraft/server/MinecraftServer"));
         assert!(owners.contains("net/minecraft/class_3215"));
     }
@@ -537,7 +559,8 @@ mod tests {
 
         // A mod already in intermediary canonicalizes to the same key.
         let mut ctx2 = MappingContext::new();
-        let site2 = ctx2.resolve_injection("net.minecraft.server.MinecraftServer", "method_1574()V");
+        let site2 =
+            ctx2.resolve_injection("net.minecraft.server.MinecraftServer", "method_1574()V");
         assert_eq!(site2.namespace, Namespace::Intermediary);
         assert_eq!(site2.canonical, "method_1574()V");
     }
@@ -554,8 +577,11 @@ mod tests {
     fn intermediary_detection() {
         assert!(is_intermediary_name("method_1574"));
         assert!(is_intermediary_name("field_42"));
+        assert!(is_intermediary_name("class_310"));
         assert!(!is_intermediary_name("tick"));
         assert!(!is_intermediary_name("method_"));
         assert!(!is_intermediary_name("method_x"));
+        assert!(!is_intermediary_name("class_"));
+        assert!(!is_intermediary_name("class_name"));
     }
 }

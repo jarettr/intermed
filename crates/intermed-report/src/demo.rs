@@ -148,7 +148,10 @@ pub struct HeroArtifacts {
 }
 
 /// Build the presentation bundle from a completed demo run directory.
-pub fn build_demo_report(run_dir: &Path, tool_version: &str) -> Result<DemoReport, DemoReportError> {
+pub fn build_demo_report(
+    run_dir: &Path,
+    tool_version: &str,
+) -> Result<DemoReport, DemoReportError> {
     let corpus_path = run_dir.join("corpus.json");
     let corpus_text = fs::read_to_string(&corpus_path).map_err(|source| DemoReportError::Read {
         path: corpus_path.clone(),
@@ -175,11 +178,10 @@ pub fn build_demo_report(run_dir: &Path, tool_version: &str) -> Result<DemoRepor
             path: doctor_path.clone(),
             source,
         })?;
-        let (verdict, counts) = parse_doctor_summary(&text).ok_or_else(|| {
-            DemoReportError::MissingSummary {
+        let (verdict, counts) =
+            parse_doctor_summary(&text).ok_or_else(|| DemoReportError::MissingSummary {
                 scenario: spec.id.clone(),
-            }
-        })?;
+            })?;
         let json_path = run_dir.join(format!("doctor-{}-json.json", spec.id));
         let headline_findings = if json_path.is_file() {
             read_headline_findings(&json_path)?
@@ -266,10 +268,7 @@ pub fn write_demo_artifacts(
 #[must_use]
 pub fn render_markdown(report: &DemoReport) -> String {
     let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "# InterMed × ATLauncher — presentation evidence run\n"
-    );
+    let _ = writeln!(out, "# InterMed × ATLauncher — presentation evidence run\n");
     let _ = writeln!(
         out,
         "> Real Modrinth mods · {} scenarios · {} jars · generated {}\n",
@@ -310,7 +309,11 @@ pub fn render_markdown(report: &DemoReport) -> String {
     }
     let _ = writeln!(out, "\n## Narrative walkthrough\n");
     for row in &report.scenarios {
-        let _ = writeln!(out, "### {} — {}\n", row.scenario.title, row.scenario.subtitle);
+        let _ = writeln!(
+            out,
+            "### {} — {}\n",
+            row.scenario.title, row.scenario.subtitle
+        );
         let _ = writeln!(out, "{}\n", row.scenario.narrative);
         let _ = writeln!(
             out,
@@ -331,7 +334,10 @@ pub fn render_markdown(report: &DemoReport) -> String {
     if let Some(hero) = &report.hero {
         let _ = writeln!(out, "## Hero pack deep dive (`{}`)\n", hero.scenario_id);
         if let Some(ms) = hero.profile_ms {
-            let _ = writeln!(out, "- Full diagnosis completed in **{ms} ms** on 7 real jars.");
+            let _ = writeln!(
+                out,
+                "- Full diagnosis completed in **{ms} ms** on 7 real jars."
+            );
         }
         if let Some(n) = hero.mixin_targets {
             let _ = writeln!(out, "- Mixin map enumerated **{n}** static targets.");
@@ -415,9 +421,12 @@ pub fn render_html(report: &DemoReport) -> String {
         .map(|c| format!("<li>{}</li>", escape_html(c)))
         .collect();
 
-    let hero_block = report.hero.as_ref().map(|h| {
-        format!(
-            r#"<section class="hero">
+    let hero_block = report
+        .hero
+        .as_ref()
+        .map(|h| {
+            format!(
+                r#"<section class="hero">
   <h2>Hero pack: {id}</h2>
   <ul>
     <li>Scan time: <strong>{ms} ms</strong></li>
@@ -426,22 +435,23 @@ pub fn render_html(report: &DemoReport) -> String {
     <li>Interactive HTML: <strong>{html}</strong></li>
   </ul>
 </section>"#,
-            id = escape_html(&h.scenario_id),
-            ms = h
-                .profile_ms
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "—".into()),
-            mix = h
-                .mixin_targets
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "—".into()),
-            sbom = h
-                .sbom_components
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "—".into()),
-            html = if h.html.is_some() { "yes" } else { "—" },
-        )
-    }).unwrap_or_default();
+                id = escape_html(&h.scenario_id),
+                ms = h
+                    .profile_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                mix = h
+                    .mixin_targets
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                sbom = h
+                    .sbom_components
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into()),
+                html = if h.html.is_some() { "yes" } else { "—" },
+            )
+        })
+        .unwrap_or_default();
 
     format!(
         r#"<!DOCTYPE html>
@@ -577,10 +587,12 @@ pub fn render_html(report: &DemoReport) -> String {
 fn default_capabilities() -> Vec<String> {
     vec![
         "Layer A/B metadata scan on real Fabric, Forge, and mixed-loader jars".into(),
-        "Layer C dependency resolution (missing-dependency, duplicate-id, mixed-loader-pack)".into(),
+        "Layer C dependency resolution (missing-dependency, duplicate-id, mixed-loader-pack)"
+            .into(),
         "Layer F mixin-risk intelligence (handler effects, overlaps, overwrite detection)".into(),
         "Layer G/H security notes and SPDX SBOM export".into(),
-        "Terminal, JSON (`intermed-doctor-report-v1`), SARIF, and self-contained HTML outputs".into(),
+        "Terminal, JSON (`intermed-doctor-report-v1`), SARIF, and self-contained HTML outputs"
+            .into(),
         "deps graph, mixin-map, and profile timings on the hero pack".into(),
     ]
 }
@@ -615,7 +627,10 @@ fn build_hero(run_dir: &Path, scenario_id: &str) -> Option<HeroArtifacts> {
     let profile_ms = read_profile_ms(run_dir, scenario_id);
     let sbom_components = read_sbom_component_count(run_dir, scenario_id);
     let mixin_targets = read_mixin_target_count(run_dir, scenario_id);
-    if html.is_none() && profile_ms.is_none() && sbom_components.is_none() && mixin_targets.is_none()
+    if html.is_none()
+        && profile_ms.is_none()
+        && sbom_components.is_none()
+        && mixin_targets.is_none()
     {
         return None;
     }
@@ -647,14 +662,13 @@ fn read_sbom_component_count(run_dir: &Path, scenario_id: &str) -> Option<u32> {
 fn read_mixin_target_count(run_dir: &Path, scenario_id: &str) -> Option<u32> {
     let path = run_dir.join(format!("mixin-map-{scenario_id}.txt"));
     let text = fs::read_to_string(path).ok()?;
-    text.lines()
-        .find_map(|l| {
-            if let Some(rest) = l.strip_prefix("Mixin classes:") {
-                rest.trim().parse().ok()
-            } else {
-                None
-            }
-        })
+    text.lines().find_map(|l| {
+        if let Some(rest) = l.strip_prefix("Mixin classes:") {
+            rest.trim().parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 fn read_headline_findings(path: &Path) -> Result<Vec<HeadlineFinding>, DemoReportError> {
@@ -662,10 +676,11 @@ fn read_headline_findings(path: &Path) -> Result<Vec<HeadlineFinding>, DemoRepor
         path: path.to_path_buf(),
         source,
     })?;
-    let v: serde_json::Value = serde_json::from_str(&text).map_err(|source| DemoReportError::Json {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| DemoReportError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let Some(findings) = v.get("findings").and_then(|f| f.as_array()) else {
         return Ok(Vec::new());
     };

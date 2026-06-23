@@ -1,8 +1,8 @@
 //! Collector fact-emission contract tests.
 
+use intermed_doctor_core::facts::FactStore;
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{CollectCtx, Collector, DiagnosisSettings, Target, TargetKind};
-use intermed_doctor_core::facts::FactStore;
 use intermed_mixin_intel::fixtures;
 use intermed_mixin_intel::{collector, extractor_id};
 
@@ -32,9 +32,9 @@ fn collector_emits_effect_recommendation_and_handler_facts() {
         path: mods.clone(),
         kind: TargetKind::ModsDir,
         mods_dir: Some(mods),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let mut store = FactStore::new();
@@ -59,7 +59,11 @@ fn collector_emits_effect_recommendation_and_handler_facts() {
             .attr("site_key")
             .is_some_and(|k| k.contains("@HEAD"))
     );
-    assert!(overwrite.attr("effect_description").is_some_and(|d| !d.is_empty()));
+    assert!(
+        overwrite
+            .attr("effect_description")
+            .is_some_and(|d| !d.is_empty())
+    );
 
     let effect = store.by_kind(kind::MIXIN_EFFECT).next().unwrap();
     assert!(effect.attr("site_key").is_some_and(|k| !k.is_empty()));

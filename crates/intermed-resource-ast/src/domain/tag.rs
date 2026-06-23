@@ -85,7 +85,9 @@ pub fn parse(path: &str, value: &Value) -> DomainParse {
                     Some(tv) => ast.values.push(tv),
                     None => {
                         status = ParseStatus::PartiallyParsed;
-                        diagnostics.push(invalid("tag entry is neither a string nor an object with `id`"));
+                        diagnostics.push(invalid(
+                            "tag entry is neither a string nor an object with `id`",
+                        ));
                     }
                 }
             }
@@ -110,7 +112,7 @@ pub fn parse(path: &str, value: &Value) -> DomainParse {
             namespace: namespace_of(&v.id),
             // A `required: false` entry is explicitly optional; default is required.
             required: v.required.unwrap_or(true),
-            conditioned: false,
+            conditions: Vec::new(),
             is_tag: v.is_tag_ref,
         })
         .map(|mut r| {
@@ -181,12 +183,18 @@ mod tests {
             "data/c/tags/items/ingots.json",
             &json(r##"{"values":["minecraft:iron_ingot","#c:tags/copper"]}"##),
         );
-        let ResourceSummary::Tag(s) = &p.summary else { panic!() };
+        let ResourceSummary::Tag(s) = &p.summary else {
+            panic!()
+        };
         assert_eq!(s.registry, "items");
         assert!(!s.replace);
         assert_eq!(s.entry_count, 2);
         // One item ref, one tag ref.
-        assert!(p.references.iter().any(|r| r.relation == RefRelation::UsesItem));
+        assert!(
+            p.references
+                .iter()
+                .any(|r| r.relation == RefRelation::UsesItem)
+        );
         assert!(p.references.iter().any(|r| r.is_tag));
     }
 
@@ -196,7 +204,9 @@ mod tests {
             "data/c/tags/items/x.json",
             &json(r#"{"replace":true,"values":["a:b"]}"#),
         );
-        let ResourceSummary::Tag(s) = &p.summary else { panic!() };
+        let ResourceSummary::Tag(s) = &p.summary else {
+            panic!()
+        };
         assert!(s.replace);
     }
 
@@ -206,14 +216,19 @@ mod tests {
             "data/c/tags/items/x.json",
             &json(r#"{"values":[{"id":"a:b","required":false}]}"#),
         );
-        let ResourceSummary::Tag(s) = &p.summary else { panic!() };
+        let ResourceSummary::Tag(s) = &p.summary else {
+            panic!()
+        };
         assert!(s.has_required_flag);
         assert!(!p.references[0].required);
     }
 
     #[test]
     fn tag_registry_handles_nested() {
-        assert_eq!(tag_registry("data/c/tags/worldgen/biome/x.json"), "worldgen/biome");
+        assert_eq!(
+            tag_registry("data/c/tags/worldgen/biome/x.json"),
+            "worldgen/biome"
+        );
         assert_eq!(tag_registry("data/c/tags/items/x.json"), "items");
     }
 

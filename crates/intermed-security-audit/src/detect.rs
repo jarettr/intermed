@@ -409,7 +409,6 @@ const CORROBORATION_TABLE: &[(&str, SecuritySignal)] = &[
     ("java.lang.ProcessBuilder", SecuritySignal::ProcessSpawn),
     ("java/lang/ProcessBuilder", SecuritySignal::ProcessSpawn),
     ("exec", SecuritySignal::ProcessSpawn),
-
     ("sun.misc.Unsafe", SecuritySignal::Unsafe),
     ("sun/misc/Unsafe", SecuritySignal::Unsafe),
     ("jdk.internal.misc.Unsafe", SecuritySignal::Unsafe),
@@ -434,8 +433,14 @@ const CORROBORATION_TABLE: &[(&str, SecuritySignal)] = &[
         "java/lang/invoke/MethodHandles",
         SecuritySignal::MethodHandles,
     ),
-    ("java.net.URLClassLoader", SecuritySignal::DynamicClassDefinition),
-    ("java/net/URLClassLoader", SecuritySignal::DynamicClassDefinition),
+    (
+        "java.net.URLClassLoader",
+        SecuritySignal::DynamicClassDefinition,
+    ),
+    (
+        "java/net/URLClassLoader",
+        SecuritySignal::DynamicClassDefinition,
+    ),
 ];
 
 /// Low-confidence corroboration: admit a capability implied by a suspicious
@@ -533,11 +538,7 @@ fn detects_native_library(evidence: &ClassEvidence) -> bool {
         || invokes_method_on_any(evidence, &["java/lang/Runtime"], "loadLibrary")
         || invokes_method_on_any(evidence, &["java/lang/Runtime"], "load")
         || invokes_method_on_any(evidence, &["java/lang/foreign/NativeLibrary"], "load")
-        || invokes_method_on_any(
-            evidence,
-            &["jdk/internal/loader/NativeLibraries"],
-            "load",
-        )
+        || invokes_method_on_any(evidence, &["jdk/internal/loader/NativeLibraries"], "load")
 }
 
 fn detects_dynamic_class_definition(evidence: &ClassEvidence) -> bool {

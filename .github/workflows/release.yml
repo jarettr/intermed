@@ -1,0 +1,71 @@
+name: Release
+
+# Builds a native binary per platform and attaches it to the GitHub release
+# whose tag triggered the run. Source builds need cargo; end users only need the
+# attached binary (Rust links a standalone executable — no runtime).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64 }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64 }
+          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Fully static Linux binary (musl) — runs on any distro with no deps.
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p intermed-cli
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          dir="intermed-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/intermed" "$dir/"
+          cp -r docs/man docs/completions "$dir/"
+          cp README.md LICENSE SECURITY.md CONTRIBUTING.md "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+          echo "ASSET=${dir}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "intermed-$env:GITHUB_REF_NAME-${{ matrix.name }}"
+          New-Item -ItemType Directory -Path $dir | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/intermed.exe" $dir
+          Copy-Item -Recurse docs/man, docs/completions $dir
+          Copy-Item README.md, LICENSE, SECURITY.md, CONTRIBUTING.md $dir
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip"
+          "ASSET=$dir.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET }}
+          generate_release_notes: true
+          prerelease: true

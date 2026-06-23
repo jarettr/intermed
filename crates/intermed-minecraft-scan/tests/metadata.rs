@@ -1,9 +1,9 @@
 use std::io::Write;
 use std::path::Path;
 
-use intermed_doctor_core::facts::{kind, FactStore};
+use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{
-    default_settings, CollectCtx, Collector, DiagnosisSettings, MetadataLevel, Target, TargetKind,
+    CollectCtx, Collector, DiagnosisSettings, MetadataLevel, Target, TargetKind, default_settings,
 };
 use intermed_minecraft_scan::MetadataCollector;
 use zip::write::SimpleFileOptions;
@@ -240,7 +240,10 @@ fn full_level_whole_jar_scan_detects_content_and_networking_capabilities() {
     assert!(caps.contains(&"registers_content".to_string()), "{caps:?}");
     assert!(caps.contains(&"custom_networking".to_string()), "{caps:?}");
     // A content mod must NOT be classified performance-oriented.
-    assert!(!caps.contains(&"performance_oriented".to_string()), "{caps:?}");
+    assert!(
+        !caps.contains(&"performance_oriented".to_string()),
+        "{caps:?}"
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -283,11 +286,20 @@ fn capabilities_are_evidence_based_not_mod_name_based() {
 
     let biomes = caps("biomesplus");
     assert!(biomes.contains(&"has_worldgen".to_string()), "{biomes:?}");
-    assert!(!biomes.contains(&"performance_oriented".to_string()), "content mod is not perf: {biomes:?}");
+    assert!(
+        !biomes.contains(&"performance_oriented".to_string()),
+        "content mod is not perf: {biomes:?}"
+    );
 
     let tweaks = caps("randomtweaks");
-    assert!(tweaks.contains(&"performance_oriented".to_string()), "{tweaks:?}");
-    assert!(tweaks.contains(&"modifies_game_code".to_string()), "{tweaks:?}");
+    assert!(
+        tweaks.contains(&"performance_oriented".to_string()),
+        "{tweaks:?}"
+    );
+    assert!(
+        tweaks.contains(&"modifies_game_code".to_string()),
+        "{tweaks:?}"
+    );
     assert!(!tweaks.contains(&"has_worldgen".to_string()), "{tweaks:?}");
 
     std::fs::remove_dir_all(root).ok();
@@ -338,9 +350,11 @@ fn full_metadata_level_extracts_real_entrypoint_events_from_bytecode() {
     // The event is the @SubscribeEvent method's first-parameter type, parsed from
     // the descriptor — not a substring guess.
     assert_eq!(detail.attr("events"), Some("[\"ServerTickEvent\"]"));
-    assert!(store
-        .by_kind(kind::MOD_CAPABILITY)
-        .any(|f| f.attr("capability") == Some("hooks_game_tick")));
+    assert!(
+        store
+            .by_kind(kind::MOD_CAPABILITY)
+            .any(|f| f.attr("capability") == Some("hooks_game_tick"))
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -382,7 +396,10 @@ fn fabric_entrypoints_and_access_widener_emit_facts() {
     assert_eq!(aw.attr("mechanism"), Some("access-widener"));
     assert_eq!(aw.attr("access"), Some("accessible"));
     assert_eq!(aw.attr("target_class"), Some("net.minecraft.class_1"));
-    assert_eq!(aw.attr("target_key"), Some("net.minecraft.class_1#field_2 I"));
+    assert_eq!(
+        aw.attr("target_key"),
+        Some("net.minecraft.class_1#field_2 I")
+    );
 }
 
 #[test]
@@ -447,7 +464,10 @@ version="1.0.0"
         .find(|f| f.kind == kind::ACCESS_TRANSFORM && f.subject == "beta")
         .expect("access_transform fact");
     assert_eq!(at.attr("mechanism"), Some("access-transformer"));
-    assert_eq!(at.attr("target_class"), Some("net.minecraft.world.level.Level"));
+    assert_eq!(
+        at.attr("target_class"),
+        Some("net.minecraft.world.level.Level")
+    );
 
     let coremod = facts
         .iter()
@@ -481,9 +501,11 @@ side="CLIENT"
     );
 
     let facts = collect_facts(&mods);
-    assert!(facts
-        .iter()
-        .any(|f| f.kind == kind::MOD && f.subject == "alpha"));
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.kind == kind::MOD && f.subject == "alpha")
+    );
     assert!(!facts.iter().any(|f| f.kind == kind::MOD_SIDE));
 }
 
@@ -522,9 +544,9 @@ fn plugins_sibling_directory_is_scanned() {
         path: root.clone(),
         kind: TargetKind::Server,
         mods_dir: Some(root.join("mods")),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let mut store = FactStore::new();
@@ -543,9 +565,9 @@ fn collect_facts(mods_dir: &Path) -> Vec<intermed_doctor_core::facts::Fact> {
         path: mods_dir.to_path_buf(),
         kind: TargetKind::ModsDir,
         mods_dir: Some(mods_dir.to_path_buf()),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let mut store = FactStore::new();
@@ -566,13 +588,18 @@ fn missing_mod_id_emits_invalid_metadata_not_placeholder_subject() {
     std::fs::create_dir_all(&mods).unwrap();
     write_jar(
         &mods.join("broken.jar"),
-        &[("fabric.mod.json", br#"{"schemaVersion":1,"version":"1.0.0"}"#)],
+        &[(
+            "fabric.mod.json",
+            br#"{"schemaVersion":1,"version":"1.0.0"}"#,
+        )],
     );
 
     let facts = collect_facts(&mods);
     // No `?` placeholder subject leaks into mod facts.
     assert!(
-        !facts.iter().any(|f| f.kind == kind::MOD && f.subject == "?"),
+        !facts
+            .iter()
+            .any(|f| f.kind == kind::MOD && f.subject == "?"),
         "placeholder '?' must never be a mod subject"
     );
     assert!(
@@ -606,8 +633,16 @@ fn hybrid_plugin_with_mod_manifest_records_secondary_identity() {
 
     let facts = collect_facts(&mods);
     // Primary identity stays the plugin (no competing mod fact → no false loader-mismatch).
-    assert!(facts.iter().any(|f| f.kind == kind::PLUGIN && f.subject == "ViaBridge"));
-    assert!(!facts.iter().any(|f| f.kind == kind::MOD && f.subject == "viabridge_fabric"));
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.kind == kind::PLUGIN && f.subject == "ViaBridge")
+    );
+    assert!(
+        !facts
+            .iter()
+            .any(|f| f.kind == kind::MOD && f.subject == "viabridge_fabric")
+    );
     // The second role is recorded informationally.
     let sec = facts
         .iter()
@@ -663,8 +698,16 @@ version="2.0.0"
     );
 
     let facts = collect_facts(&mods);
-    assert!(facts.iter().any(|f| f.kind == kind::MOD && f.subject == "alpha"));
-    assert!(facts.iter().any(|f| f.kind == kind::MOD && f.subject == "beta"));
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.kind == kind::MOD && f.subject == "alpha")
+    );
+    assert!(
+        facts
+            .iter()
+            .any(|f| f.kind == kind::MOD && f.subject == "beta")
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -685,9 +728,9 @@ fn paper_plugin_yml_emits_api_version() {
         path: root.clone(),
         kind: TargetKind::Server,
         mods_dir: Some(root.join("mods")),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
     let mut store = FactStore::new();
@@ -725,9 +768,9 @@ fn metadata_cache_records_hits_on_second_collect() {
         path: mods.clone(),
         kind: TargetKind::ModsDir,
         mods_dir: Some(mods.clone()),
-            game_root: None,
-            layout: None,
-            instance_type: None,
+        game_root: None,
+        layout: None,
+        instance_type: None,
         spark_report: None,
     };
 
@@ -796,9 +839,7 @@ versionRange="[19,)"
     let sodium = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "create"
-                && f.attr("dep") == Some("sodium")
+            f.kind == kind::DEPENDENCY && f.subject == "create" && f.attr("dep") == Some("sodium")
         })
         .expect("optional sodium dep");
     assert_eq!(sodium.attr_bool("mandatory"), Some(false));
@@ -807,9 +848,7 @@ versionRange="[19,)"
     let radium = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "create"
-                && f.attr("dep") == Some("radium")
+            f.kind == kind::DEPENDENCY && f.subject == "create" && f.attr("dep") == Some("radium")
         })
         .expect("incompatible radium dep");
     assert_eq!(radium.attr_bool("mandatory"), Some(false));
@@ -818,9 +857,7 @@ versionRange="[19,)"
     let flywheel = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "create"
-                && f.attr("dep") == Some("flywheel")
+            f.kind == kind::DEPENDENCY && f.subject == "create" && f.attr("dep") == Some("flywheel")
         })
         .expect("required flywheel dep");
     assert_eq!(flywheel.attr_bool("mandatory"), Some(true));
@@ -829,9 +866,7 @@ versionRange="[19,)"
     let jei = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "create"
-                && f.attr("dep") == Some("jei")
+            f.kind == kind::DEPENDENCY && f.subject == "create" && f.attr("dep") == Some("jei")
         })
         .expect("legacy optional jei dep");
     assert_eq!(jei.attr_bool("mandatory"), Some(false));
@@ -868,9 +903,7 @@ versionRange="*"
     let dep = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "alpha"
-                && f.attr("dep") == Some("legacyopt")
+            f.kind == kind::DEPENDENCY && f.subject == "alpha" && f.attr("dep") == Some("legacyopt")
         })
         .expect("discouraged dep");
     assert_eq!(dep.attr_bool("mandatory"), Some(false));
@@ -907,9 +940,7 @@ versionRange="[1.0,)"
     let dep = facts
         .iter()
         .find(|f| {
-            f.kind == kind::DEPENDENCY
-                && f.subject == "create"
-                && f.attr("dep") == Some("flywheel")
+            f.kind == kind::DEPENDENCY && f.subject == "create" && f.attr("dep") == Some("flywheel")
         })
         .expect("loadbefore flywheel");
     assert_eq!(dep.attr("relation"), Some("loadbefore"));
@@ -1000,9 +1031,7 @@ fn nested_jar_registers_versioned_provider() {
     // And as a versioned provider, so the consumer's `>=3.2.0` resolves.
     let provided = facts
         .iter()
-        .find(|f| {
-            f.kind == kind::PROVIDED_DEPENDENCY && f.attr("provides") == Some("renderer-api")
-        })
+        .find(|f| f.kind == kind::PROVIDED_DEPENDENCY && f.attr("provides") == Some("renderer-api"))
         .expect("provided_dependency for bundled module");
     assert_eq!(provided.attr("version"), Some("3.2.2"));
 }

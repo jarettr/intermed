@@ -12,9 +12,9 @@ use crate::merge::merge_rule_packs;
 use crate::model::RulePack;
 use crate::pack::{default_core_pack_v2, default_core_pack_without_mixin, load_rule_pack};
 use crate::signing::{
-    canonical_digest, default_registry, default_rule_pack_install_dir, install_pack_from_registry,
-    load_registry_from_source, trusted_keys_for_publisher, verify_rule_pack_trust, PackOrigin,
-    RuleRegistry, SigningError, TrustLevel, TrustPolicy,
+    PackOrigin, RuleRegistry, SigningError, TrustLevel, TrustPolicy, canonical_digest,
+    default_registry, default_rule_pack_install_dir, install_pack_from_registry,
+    load_registry_from_source, trusted_keys_for_publisher, verify_rule_pack_trust,
 };
 /// Doctor-facing selection of which packs to merge into the embedded core.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -83,7 +83,10 @@ pub fn resolve_doctor_packs(
                     continue;
                 }
                 overlay_ids.push(pack.id.clone());
-                trust.push(PackTrust { id: pack.id.clone(), trust: level });
+                trust.push(PackTrust {
+                    id: pack.id.clone(),
+                    trust: level,
+                });
                 overlays.push(pack);
             }
         }
@@ -93,7 +96,10 @@ pub fn resolve_doctor_packs(
         let (pack, level) =
             resolve_pack_ref(extra, install_dir.as_deref(), &registry, &trusted, policy)?;
         overlay_ids.push(pack.id.clone());
-        trust.push(PackTrust { id: pack.id.clone(), trust: level });
+        trust.push(PackTrust {
+            id: pack.id.clone(),
+            trust: level,
+        });
         overlays.push(pack);
     }
 
@@ -122,7 +128,10 @@ pub fn install_pack_with_dependencies(
     Ok(installed)
 }
 
-fn resolve_install_order(registry: &RuleRegistry, pack_id: &str) -> Result<Vec<String>, SigningError> {
+fn resolve_install_order(
+    registry: &RuleRegistry,
+    pack_id: &str,
+) -> Result<Vec<String>, SigningError> {
     let mut order = Vec::new();
     let mut visiting = std::collections::BTreeSet::new();
     let mut visited = std::collections::BTreeSet::new();
@@ -204,8 +213,7 @@ pub fn merged_default_registry() -> RuleRegistry {
     registry
 }
 
-const EMBEDDED_COMMUNITY_REGISTRY: &str =
-    include_str!("../../../rules/community-registry.json");
+const EMBEDDED_COMMUNITY_REGISTRY: &str = include_str!("../../../rules/community-registry.json");
 
 fn parse_embedded_community_registry() -> Result<RuleRegistry, SigningError> {
     serde_json::from_str(EMBEDDED_COMMUNITY_REGISTRY)
@@ -306,7 +314,7 @@ fn load_trusted_keys_optional(path: Option<&Path>) -> Result<Vec<VerifyingKey>, 
 mod tests {
     use super::*;
     use crate::model::RULE_REGISTRY_SCHEMA;
-    use crate::signing::{fetch_pack_for_entry, sign_rule_pack, RegistryPackEntry};
+    use crate::signing::{RegistryPackEntry, fetch_pack_for_entry, sign_rule_pack};
     use ed25519_dalek::SigningKey;
 
     #[test]
@@ -330,7 +338,14 @@ mod tests {
         std::fs::write(dir.join("a.rules.json"), "{}").unwrap();
         let paths = list_installed_pack_paths(&dir);
         assert_eq!(paths.len(), 2);
-        assert!(paths[0].file_name().unwrap().to_str().unwrap().starts_with('a'));
+        assert!(
+            paths[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with('a')
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

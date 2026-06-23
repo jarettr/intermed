@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use intermed_security_audit::{
-    collapse_per_capability, DetectedSignal, EvidenceStrength, SecuritySignal, SignalProvenance,
+    DetectedSignal, EvidenceStrength, SecuritySignal, SignalProvenance, collapse_per_capability,
 };
 use proptest::prelude::*;
 

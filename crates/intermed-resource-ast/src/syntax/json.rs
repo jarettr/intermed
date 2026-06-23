@@ -12,7 +12,58 @@ use serde_json::Value;
 pub fn parse(bytes: &[u8]) -> Result<Value, String> {
     let text = std::str::from_utf8(bytes).map_err(|e| format!("not utf-8: {e}"))?;
     let cleaned = strip_bom_and_comments(text);
+    // Minecraft / mod loaders (GSON, Patchouli, …) tolerate trailing commas; strip
+    // them so book/content JSON the game loads fine isn't flagged as malformed.
+    let cleaned = strip_trailing_commas(&cleaned);
     serde_json::from_str(&cleaned).map_err(|e| e.to_string())
+}
+
+/// Remove trailing commas (`,` before a closing `}`/`]`), string-aware. Runs on
+/// already comment-stripped text, so only whitespace can sit between the comma and
+/// the closer.
+fn strip_trailing_commas(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            out.push(c as char);
+            if escaped {
+                escaped = false;
+            } else if c == b'\\' {
+                escaped = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == b',' {
+            // Peek past whitespace for a closer.
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                i += 1; // drop the trailing comma
+                continue;
+            }
+        }
+        let ch_len = utf8_len(c);
+        let end = (i + ch_len).min(bytes.len());
+        out.push_str(&text[i..end]);
+        i = end;
+    }
+    out
 }
 
 /// Remove a leading BOM and line/block comments (Minecraft's JSON5-ish tolerance),
@@ -103,5 +154,24 @@ mod tests {
     fn malformed_is_error_not_panic() {
         assert!(parse(b"{not json").is_err());
         assert!(parse(b"\xff\xfe").is_err());
+    }
+
+    #[test]
+    fn tolerates_trailing_commas() {
+        // Common in Patchouli / mod book content; the game loads these fine.
+        let v = parse(br#"{"a":1,"b":[1,2,],}"#).unwrap();
+        assert_eq!(v["a"], serde_json::json!(1));
+        assert_eq!(v["b"], serde_json::json!([1, 2]));
+        let nested = parse(br#"{"pools":[{"x":1,},],}"#).unwrap();
+        assert_eq!(nested["pools"][0]["x"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn comma_inside_string_is_preserved() {
+        let v = parse(br#"{"text":"a, b, c","n":1}"#).unwrap();
+        assert_eq!(v["text"], serde_json::json!("a, b, c"));
+        // A literal comma-then-brace inside a string must not be stripped.
+        let v2 = parse(br#"{"t":"x,}"}"#).unwrap();
+        assert_eq!(v2["t"], serde_json::json!("x,}"));
     }
 }

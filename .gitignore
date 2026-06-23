@@ -3,3 +3,9 @@
 Cargo.lock.bak
 *.profraw
 .DS_Store
+fuzz/target
+fuzz/corpus
+repomix-output.md
+*.html
+profile_*.json
+report_*.json

@@ -4,23 +4,7 @@
   "parse_status": "parsed",
   "references": [
     {
-      "conditioned": false,
-      "is_tag": false,
-      "namespace": "minecraft",
-      "relation": "uses-item",
-      "required": true,
-      "target": "minecraft:iron_ingot"
-    },
-    {
-      "conditioned": false,
-      "is_tag": false,
-      "namespace": "minecraft",
-      "relation": "uses-item",
-      "required": true,
-      "target": "minecraft:gold_ingot"
-    },
-    {
-      "conditioned": false,
+      "conditions": [],
       "is_tag": false,
       "namespace": "create",
       "relation": "uses-item",
@@ -28,7 +12,23 @@
       "target": "create:zinc_ingot"
     },
     {
-      "conditioned": false,
+      "conditions": [],
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "uses-item",
+      "required": true,
+      "target": "minecraft:gold_ingot"
+    },
+    {
+      "conditions": [],
+      "is_tag": false,
+      "namespace": "minecraft",
+      "relation": "uses-item",
+      "required": true,
+      "target": "minecraft:iron_ingot"
+    },
+    {
+      "conditions": [],
       "is_tag": true,
       "namespace": "c",
       "relation": "uses-tag",

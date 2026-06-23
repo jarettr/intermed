@@ -63,6 +63,20 @@ Prefer @Inject / @ModifyReturnValue over @Overwrite — net.minecraft.client.ren
     private static boolean intermed$wrap(boolean original) {
         return original; // compose with upstream mixins
     }
+Render-loop mixin on `WorldRenderer#m0` — FPS risk — net.minecraft.client.render.WorldRenderer (m0()V@HEAD)
+  This mixin weaves into `net.minecraft.client.render.WorldRenderer` which is on the render critical path. Overwrites and redirects in render classes block multi-mod composition and can introduce frame stutter. Prefer @Inject at specific INVOKE points or @WrapOperation over @Redirect so other render mods can still layer their own changes.
+  Docs: https://github.com/LlamaLad7/MixinExtras/wiki/WrapOperation
+  Example:
+    // Before — @Redirect blocks all other render mods:
+    @Redirect(method = "m0", at = @At(...))
+    private ReturnType WorldRenderer$redirect(...) { ... }
+    
+    // After — @WrapOperation composes cleanly:
+    @WrapOperation(method = "m0", at = @At(...))
+    private ReturnType WorldRenderer$wrap(Operation<ReturnType> original) {
+        ReturnType result = original.call(); // other mods still run
+        return transform(result);
+    }
 @Overwrite locks out another mod's injectors — net.minecraft.client.render.WorldRenderer (m0()V::overwrite-vs-inject)
   `beta` @Overwrites a method that `alpha` injects into — the overwrite replaces the whole body, so the other mod's hooks silently stop applying. Convert the @Overwrite to @Inject / @ModifyReturnValue / @WrapOperation so both survive.
   Docs: https://github.com/LlamaLad7/MixinExtras/wiki/ModifyReturnValue

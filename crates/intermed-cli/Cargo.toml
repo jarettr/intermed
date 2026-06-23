@@ -24,6 +24,7 @@ clap.workspace = true
 rayon.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+anyhow = "1"
 intermed-config.workspace = true
 intermed-doctor-core.workspace = true
 intermed-report.workspace = true
@@ -40,13 +41,20 @@ intermed-security-audit.workspace = true
 intermed-sbom.workspace = true
 intermed-spark-bridge.workspace = true
 intermed-lab.workspace = true
-intermed-runtime-preflight.workspace = true
 intermed-duckdb.workspace = true
 strsim = "0.11"
+dhat = { version = "0.3", optional = true }
+# Default global allocator: the diagnosis builds a large graph of many small,
+# short-lived allocations; glibc malloc fragments badly on it (live heap ≈ 0.8 GB
+# but RSS ≈ 3–5 GB on big packs). mimalloc keeps RSS close to the live set and
+# returns freed pages to the OS. Disabled automatically under `dhat-heap`.
+mimalloc = { version = "0.1", default-features = false }
 
 [features]
 default = []
 duckdb = ["intermed-duckdb/duckdb"]
+# Heap profiling: build with `--features dhat-heap`, run once, inspect dhat-heap.json.
+dhat-heap = ["dep:dhat"]
 
 [dev-dependencies]
 zip.workspace = true

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use cafebabe::{parse_class_with_options, ParseOptions};
+use cafebabe::{ParseOptions, parse_class_with_options};
 use serde::{Deserialize, Serialize};
 
 use crate::model::MixinHierarchyEdge;
@@ -55,7 +55,9 @@ impl HierarchyIndex {
             self.supers.entry(k.clone()).or_insert_with(|| v.clone());
         }
         for (k, v) in &other.interfaces {
-            self.interfaces.entry(k.clone()).or_insert_with(|| v.clone());
+            self.interfaces
+                .entry(k.clone())
+                .or_insert_with(|| v.clone());
         }
     }
 

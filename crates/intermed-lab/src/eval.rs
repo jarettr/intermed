@@ -25,15 +25,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use intermed_doctor_core::evidence::{Finding, Severity};
 use intermed_doctor_core::DoctorReport;
+use intermed_doctor_core::evidence::{Finding, Severity};
 
 use crate::attribution::{
-    subject_from_finding_id, subjects_match, FailureAttribution, SEVERITY_CALIBRATION_MIN_SUPPORT,
+    FailureAttribution, SEVERITY_CALIBRATION_MIN_SUPPORT, subject_from_finding_id, subjects_match,
 };
 use crate::classify::FailureCategory;
-use crate::run::{read_run, LabRun};
-use crate::{read_json, write_json_atomic, LabError};
+use crate::run::{LabRun, read_run};
+use crate::{LabError, read_json, write_json_atomic};
 
 /// Schema tag for the emitted accuracy report.
 pub const RULE_ACCURACY_SCHEMA: &str = "intermed-rule-accuracy-v3";
@@ -97,6 +97,91 @@ pub fn predictions_from_report(report: &DoctorReport) -> Vec<Prediction> {
     predictions_from_findings(&report.findings)
 }
 
+/// One frame-to-jar blame the Doctor made: a mod blamed because a crash stack frame
+/// (`frame_class`) falls under a package that mod exclusively owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlamePrediction {
+    pub mod_id: String,
+    /// The resolved stack-frame class that drove the blame (from the
+    /// `frame-class:<class>` machine tag).
+    pub frame_class: String,
+    pub severity: Severity,
+}
+
+/// Extract the Doctor's frame-to-jar blames (`crash-blame:*` findings carrying a
+/// `frame-class:<class>` tag). Ambiguous (`crash-blame-ambiguous:*`) blames are
+/// excluded — they make no confident claim to score.
+#[must_use]
+pub fn blame_predictions_from_findings(findings: &[Finding]) -> Vec<BlamePrediction> {
+    findings
+        .iter()
+        .filter(|f| {
+            f.machine_tags.iter().any(|t| t == "crash-blame")
+                && !f.machine_tags.iter().any(|t| t == "ambiguous")
+        })
+        .filter_map(|f| {
+            let frame_class = f
+                .machine_tags
+                .iter()
+                .find_map(|t| t.strip_prefix("frame-class:"))?
+                .to_string();
+            let mod_id = f
+                .affected_components
+                .first()
+                .cloned()
+                .unwrap_or_else(|| subject_from_finding_id(&f.id).to_string());
+            Some(BlamePrediction {
+                mod_id,
+                frame_class,
+                severity: f.severity,
+            })
+        })
+        .collect()
+}
+
+/// Calibrated blame accuracy: how often a frame-to-jar blame names a frame the lab
+/// actually attributed the crash to. Precision is only "trusted" (a louder
+/// confidence suggested) once [`SEVERITY_CALIBRATION_MIN_SUPPORT`] blames exist.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BlameAccuracy {
+    pub predictions: usize,
+    pub true_positive: usize,
+    pub false_positive: usize,
+    pub precision: f64,
+    pub calibration_support: usize,
+    /// Suggested blame confidence, gated on support (mirrors severity calibration).
+    pub suggested_severity: String,
+}
+
+/// Score frame-to-jar blames against ground-truth crash attributions. A blame is a
+/// true positive when its `frame_class` matches a class the lab attributed the crash
+/// to (the owning mod was correctly placed on the failing path).
+fn evaluate_blame(cases: &[EvalCase]) -> BlameAccuracy {
+    let (mut tp, mut fp) = (0usize, 0usize);
+    for case in cases {
+        for blame in &case.blame_predictions {
+            let hit = case
+                .attributions
+                .iter()
+                .any(|attr| subjects_match(&blame.frame_class, &attr.subject));
+            if hit {
+                tp += 1;
+            } else {
+                fp += 1;
+            }
+        }
+    }
+    let precision = ratio(tp, tp + fp);
+    BlameAccuracy {
+        predictions: tp + fp,
+        true_positive: tp,
+        false_positive: fp,
+        precision,
+        calibration_support: tp + fp,
+        suggested_severity: suggest_severity(tp, fp).as_str().to_string(),
+    }
+}
+
 /// Ground-truth categories the lab observed across a run (co-occurrence mode).
 #[must_use]
 pub fn observed_from_run(run: &LabRun) -> BTreeSet<FailureCategory> {
@@ -128,6 +213,8 @@ pub struct EvalCase {
     pub predictions: Vec<Prediction>,
     pub observed: BTreeSet<FailureCategory>,
     pub attributions: Vec<FailureAttribution>,
+    /// Frame-to-jar blames the Doctor made for this case (calibrated separately).
+    pub blame_predictions: Vec<BlamePrediction>,
 }
 
 /// Per-category co-occurrence accuracy (one tp/fp/fn per case).
@@ -213,6 +300,8 @@ pub struct RuleAccuracyReport {
     pub by_finding: Vec<FindingAccuracy>,
     /// All predictive rules combined at finding granularity.
     pub finding_level: FindingLevelAccuracy,
+    /// Calibrated frame-to-jar blame accuracy (crash-blame findings vs ground truth).
+    pub blame: BlameAccuracy,
     pub macro_precision_category: f64,
     pub macro_recall_category: f64,
     pub macro_precision_rule: f64,
@@ -333,7 +422,11 @@ fn rules_per_category(
 fn evaluate_by_rule(
     cases: &[EvalCase],
     min_severity: Severity,
-) -> (Vec<RuleAccuracy>, Vec<FindingAccuracy>, FindingLevelAccuracy) {
+) -> (
+    Vec<RuleAccuracy>,
+    Vec<FindingAccuracy>,
+    FindingLevelAccuracy,
+) {
     let has_attributions = cases.iter().any(|c| !c.attributions.is_empty());
     if !has_attributions {
         return (
@@ -413,7 +506,11 @@ fn evaluate_by_rule(
             }
         }
 
-        for pred in case.predictions.iter().filter(|p| !qualifies(p, min_severity)) {
+        for pred in case
+            .predictions
+            .iter()
+            .filter(|p| !qualifies(p, min_severity))
+        {
             by_finding.push(FindingAccuracy {
                 finding_id: pred.finding_id.clone(),
                 rule_id: pred.rule_id.clone(),
@@ -511,12 +608,15 @@ fn macro_avg(values: &[f64]) -> f64 {
 pub fn evaluate(cases: &[EvalCase], min_severity: Severity) -> RuleAccuracyReport {
     let by_category = evaluate_by_category(cases, min_severity);
     let (by_rule, by_finding, finding_level) = evaluate_by_rule(cases, min_severity);
+    let blame = evaluate_blame(cases);
 
     RuleAccuracyReport {
         schema: RULE_ACCURACY_SCHEMA.to_string(),
         min_severity: min_severity.as_str().to_string(),
         cases: cases.len(),
-        macro_precision_category: macro_avg(&by_category.iter().map(|c| c.precision).collect::<Vec<_>>()),
+        macro_precision_category: macro_avg(
+            &by_category.iter().map(|c| c.precision).collect::<Vec<_>>(),
+        ),
         macro_recall_category: macro_avg(&by_category.iter().map(|c| c.recall).collect::<Vec<_>>()),
         macro_precision_rule: macro_avg(&by_rule.iter().map(|r| r.precision).collect::<Vec<_>>()),
         macro_recall_rule: macro_avg(&by_rule.iter().map(|r| r.recall).collect::<Vec<_>>()),
@@ -524,6 +624,7 @@ pub fn evaluate(cases: &[EvalCase], min_severity: Severity) -> RuleAccuracyRepor
         by_rule,
         by_finding,
         finding_level,
+        blame,
     }
 }
 
@@ -559,6 +660,7 @@ pub fn case_from_files(report_path: &Path, run_path: &Path) -> Result<EvalCase, 
         predictions: predictions_from_report(&report),
         observed: observed_from_run(&run),
         attributions: attributions_from_run(&run),
+        blame_predictions: blame_predictions_from_findings(&report.findings),
     })
 }
 
@@ -627,10 +729,34 @@ mod tests {
             predictions: preds,
             observed: observed.iter().copied().collect(),
             attributions: attrs,
+            blame_predictions: Vec::new(),
         }
     }
 
-    fn pred(rule: &str, id: &str, subject: &str, cat: FailureCategory, sev: Severity) -> Prediction {
+    fn blame_case(blames: Vec<BlamePrediction>, attrs: Vec<FailureAttribution>) -> EvalCase {
+        EvalCase {
+            predictions: Vec::new(),
+            observed: BTreeSet::new(),
+            attributions: attrs,
+            blame_predictions: blames,
+        }
+    }
+
+    fn blame(mod_id: &str, frame_class: &str) -> BlamePrediction {
+        BlamePrediction {
+            mod_id: mod_id.to_string(),
+            frame_class: frame_class.to_string(),
+            severity: Severity::Warn,
+        }
+    }
+
+    fn pred(
+        rule: &str,
+        id: &str,
+        subject: &str,
+        cat: FailureCategory,
+        sev: Severity,
+    ) -> Prediction {
         Prediction {
             rule_id: rule.to_string(),
             finding_id: id.to_string(),
@@ -666,7 +792,12 @@ mod tests {
                 Severity::Warn,
                 &["mixin", "overlap"],
             ),
-            finding("security-api-risk", "security-api-risk:x", Severity::Warn, &["security"]),
+            finding(
+                "security-api-risk",
+                "security-api-risk:x",
+                Severity::Warn,
+                &["security"],
+            ),
         ];
         let preds = predictions_from_findings(&findings);
         assert_eq!(preds.len(), 1);
@@ -678,11 +809,41 @@ mod tests {
     fn category_cooccurrence_collapses_multiplicity() {
         let cases = vec![case(
             vec![
-                pred("mixin-risk", "a", "ClassA", FailureCategory::MixinApplyError, Severity::Warn),
-                pred("mixin-risk", "b", "ClassB", FailureCategory::MixinApplyError, Severity::Warn),
-                pred("mixin-risk", "c", "ClassC", FailureCategory::MixinApplyError, Severity::Warn),
-                pred("mixin-risk", "d", "ClassD", FailureCategory::MixinApplyError, Severity::Warn),
-                pred("mixin-risk", "e", "WorldRenderer", FailureCategory::MixinApplyError, Severity::Warn),
+                pred(
+                    "mixin-risk",
+                    "a",
+                    "ClassA",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
+                pred(
+                    "mixin-risk",
+                    "b",
+                    "ClassB",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
+                pred(
+                    "mixin-risk",
+                    "c",
+                    "ClassC",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
+                pred(
+                    "mixin-risk",
+                    "d",
+                    "ClassD",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
+                pred(
+                    "mixin-risk",
+                    "e",
+                    "WorldRenderer",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
             ],
             &[FailureCategory::MixinApplyError],
             vec![attr(
@@ -728,8 +889,20 @@ mod tests {
     fn finding_level_counts_each_prediction() {
         let cases = vec![case(
             vec![
-                pred("mixin-risk", "1", "Foo", FailureCategory::MixinApplyError, Severity::Warn),
-                pred("mixin-risk", "2", "Bar", FailureCategory::MixinApplyError, Severity::Warn),
+                pred(
+                    "mixin-risk",
+                    "1",
+                    "Foo",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
+                pred(
+                    "mixin-risk",
+                    "2",
+                    "Bar",
+                    FailureCategory::MixinApplyError,
+                    Severity::Warn,
+                ),
             ],
             &[FailureCategory::MixinApplyError],
             vec![attr(FailureCategory::MixinApplyError, "Foo")],
@@ -747,7 +920,10 @@ mod tests {
             vec![attr(FailureCategory::ModLoadingFailure, "broken-mod")],
         )];
         let report = evaluate(&cases, Severity::Warn);
-        let mixin = report.by_category.iter().find(|c| c.category == "mixin-apply-error");
+        let mixin = report
+            .by_category
+            .iter()
+            .find(|c| c.category == "mixin-apply-error");
         assert!(mixin.is_none());
         assert_eq!(report.finding_level.false_negative, 0);
     }
@@ -769,6 +945,47 @@ mod tests {
         assert_eq!(warned.finding_level.true_positive, 0);
         let noted = evaluate(&cases, Severity::Note);
         assert_eq!(noted.finding_level.true_positive, 1);
+    }
+
+    #[test]
+    fn blame_extracted_from_crash_blame_finding_tags() {
+        let f = finding(
+            "log-signal",
+            "crash-blame:create",
+            Severity::Warn,
+            &[
+                "crash-blame",
+                "frame-to-jar",
+                "frame-class:com.simibubi.create.Foo",
+            ],
+        );
+        let blames = blame_predictions_from_findings(&[f]);
+        assert_eq!(blames.len(), 1);
+        assert_eq!(blames[0].frame_class, "com.simibubi.create.Foo");
+    }
+
+    #[test]
+    fn blame_precision_scores_against_attributions() {
+        // One correct blame (frame matches an attributed class), one wrong.
+        let cases = vec![
+            blame_case(
+                vec![blame("create", "com.simibubi.create.Foo")],
+                vec![attr(
+                    FailureCategory::MixinApplyError,
+                    "com.simibubi.create.Foo",
+                )],
+            ),
+            blame_case(
+                vec![blame("othermod", "com.other.Bar")],
+                vec![attr(FailureCategory::MixinApplyError, "com.unrelated.Baz")],
+            ),
+        ];
+        let report = evaluate(&cases, Severity::Note);
+        assert_eq!(report.blame.true_positive, 1);
+        assert_eq!(report.blame.false_positive, 1);
+        assert!((report.blame.precision - 0.5).abs() < 1e-9);
+        // Below MIN_SUPPORT → stays Note even at 0.5 precision.
+        assert_eq!(report.blame.suggested_severity, "note");
     }
 
     #[test]

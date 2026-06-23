@@ -5,34 +5,41 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use intermed_doctor_core::evidence::{EvidenceEdge, Finding, FixCandidate};
-use intermed_doctor_core::facts::Fact;
 use intermed_doctor_core::RuleCtx;
+use intermed_doctor_core::evidence::{EvidenceEdge, Finding, FixCandidate};
+use intermed_doctor_core::facts::{Fact, FactId};
 
-use crate::expr::{eval_bool, resolve_term, term_value, ExprCtx};
-use crate::join_plan::{index_facts_by_term, plan_equijoins, BROADCAST_SIDE_MAX};
-use crate::model::{RelatedEvidenceSpec, RuleKind, RulePack, RuleSpec};
+use crate::expr::{ExprCtx, eval_bool, resolve_term, term_value};
+use crate::join_plan::{BROADCAST_SIDE_MAX, index_facts_by_term, plan_equijoins};
+use crate::model::{RuleKind, RulePack, RuleSpec};
 use crate::template::{
-    default_confidence, parse_category, parse_severity, render_finding_fields, VarMap,
+    VarMap, default_confidence, parse_category, parse_severity, render_finding_fields,
 };
 
-/// Evaluate every rule in `pack` and return findings.
-pub fn evaluate_pack(pack: &RulePack, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+/// Evaluate every rule in `pack` and return findings. A single [`EvidenceCache`] is
+/// shared across all rules, so rules with the same related-evidence spec build the
+/// candidate index once for the whole pack.
+pub fn evaluate_pack<'a>(pack: &RulePack, ctx: &RuleCtx<'a>) -> Vec<Finding> {
     let settings = settings_literals(ctx.settings);
+    let cache = EvidenceCache::new();
     let mut out = Vec::new();
     for spec in &pack.rules {
         match spec.kind {
-            RuleKind::GroupDistinct => evaluate_group_distinct(ctx, spec, &settings, &mut out),
-            RuleKind::FactFinding => evaluate_fact_finding(ctx, spec, &settings, &mut out),
-            RuleKind::Join => evaluate_join(ctx, spec, &settings, &mut out),
-            RuleKind::Aggregate => evaluate_aggregate(ctx, spec, &settings, &mut out),
-            RuleKind::Correlation => evaluate_correlation(ctx, spec, &settings, &mut out),
+            RuleKind::GroupDistinct => {
+                evaluate_group_distinct(ctx, spec, &settings, &mut out, &cache)
+            }
+            RuleKind::FactFinding => evaluate_fact_finding(ctx, spec, &settings, &mut out, &cache),
+            RuleKind::Join => evaluate_join(ctx, spec, &settings, &mut out, &cache),
+            RuleKind::Aggregate => evaluate_aggregate(ctx, spec, &settings, &mut out, &cache),
+            RuleKind::Correlation => evaluate_correlation(ctx, spec, &settings, &mut out, &cache),
         }
     }
     out
 }
 
-fn settings_literals(settings: &intermed_doctor_core::DiagnosisSettings) -> BTreeMap<String, String> {
+fn settings_literals(
+    settings: &intermed_doctor_core::DiagnosisSettings,
+) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     map.insert(
         "settings.sbom.well_identified_trust".to_string(),
@@ -45,11 +52,12 @@ fn settings_literals(settings: &intermed_doctor_core::DiagnosisSettings) -> BTre
     map
 }
 
-fn evaluate_group_distinct(
-    ctx: &RuleCtx<'_>,
+fn evaluate_group_distinct<'a>(
+    ctx: &RuleCtx<'a>,
     spec: &RuleSpec,
     settings: &BTreeMap<String, String>,
     out: &mut Vec<Finding>,
+    cache: &EvidenceCache<'a>,
 ) {
     let Some(group_by) = &spec.group_by else {
         return;
@@ -57,6 +65,7 @@ fn evaluate_group_distinct(
     let Some(distinct) = &spec.distinct else {
         return;
     };
+    let prepared = prepare_evidence(spec, ctx, settings, cache);
 
     let mut groups: BTreeMap<String, Vec<&Fact>> = BTreeMap::new();
     for fact in matching_facts_v1(ctx, spec) {
@@ -81,18 +90,26 @@ fn evaluate_group_distinct(
             "values".to_string(),
             distinct_values.into_iter().collect::<Vec<_>>().join(", "),
         );
-        out.push(build_finding(spec, &vars, facts, settings, ctx));
+        out.push(build_finding(
+            spec,
+            &vars,
+            facts,
+            settings,
+            prepared.as_ref(),
+        ));
     }
 }
 
-fn evaluate_fact_finding(
-    ctx: &RuleCtx<'_>,
+fn evaluate_fact_finding<'a>(
+    ctx: &RuleCtx<'a>,
     spec: &RuleSpec,
     settings: &BTreeMap<String, String>,
     out: &mut Vec<Finding>,
+    cache: &EvidenceCache<'a>,
 ) {
     let alias = spec.alias.as_deref().unwrap_or("f");
     let where_expr = spec.r#where.as_deref();
+    let prepared = prepare_evidence(spec, ctx, settings, cache);
     for fact in matching_facts_v1(ctx, spec) {
         // Honor a full `where` expression (single binding) in addition to the v1
         // `where_all`/`where_not` maps, so external rulepacks behave as authored.
@@ -108,15 +125,22 @@ fn evaluate_fact_finding(
             }
         }
         let vars = vars_from_fact(fact);
-        out.push(build_finding(spec, &vars, vec![fact], settings, ctx));
+        out.push(build_finding(
+            spec,
+            &vars,
+            vec![fact],
+            settings,
+            prepared.as_ref(),
+        ));
     }
 }
 
-fn evaluate_join(
-    ctx: &RuleCtx<'_>,
+fn evaluate_join<'a>(
+    ctx: &RuleCtx<'a>,
     spec: &RuleSpec,
     settings: &BTreeMap<String, String>,
     out: &mut Vec<Finding>,
+    cache: &EvidenceCache<'a>,
 ) {
     let (Some(left), Some(right)) = (&spec.left, &spec.right) else {
         return;
@@ -129,10 +153,12 @@ fn evaluate_join(
     if left_facts.is_empty() || right_facts.is_empty() {
         return;
     }
+    let prepared = prepare_evidence(spec, ctx, settings, cache);
 
     let equijoins = plan_equijoins(on, &left.alias, &right.alias);
     if let Some(key) = equijoins.first() {
-        let right_index = index_facts_by_term(&right_facts, &right.alias, &key.right_term, settings);
+        let right_index =
+            index_facts_by_term(&right_facts, &right.alias, &key.right_term, settings);
         for lf in &left_facts {
             let left_only = single_binding(&left.alias, lf);
             let left_ctx = ExprCtx {
@@ -160,7 +186,13 @@ fn evaluate_join(
                 }
                 let vars = vars_from_bindings(&bindings);
                 let facts = vec![*lf, *rf];
-                out.push(build_finding(spec, &vars, facts, settings, ctx));
+                out.push(build_finding(
+                    spec,
+                    &vars,
+                    facts,
+                    settings,
+                    prepared.as_ref(),
+                ));
             }
         }
         return;
@@ -186,7 +218,13 @@ fn evaluate_join(
                 }
                 let vars = vars_from_bindings(&bindings);
                 let facts = vec![*lf, *rf];
-                out.push(build_finding(spec, &vars, facts, settings, ctx));
+                out.push(build_finding(
+                    spec,
+                    &vars,
+                    facts,
+                    settings,
+                    prepared.as_ref(),
+                ));
             }
         }
         return;
@@ -207,16 +245,23 @@ fn evaluate_join(
             }
             let vars = vars_from_bindings(&bindings);
             let facts = vec![*lf, *rf];
-            out.push(build_finding(spec, &vars, facts, settings, ctx));
+            out.push(build_finding(
+                spec,
+                &vars,
+                facts,
+                settings,
+                prepared.as_ref(),
+            ));
         }
     }
 }
 
-fn evaluate_aggregate(
-    ctx: &RuleCtx<'_>,
+fn evaluate_aggregate<'a>(
+    ctx: &RuleCtx<'a>,
     spec: &RuleSpec,
     settings: &BTreeMap<String, String>,
     out: &mut Vec<Finding>,
+    cache: &EvidenceCache<'a>,
 ) {
     let Some(input) = &spec.input else {
         return;
@@ -229,6 +274,7 @@ fn evaluate_aggregate(
     if group_fields.is_empty() {
         return;
     }
+    let prepared = prepare_evidence(spec, ctx, settings, cache);
 
     let mut groups: BTreeMap<Vec<String>, Vec<&Fact>> = BTreeMap::new();
     for fact in ctx.store.by_kind(&input.kind) {
@@ -293,21 +339,29 @@ fn evaluate_aggregate(
         if !eval_bool(having, &expr_ctx) {
             continue;
         }
-        out.push(build_finding(spec, &vars, facts, settings, ctx));
+        out.push(build_finding(
+            spec,
+            &vars,
+            facts,
+            settings,
+            prepared.as_ref(),
+        ));
     }
 }
 
-fn evaluate_correlation(
-    ctx: &RuleCtx<'_>,
+fn evaluate_correlation<'a>(
+    ctx: &RuleCtx<'a>,
     spec: &RuleSpec,
     settings: &BTreeMap<String, String>,
     out: &mut Vec<Finding>,
+    cache: &EvidenceCache<'a>,
 ) {
     let Some(anchor_src) = &spec.anchor else {
         return;
     };
     let match_on = spec.match_on.as_deref().unwrap_or("TRUE");
     let filter = spec.r#where.as_deref().unwrap_or("TRUE");
+    let prepared = prepare_evidence(spec, ctx, settings, cache);
 
     let equijoins = plan_equijoins(match_on, &anchor_src.alias, "related");
     let related_index = if let Some(key) = equijoins.first() {
@@ -336,7 +390,7 @@ fn evaluate_correlation(
         }
 
         let mut related: Vec<&Fact> = Vec::new();
-        if let Some((ref left_term, ref buckets)) = &related_index {
+        if let Some((left_term, buckets)) = &related_index {
             if let Some(join_val) = resolve_term(left_term, &expr_ctx) {
                 if let Some(candidates) = buckets.get(&join_val) {
                     for candidate in candidates {
@@ -375,10 +429,7 @@ fn evaluate_correlation(
 
         let mut vars = vars_from_bindings(&bindings);
         vars.insert("subject".to_string(), anchor.subject.clone());
-        let labels: BTreeSet<String> = related
-            .iter()
-            .map(|f| f.kind.replace('_', " "))
-            .collect();
+        let labels: BTreeSet<String> = related.iter().map(|f| f.kind.replace('_', " ")).collect();
         vars.insert(
             "capabilities".to_string(),
             labels.into_iter().collect::<Vec<_>>().join(", "),
@@ -394,7 +445,13 @@ fn evaluate_correlation(
 
         let mut facts = vec![anchor];
         facts.extend(related);
-        out.push(build_finding(spec, &vars, facts, settings, ctx));
+        out.push(build_finding(
+            spec,
+            &vars,
+            facts,
+            settings,
+            prepared.as_ref(),
+        ));
     }
 }
 
@@ -402,15 +459,152 @@ fn matching_facts_v1<'a>(
     ctx: &'a RuleCtx<'_>,
     spec: &'a RuleSpec,
 ) -> impl Iterator<Item = &'a Fact> + 'a {
-    ctx.store.all().iter().filter(move |fact| {
-        (spec.input_kinds.is_empty() || spec.input_kinds.iter().any(|k| k == &fact.kind))
-            && spec.where_all.iter().all(|(term, expected)| {
-                term_value(fact, term).as_deref() == Some(expected.as_str())
-            })
-            && spec.where_not.iter().all(|(term, rejected)| {
-                term_value(fact, term).as_deref() != Some(rejected.as_str())
-            })
-    })
+    ctx.store
+        .all()
+        .iter()
+        .filter(move |fact| matches_where_v1(fact, spec))
+}
+
+/// Build the findings for a `FactFinding` rule from a set of *already-matched* facts
+/// (e.g. ids returned by the IR→Datalog/Souffle or IR→DuckDB backend). Emission reuses
+/// the interpreter's `build_finding`, so a backend only does the *matching* — the
+/// finding content is identical regardless of which backend matched, by construction.
+pub fn fact_finding_findings<'a>(
+    spec: &RuleSpec,
+    matched: &[&Fact],
+    ctx: &RuleCtx<'a>,
+    cache: &EvidenceCache<'a>,
+) -> Vec<Finding> {
+    let settings = settings_literals(ctx.settings);
+    // The related-evidence index comes from the pack-shared cache (built once per
+    // evidence spec), so backends that emit rule-by-rule still share it across rules.
+    let prepared = prepare_evidence(spec, ctx, &settings, cache);
+    matched
+        .iter()
+        .map(|fact| {
+            let vars = vars_from_fact(fact);
+            build_finding(spec, &vars, vec![*fact], &settings, prepared.as_ref())
+        })
+        .collect()
+}
+
+/// Build the findings for a `Join` rule from engine-matched `(left_fact_id,
+/// right_fact_id)` pairs. Emission reuses `vars_from_bindings` + `build_finding`, so it
+/// is byte-identical to the interpreter's join loop given the same matched pairs (the
+/// IR `JoinFilter` matching is proven ≡ interpreter via the Soufflé/DuckDB backends).
+pub fn join_findings<'a>(
+    spec: &RuleSpec,
+    matched: &[(u64, u64)],
+    ctx: &RuleCtx<'a>,
+    cache: &EvidenceCache<'a>,
+) -> Vec<Finding> {
+    let (Some(left), Some(right)) = (&spec.left, &spec.right) else {
+        return Vec::new();
+    };
+    let settings = settings_literals(ctx.settings);
+    let prepared = prepare_evidence(spec, ctx, &settings, cache);
+    matched
+        .iter()
+        .filter_map(|(lid, rid)| {
+            let lf = ctx.store.get(FactId(*lid))?;
+            let rf = ctx.store.get(FactId(*rid))?;
+            let mut bindings = BTreeMap::new();
+            bindings.insert(left.alias.clone(), lf);
+            bindings.insert(right.alias.clone(), rf);
+            let vars = vars_from_bindings(&bindings);
+            Some(build_finding(
+                spec,
+                &vars,
+                vec![lf, rf],
+                &settings,
+                prepared.as_ref(),
+            ))
+        })
+        .collect()
+}
+
+/// Build the findings for a `GroupDistinct` rule from the engine-matched group keys
+/// (the subjects whose distinct count met `min_count`). Re-gathers each group's member
+/// facts and distinct values so the `{group}`/`{count}`/`{values}` vars and the evidence
+/// match the interpreter's group loop exactly.
+pub fn group_distinct_findings<'a>(
+    spec: &RuleSpec,
+    matched_groups: &[String],
+    ctx: &RuleCtx<'a>,
+    cache: &EvidenceCache<'a>,
+) -> Vec<Finding> {
+    let (Some(group_by), Some(distinct)) = (&spec.group_by, &spec.distinct) else {
+        return Vec::new();
+    };
+    let settings = settings_literals(ctx.settings);
+    let prepared = prepare_evidence(spec, ctx, &settings, cache);
+    let wanted: std::collections::HashSet<&str> =
+        matched_groups.iter().map(String::as_str).collect();
+
+    // Gather members per matched group (same predicate the engine matched on).
+    let mut groups: BTreeMap<String, Vec<&Fact>> = BTreeMap::new();
+    for fact in ctx.store.all().iter().filter(|f| matches_where_v1(f, spec)) {
+        if let Some(key) = term_value(fact, group_by) {
+            if wanted.contains(key.as_str()) {
+                groups.entry(key).or_default().push(fact);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (key, facts) in groups {
+        let distinct_values: BTreeSet<String> = facts
+            .iter()
+            .filter_map(|f| term_value(f, distinct))
+            .collect();
+        if distinct_values.len() < spec.min_count {
+            continue;
+        }
+        let mut vars = VarMap::new();
+        vars.insert("group".to_string(), key);
+        vars.insert("count".to_string(), distinct_values.len().to_string());
+        vars.insert(
+            "values".to_string(),
+            distinct_values.into_iter().collect::<Vec<_>>().join(", "),
+        );
+        out.push(build_finding(
+            spec,
+            &vars,
+            facts,
+            &settings,
+            prepared.as_ref(),
+        ));
+    }
+    out
+}
+
+/// The v1 `where_all` / `where_not` / `input_kinds` predicate for one fact — the
+/// single source of truth for "does this fact match a `FactFinding` rule's filters"
+/// (the `where`-string refinement is applied separately by the caller).
+pub fn matches_where_v1(fact: &Fact, spec: &RuleSpec) -> bool {
+    (spec.input_kinds.is_empty() || spec.input_kinds.iter().any(|k| k == &fact.kind))
+        && spec
+            .where_all
+            .iter()
+            .all(|(term, expected)| term_value(fact, term).as_deref() == Some(expected.as_str()))
+        && spec
+            .where_not
+            .iter()
+            .all(|(term, rejected)| term_value(fact, term).as_deref() != Some(rejected.as_str()))
+}
+
+/// Fact ids matched by a rule's v1 predicate — exposed for the columnar IR
+/// migration's shadow comparison (proves the new engine selects the same facts).
+pub fn matching_fact_ids(
+    spec: &RuleSpec,
+    store: &intermed_doctor_core::facts::FactStore,
+) -> Vec<intermed_doctor_core::facts::FactId> {
+    store
+        .all()
+        .iter()
+        .filter(|fact| matches_where_v1(fact, spec))
+        .map(|f| f.id)
+        .collect()
 }
 
 fn vars_from_fact(fact: &Fact) -> VarMap {
@@ -472,18 +666,16 @@ fn build_finding(
     vars: &VarMap,
     facts: Vec<&Fact>,
     settings: &BTreeMap<String, String>,
-    ctx: &RuleCtx<'_>,
+    prepared: Option<&PreparedEvidence<'_>>,
 ) -> Finding {
-    let severity = parse_severity(&spec.finding.severity).unwrap_or(intermed_doctor_core::evidence::Severity::Warn);
-    let category = parse_category(&spec.finding.category).unwrap_or(intermed_doctor_core::evidence::Category::Metadata);
+    let severity = parse_severity(&spec.finding.severity)
+        .unwrap_or(intermed_doctor_core::evidence::Severity::Warn);
+    let category = parse_category(&spec.finding.category)
+        .unwrap_or(intermed_doctor_core::evidence::Category::Metadata);
     let mut vars = vars.clone();
     enrich_derived_vars(&mut vars);
     let (id, title, explanation, fix, tags) = render_finding_fields(&spec.finding, &vars);
-    let rule_id = spec
-        .finding
-        .rule_id
-        .as_deref()
-        .unwrap_or(spec.id.as_str());
+    let rule_id = spec.finding.rule_id.as_deref().unwrap_or(spec.id.as_str());
     let mut b = Finding::builder(rule_id, id)
         .severity(severity)
         .category(category)
@@ -513,59 +705,112 @@ fn build_finding(
             }
         }
     }
-    if let Some(related) = &spec.evidence {
-        b = apply_related_evidence(b, related, facts.first().copied(), ctx, settings);
+    if let Some(prep) = prepared {
+        b = apply_related_evidence(b, prep, facts.first().copied(), settings);
     }
     b.build()
 }
 
+/// The candidate index for a related-evidence join — a function of the evidence
+/// *spec* `(kind, on)`, not the rule. Many rules declare the **identical** evidence
+/// (e.g. all 7 `resource-conflict-*` rules join `resource_writer` on
+/// `primary.subject = related.attr:path`), so it is built **once per spec** and shared
+/// across the whole pack via [`EvidenceCache`]. Building it per rule (let alone per
+/// finding) re-scanned tens of thousands of facts needlessly.
+struct SharedEvidence<'a> {
+    /// Equijoin path: `(primary key term, related facts indexed by their join term)`.
+    keyed: Option<(String, std::collections::HashMap<String, Vec<&'a Fact>>)>,
+    /// Non-equijoin fallback: the candidate facts to scan per finding.
+    candidates: Vec<&'a Fact>,
+}
+
+/// Pack-scoped cache of [`SharedEvidence`] keyed by the evidence spec `(kind, on)`, so
+/// rules with the same evidence build the index once. Created once per pack evaluation.
+pub struct EvidenceCache<'a> {
+    inner: std::cell::RefCell<
+        std::collections::HashMap<(String, String), std::rc::Rc<SharedEvidence<'a>>>,
+    >,
+}
+
+impl<'a> EvidenceCache<'a> {
+    pub fn new() -> Self {
+        EvidenceCache {
+            inner: std::cell::RefCell::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The shared index for `related`, building and caching it on first use.
+    fn get_or_build(
+        &self,
+        related: &crate::model::RelatedEvidenceSpec,
+        ctx: &RuleCtx<'a>,
+        settings: &BTreeMap<String, String>,
+    ) -> std::rc::Rc<SharedEvidence<'a>> {
+        let key = (related.kind.clone(), related.on.clone());
+        if let Some(shared) = self.inner.borrow().get(&key) {
+            return shared.clone();
+        }
+        // `all().filter` (not `by_kind`) so the borrowed facts carry the store's `'a`
+        // lifetime cleanly. Runs at most once per distinct evidence spec per pack.
+        let candidates: Vec<&'a Fact> = ctx
+            .store
+            .all()
+            .iter()
+            .filter(|f| f.kind == related.kind)
+            .collect();
+        let equijoins = plan_equijoins(&related.on, "primary", "related");
+        let keyed = equijoins.first().map(|k| {
+            let index = index_facts_by_term(&candidates, "related", &k.right_term, settings);
+            (k.left_term.clone(), index)
+        });
+        let shared = std::rc::Rc::new(SharedEvidence { keyed, candidates });
+        self.inner.borrow_mut().insert(key, shared.clone());
+        shared
+    }
+}
+
+impl Default for EvidenceCache<'_> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The related-evidence join for one rule: the per-rule relation/weight/on plus the
+/// shared candidate index from [`EvidenceCache`]. [`apply_related_evidence`] probes it
+/// per finding.
+struct PreparedEvidence<'a> {
+    relation: intermed_evidence::Relation,
+    weight: f32,
+    on: String,
+    shared: std::rc::Rc<SharedEvidence<'a>>,
+}
+
+/// Prepare a rule's evidence join from the pack cache (`None` when no evidence).
+fn prepare_evidence<'a>(
+    spec: &RuleSpec,
+    ctx: &RuleCtx<'a>,
+    settings: &BTreeMap<String, String>,
+    cache: &EvidenceCache<'a>,
+) -> Option<PreparedEvidence<'a>> {
+    let related = spec.evidence.as_ref()?;
+    Some(PreparedEvidence {
+        relation: parse_relation(&related.relation),
+        weight: related.weight,
+        on: related.on.clone(),
+        shared: cache.get_or_build(related, ctx, settings),
+    })
+}
+
 fn apply_related_evidence(
     mut builder: intermed_doctor_core::evidence::FindingBuilder,
-    spec: &RelatedEvidenceSpec,
+    prepared: &PreparedEvidence<'_>,
     primary: Option<&Fact>,
-    ctx: &RuleCtx<'_>,
     settings: &BTreeMap<String, String>,
 ) -> intermed_doctor_core::evidence::FindingBuilder {
     let Some(primary) = primary else {
         return builder;
     };
-    let relation = parse_relation(&spec.relation);
-    let candidates: Vec<&Fact> = ctx.store.by_kind(&spec.kind).collect();
-    let equijoins = plan_equijoins(&spec.on, "primary", "related");
-
-    if let Some(key) = equijoins.first() {
-        let primary_bindings = single_binding("primary", primary);
-        let primary_ctx = ExprCtx {
-            bindings: &primary_bindings,
-            settings,
-            vars: None,
-        };
-        if let Some(join_val) = resolve_term(&key.left_term, &primary_ctx) {
-            let index = index_facts_by_term(&candidates, "related", &key.right_term, settings);
-            if let Some(matches) = index.get(&join_val) {
-                for candidate in matches {
-                    let mut bindings = BTreeMap::new();
-                    bindings.insert("primary".to_string(), primary);
-                    bindings.insert("related".to_string(), candidate);
-                    let expr_ctx = ExprCtx {
-                        bindings: &bindings,
-                        settings,
-                        vars: None,
-                    };
-                    if eval_bool(&spec.on, &expr_ctx) {
-                        builder = builder.evidence(intermed_doctor_core::evidence::EvidenceEdge::new(
-                            candidate.id,
-                            relation,
-                            spec.weight,
-                        ));
-                    }
-                }
-                return builder;
-            }
-        }
-    }
-
-    for candidate in candidates {
+    let add = |builder: intermed_doctor_core::evidence::FindingBuilder, candidate: &Fact| {
         let mut bindings = BTreeMap::new();
         bindings.insert("primary".to_string(), primary);
         bindings.insert("related".to_string(), candidate);
@@ -574,13 +819,36 @@ fn apply_related_evidence(
             settings,
             vars: None,
         };
-        if eval_bool(&spec.on, &expr_ctx) {
-            builder = builder.evidence(intermed_doctor_core::evidence::EvidenceEdge::new(
+        if eval_bool(&prepared.on, &expr_ctx) {
+            builder.evidence(intermed_doctor_core::evidence::EvidenceEdge::new(
                 candidate.id,
-                relation,
-                spec.weight,
-            ));
+                prepared.relation,
+                prepared.weight,
+            ))
+        } else {
+            builder
         }
+    };
+
+    if let Some((left_term, index)) = &prepared.shared.keyed {
+        let primary_bindings = single_binding("primary", primary);
+        let primary_ctx = ExprCtx {
+            bindings: &primary_bindings,
+            settings,
+            vars: None,
+        };
+        if let Some(join_val) = resolve_term(left_term, &primary_ctx) {
+            if let Some(matches) = index.get(&join_val) {
+                for candidate in matches {
+                    builder = add(builder, candidate);
+                }
+            }
+        }
+        return builder;
+    }
+
+    for candidate in &prepared.shared.candidates {
+        builder = add(builder, candidate);
     }
     builder
 }

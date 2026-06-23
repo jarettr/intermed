@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use creeper_semver_pubgrub::SmallVersion;
-use intermed_doctor_core::facts::{kind, FactId, FactStore};
+use intermed_doctor_core::facts::{FactId, FactStore, kind};
 use serde::{Deserialize, Serialize};
 
 use crate::ranges::ModRange;
@@ -177,10 +177,7 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
             to: dep_id,
             range: dep.attr("range").unwrap_or("*").to_string(),
             mandatory: dep.attr_bool("mandatory").unwrap_or(true),
-            relation: dep
-                .attr("relation")
-                .unwrap_or("depends")
-                .to_string(),
+            relation: dep.attr("relation").unwrap_or("depends").to_string(),
             fact_id: dep.id,
         });
     }

@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use thiserror::Error;
 
-use intermed_doctor_core::facts::{kind, SourceRef};
+use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, ResourceSettings, ScanSettings,
     Target, TargetKind,
 };
 
 use crate::model::ResourceLevel;
-use crate::scan::{self, JarAstScan, EXTRACTOR};
+use crate::scan::{self, EXTRACTOR, JarAstScan};
 use crate::semantic::diff;
 use crate::semantic::refs::{ResourceAstRecord, ResourceGraph};
 
@@ -71,7 +71,16 @@ impl Collector for ResourceAstCollector {
 
         match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan, settings, level) {
             Ok(scan) => {
-                let emitted = emit(ctx, scan, settings);
+                // Opt-in vanilla resource index: scan the Minecraft jar
+                // (`--minecraft-jar`, shared with the mixin layer) so `minecraft:`
+                // references resolve and tags expand against real vanilla resources.
+                let vanilla = ctx
+                    .settings
+                    .minecraft_jar
+                    .as_deref()
+                    .map(|jar| scan_vanilla_records(jar, ctx.jar_cache, settings, level))
+                    .unwrap_or_default();
+                let emitted = emit(ctx, scan, &vanilla, settings);
                 CollectorOutcome::active(emitted.0, emitted.1)
             }
             Err(e) => CollectorOutcome::failed(e.to_string()),
@@ -79,13 +88,57 @@ impl Collector for ResourceAstCollector {
     }
 }
 
+/// Scan the Minecraft jar's own resources, attributed to the `minecraft` writer,
+/// for use as a vanilla index. Best-effort: any read error yields an empty index
+/// (the feature is opt-in and never blocks a run).
+fn scan_vanilla_records(
+    jar: &Path,
+    cache: Option<&JarCache>,
+    settings: ResourceSettings,
+    level: ResourceLevel,
+) -> Vec<ResourceAstRecord> {
+    if !jar.is_file() {
+        return Vec::new();
+    }
+    let version = scan::cache_version(level);
+    let max_bytes = settings.max_json_bytes;
+    let result = match cache {
+        Some(c) => c.get_or_scan(EXTRACTOR, &version, jar, || {
+            scan::scan_jar(jar, level, max_bytes)
+        }),
+        None => scan::scan_jar(jar, level, max_bytes),
+    };
+    let archive = file_name_of(jar);
+    match result {
+        JarAstScan::Ok(partial) => partial
+            .asts
+            .into_iter()
+            .map(|ast| ResourceAstRecord {
+                archive: archive.clone(),
+                writer: "minecraft".to_string(),
+                ast,
+            })
+            .collect(),
+        JarAstScan::Err(_) => Vec::new(),
+    }
+}
+
 /// Build graph + diffs from the scan and lower everything into facts. Returns
 /// `(facts_emitted, human_summary)`.
-fn emit(ctx: &mut CollectCtx<'_>, scan: ResourceAstScan, settings: ResourceSettings) -> (usize, String) {
+fn emit(
+    ctx: &mut CollectCtx<'_>,
+    scan: ResourceAstScan,
+    vanilla: &[ResourceAstRecord],
+    settings: ResourceSettings,
+) -> (usize, String) {
+    // The graph indexes pack resources *and* the vanilla index (definitions + tags
+    // + `minecraft` ownership); diffs are computed over pack records only, so
+    // vanilla is a resolution baseline, never a competing writer.
     let mut graph = ResourceGraph::build(&scan.records);
     for (ns, writer) in &scan.extra_owners {
         graph.add_owner(ns.clone(), writer.clone());
     }
+    graph.add_vanilla_index(vanilla);
     let diffs = diff::compute(&scan.records);
 
     let mut emitted = crate::semantic::facts::emit(

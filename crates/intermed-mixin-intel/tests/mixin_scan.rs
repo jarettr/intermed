@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use intermed_mixin_intel::fixtures;
-use intermed_mixin_intel::{scan_mods_dir, MixinOperation};
+use intermed_mixin_intel::{MixinOperation, scan_mods_dir};
 use zip::write::SimpleFileOptions;
 
 #[test]
@@ -107,10 +107,11 @@ fn scan_picks_up_client_and_server_config_entries() {
 
     let scan = scan_mods_dir(&mods).unwrap();
     assert_eq!(scan.classes.len(), 2);
-    assert!(scan
-        .classes
-        .iter()
-        .any(|c| c.operations.contains(&MixinOperation::ModifyArg)));
+    assert!(
+        scan.classes
+            .iter()
+            .any(|c| c.operations.contains(&MixinOperation::ModifyArg))
+    );
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -178,10 +179,11 @@ fn head_and_return_on_same_method_are_disjoint_sites() {
         !scan.overlaps[0].method_conflict,
         "HEAD and RETURN must not be treated as the same injection site"
     );
-    assert!(scan
-        .conflict_edges
-        .iter()
-        .all(|e| e.edge_type != intermed_mixin_intel::ConflictEdgeType::SameInjectionPoint));
+    assert!(
+        scan.conflict_edges
+            .iter()
+            .all(|e| e.edge_type != intermed_mixin_intel::ConflictEdgeType::SameInjectionPoint)
+    );
 
     std::fs::remove_dir_all(root).ok();
 }

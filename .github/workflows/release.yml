@@ -19,10 +19,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x86_64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64 }
-          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64 }
-          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64 }
+          # Default (pure-Rust) binaries — static on Linux, the columnar engine is always available.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x86_64, features: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64, features: "" }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64, features: "" }
+          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64, features: "" }
+          # duckdb-enabled binaries (bundled DuckDB C++; adds `--logic duckdb` + `--db`).
+          # Linux uses glibc here: bundled DuckDB does not link cleanly against static musl.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: linux-x86_64-duckdb, features: "duckdb" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64-duckdb, features: "duckdb" }
+          - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64-duckdb, features: "duckdb" }
+          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64-duckdb, features: "duckdb" }
     steps:
       - uses: actions/checkout@v4
 
@@ -37,7 +44,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p intermed-cli
+        shell: bash
+        run: |
+          flags=""
+          [ -n "${{ matrix.features }}" ] && flags="--features ${{ matrix.features }}"
+          cargo build --release --locked --target ${{ matrix.target }} -p intermed-cli $flags
 
       - name: Package (unix)
         if: runner.os != 'Windows'

@@ -243,3 +243,47 @@ captured logs, and a compatibility matrix as JSON and static HTML.
 candidates live is behind a trait and not built in this release.
 
 See [the command reference](commands.md#lab).
+
+---
+
+## How the analyses connect
+
+Each analysis above emits facts into one shared graph; some findings are only
+visible when facts from *different* analyses line up. Those links are real edges in
+the evidence (`CorrelatesWith`; see [Facts](facts.md#a-findings-evidence)), so
+`--explain` shows both sides. Internally the analyses are organized as lettered
+layers; the cross-layer correlations that currently fire:
+
+| Link | What it concludes |
+|------|-------------------|
+| Mixins × Performance | A hot Spark method is attributed to the specific mixin **site** that owns it, by match quality — not just "this mod is slow". |
+| Mixins × Resources | A mixin that mutates a loader (e.g. the recipe manager) is correlated with a static resource conflict at the same data; a worldgen mixin is flagged alongside a worldgen resource it touches. |
+| Mixins × Logs | A runtime mixin-apply failure in a supplied log upgrades a static apply *hypothesis* to a confirmed finding. |
+| Mixins × Metadata / Security | A mixin's target subsystem yields a behaviour-grounded capability and a security-sensitivity flag (networking, class loading, (de)serialization, save IO). |
+| SBOM × Security | A low-trust (poorly-identified) jar that also references a dangerous capability is a stronger supply-chain concern than either signal alone — see the [Security guide](../guides/security.md#low-provenance-meets-a-dangerous-capability). |
+| Scripts × Resources | A recipe a KubeJS/CraftTweaker script removes is not reported as a resource conflict — the runtime removal suppresses the static collision. |
+| Resources × Dependencies | The namespace-reference graph from resources drives implicit dependencies and the `impact` blast radius — see [Dependencies](../guides/dependencies.md#implicit-dependencies). |
+
+Each link only fires when the inputs are present: the mixin links need
+`--mixin-risk`; the performance link needs `--performance --spark-report`; the log
+link needs a log alongside the mods scan. Without an input, the analysis simply says
+less — it never invents the other side.
+
+### The layers
+
+| Layer | Analysis area |
+|-------|---------------|
+| A / B | Environment detection · mod & plugin metadata |
+| C | Dependencies |
+| D | Logs |
+| E | Resources (VFS) · script dynamics |
+| F | Mixins |
+| G | Security surface |
+| H | SBOM / provenance |
+| I | Performance (Spark) |
+| J | Rule backends (the [query engine](engine.md)) |
+| K | Compatibility Lab |
+| M | Resource AST (data semantics) |
+
+(There is no Layer L; the runtime-preflight layer was removed.) The crate behind
+each layer is listed in [CONTRIBUTING](../../CONTRIBUTING.md#crate-map).

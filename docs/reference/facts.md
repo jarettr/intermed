@@ -39,11 +39,26 @@ lists every kind and its count.
 
 ## A finding's evidence
 
-A finding cites the facts behind it as **evidence edges** — each naming a fact, the
-relation it plays (subject, supporting), and a weight. `--explain <id>` resolves
-those edges back to the facts and prints them with their source. A finding whose
-evidence is derived rather than read from one file says so, rather than printing an
-empty source.
+A finding cites the facts behind it as **evidence edges**. Each edge names a fact, a
+weight, and the **relation** the fact plays:
+
+| Relation | Meaning |
+|----------|---------|
+| `Subject` | The fact is the thing being complained about. |
+| `Supports` | The fact directly backs the finding. |
+| `Mentions` | The fact references another (a name, a path). |
+| `Violates` | The fact contradicts an expectation. |
+| `ConflictsWith` | Two facts conflict with each other. |
+| `CorrelatesWith` | A heuristic link — the edge that ties one layer's fact to another's. |
+
+`--explain <id>` resolves those edges back to the facts and prints them with their
+source. A finding whose evidence is derived rather than read from one file says so,
+rather than printing an empty source.
+
+`CorrelatesWith` is how the analyses connect: a finding from one analysis can cite a
+fact from another — a mixin site that owns a hot Spark method, a low-trust jar that
+also references a dangerous API. See
+[How the analyses connect](analysis.md#how-the-analyses-connect).
 
 See [Reading a report](../guides/reading-a-report.md#explaining-one-finding).
 

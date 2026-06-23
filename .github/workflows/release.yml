@@ -20,16 +20,17 @@ jobs:
       matrix:
         include:
           # Default (pure-Rust) binaries — static on Linux, the columnar engine is always available.
+          # No Intel macOS (x86_64-apple-darwin): the macos-13 Intel runner is being retired
+          # and queues unreliably; Apple Silicon (aarch64) covers modern Macs.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, name: linux-x86_64, features: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64, features: "" }
           - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64, features: "" }
-          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64, features: "" }
           # duckdb-enabled binaries (bundled DuckDB C++; adds `--logic duckdb` + `--db`).
           # Linux uses glibc here: bundled DuckDB does not link cleanly against static musl.
+          # No Windows duckdb build: DuckDB 1.2's vendored fmt does not compile under the
+          # current windows-latest MSVC toolchain (removed stdext::checked_array_iterator).
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: linux-x86_64-duckdb, features: "duckdb" }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, name: windows-x86_64-duckdb, features: "duckdb" }
           - { os: macos-latest, target: aarch64-apple-darwin, name: macos-aarch64-duckdb, features: "duckdb" }
-          - { os: macos-13, target: x86_64-apple-darwin, name: macos-x86_64-duckdb, features: "duckdb" }
     steps:
       - uses: actions/checkout@v4
 

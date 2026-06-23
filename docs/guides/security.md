@@ -42,6 +42,28 @@ uses reflection; an obfuscated jar with a single `ProcessBuilder` reference may 
 worth a closer look. Use it to decide where to spend manual review, and pair it
 with `--explain` to see which classes carry the references.
 
+## Low provenance meets a dangerous capability
+
+The trust score and the dangerous-API surface are weak on their own — most mods are
+unsigned, and large mods legitimately use reflection. They are far more telling
+*together*. InterMed correlates the two: when a jar that could **not** be
+confidently identified (trust below the `well_identified_trust` threshold) also
+statically references a high-risk capability — process spawning, `Unsafe` / native
+class definition, or a script engine — it raises a single
+`low-trust-capability:<jar>` finding (`warn`, security).
+
+The reasoning is explicit in the finding: unknown provenance combined with a
+dangerous capability is a stronger supply-chain signal than either alone. The fix it
+suggests is to establish the jar's provenance (a known platform, a signature or a
+real manifest) before trusting a jar that spawns processes, loads native code, or
+evaluates scripts. `--explain` shows both sides of the link — the SBOM trust fact
+and the capability fact — so you can judge it yourself.
+
+This is one correlation in a wider set; see
+[How the analyses connect](../reference/analysis.md#how-the-analyses-connect).
+
+## Where the numbers come from
+
 For the thresholds and confidence values, see
 [Configuration](../reference/configuration.md#security) and
 [What each analysis examines](../reference/analysis.md#security--sbom).

@@ -92,6 +92,19 @@ prints fix recommendations with code examples.
 
 If the id does not match, `--explain` lists the closest ids it does have.
 
+## Partial and deferred analysis
+
+Not every analysis runs on every command. Opt-in ones — mixins (`--mixin-risk`),
+performance (`--performance --spark-report`) — are listed under `deferred_layers` in
+the JSON report when they did not run, so a clean-looking report is never mistaken
+for a complete one.
+
+A run can also be *partial* for a reason it could not control — a jar it could not
+read, a modpack manifest whose jars are not on disk. When that happens the report
+adds a caveat and is conservative about its verdict rather than presenting an
+incomplete scan as healthy. The fix is usually to point `doctor` at a fully
+materialized target (install the pack first).
+
 ## Exit codes
 
 | Code | Meaning |

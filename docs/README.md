@@ -1,6 +1,6 @@
 # Documentation
 
-InterMed is at `0.1.1-alpha`; the [roadmap](ROADMAP.md) tracks what is planned.
+InterMed is at `0.1.2-alpha`; the [roadmap](ROADMAP.md) tracks what is planned.
 
 The documentation has three layers. Start at the top and go deeper only when you
 need to.
@@ -25,7 +25,9 @@ Task-oriented. Each one walks a single job end to end.
 - [Mixins](guides/mixins.md) — reading mixin risk, overlaps, overwrites, and
   apply checks.
 - [Security and SBOM](guides/security.md) — signatures, the dangerous-API
-  surface, and exporting an SBOM.
+  surface, the low-trust × capability correlation, and exporting an SBOM.
+- [Performance](guides/performance.md) — importing a Spark profile, hot
+  methods/mods, and tying a hot method to the mixin that owns it.
 
 ## Reference
 

@@ -258,7 +258,8 @@ intermed history prune     --db <FILE>   # delete runs older than a retention wi
 
 ## trends
 
-Time-series analytics over persisted runs.
+Time-series analytics over persisted runs. Requires `--db` and the `duckdb`
+feature.
 
 ```
 intermed trends mixin-risk     --db <FILE>   # mixin-category counts per run

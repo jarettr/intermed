@@ -9,7 +9,7 @@ It explains; it does not change anything. A run never edits your pack, downloads
 mods, or starts the game. Output is a report you read in a terminal, or JSON /
 SARIF / HTML for tools and CI.
 
-This is `0.1.1-alpha`. The analysis runs and is tested; commands, flags, and
+This is `0.1.2-alpha`. The analysis runs and is tested; commands, flags, and
 output shapes may still change. The [roadmap](docs/ROADMAP.md) tracks what is
 planned and what is out of scope.
 
@@ -106,7 +106,8 @@ cargo install --path crates/intermed-cli   # installs `intermed` into ~/.cargo/b
   [dependencies](docs/guides/dependencies.md) ·
   [resources & overlays](docs/guides/resources.md) ·
   [mixins](docs/guides/mixins.md) ·
-  [security & SBOM](docs/guides/security.md)
+  [security & SBOM](docs/guides/security.md) ·
+  [performance](docs/guides/performance.md)
 - **Reference** — complete and exhaustive:
   [commands & flags](docs/reference/commands.md) ·
   [output formats](docs/reference/output-formats.md) ·

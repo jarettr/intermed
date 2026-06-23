@@ -60,8 +60,6 @@ finding, down to the jar and the file inside it.
 
 ## Install
 
-### Prebuilt binary (no Rust needed)
-
 Grab the archive for your platform from the
 [releases page](https://github.com/jarettr/intermed/releases), unpack it, and run
 the `intermed` binary inside. Rust compiles a standalone executable, so there is

@@ -8,7 +8,7 @@ and a parser is exactly the kind of code that can be made to misbehave by a
 crafted file.
 
 This policy covers what to report, how, and what to expect back. It is written
-honestly: this is a `0.1.0-alpha` project with a small maintainer base, so the
+honestly: this is a `0.1.2-alpha` project with a small maintainer base, so the
 guarantees below are best-effort, not an SLA.
 
 ## Supported versions

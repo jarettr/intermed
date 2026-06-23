@@ -18,7 +18,7 @@ intermed doctor ./mods
 ```
 
 ```
-InterMed Doctor v0.1.0
+InterMed Doctor v0.1.2-alpha
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 

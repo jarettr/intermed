@@ -60,13 +60,38 @@ finding, down to the jar and the file inside it.
 
 ## Install
 
-```
-cargo build --release
-# the binary is target/release/intermed
+### Prebuilt binary (no Rust needed)
+
+Grab the archive for your platform from the
+[releases page](https://github.com/jarettr/intermed/releases), unpack it, and run
+the `intermed` binary inside. Rust compiles a standalone executable, so there is
+nothing else to install. Each archive also contains the man page and shell
+completions.
+
+```bash
+# Linux — static, runs on any distro
+tar -xzf intermed-*-linux-x86_64.tar.gz
+./intermed-*/intermed doctor ./mods
+
+# macOS — Apple Silicon (...-macos-aarch64) or Intel (...-macos-x86_64)
+tar -xzf intermed-*-macos-*.tar.gz
+xattr -d com.apple.quarantine intermed-*/intermed   # unsigned: clear Gatekeeper
+./intermed-*/intermed doctor ./mods
 ```
 
-Requires a Rust toolchain. The build also writes a man page to
-`docs/man/intermed.1` and shell completions to `docs/completions/`.
+On Windows, unzip `intermed-*-windows-x86_64.zip` and run `intermed.exe` from
+PowerShell: `.\intermed.exe doctor C:\path\to\mods`.
+
+### From source
+
+Needs a Rust toolchain.
+
+```bash
+git clone https://github.com/jarettr/intermed
+cd intermed
+cargo install --path crates/intermed-cli   # installs `intermed` into ~/.cargo/bin
+# or just: cargo build --release  →  target/release/intermed
+```
 
 ## Where to go next
 

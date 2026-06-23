@@ -2,15 +2,24 @@
 
 ## Install
 
+The quickest path needs no Rust: download the archive for your platform from the
+[releases page](https://github.com/jarettr/intermed/releases) and unpack it. The
+`intermed` binary inside is standalone — put it on your `PATH` or call it by path.
+The Linux build is static (any distro); the unsigned macOS build needs
+`xattr -d com.apple.quarantine ./intermed` once before first run.
+
+To build from source instead (needs a Rust toolchain):
+
 ```bash
-cargo build --release
+git clone https://github.com/jarettr/intermed
+cd intermed
+cargo install --path crates/intermed-cli   # `intermed` into ~/.cargo/bin
+# or: cargo build --release  →  target/release/intermed
 ```
 
-The binary is `target/release/intermed`. Put it on your `PATH`, or call it by
-path. Everything below assumes `intermed` is on the `PATH`.
-
-The build also writes a man page (`docs/man/intermed.1`) and shell completions
-(`docs/completions/`).
+Each release archive (and a source build with `INTERMED_GENERATE_CLI_DOCS=1`) also
+ships a man page (`docs/man/intermed.1`) and shell completions
+(`docs/completions/`). Everything below assumes `intermed` is on the `PATH`.
 
 ## First run
 

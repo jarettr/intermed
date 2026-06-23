@@ -1,11 +1,5 @@
 # InterMed Roadmap
 
-> **Status: working draft (v0).** This is a direction, not a schedule. It lists
-> *horizons* (Now / Near / Far), not dates, because effort is shared across a
-> small team and the further out a line is, the less it is a promise. The
-> **principles** below constrain every horizon; the **open decisions** at the end
-> are still ours to settle.
-
 ---
 
 ## How to read this

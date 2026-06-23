@@ -2904,7 +2904,7 @@ checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
 name = "intermed-cli"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "anyhow",
  "clap",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-columnar"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "ahash 0.8.12",
  "arrow",
@@ -2956,7 +2956,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-config"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "serde",
@@ -2967,7 +2967,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-deps"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "creeper-semver-pubgrub",
  "intermed-doctor-core",
@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-doctor-core"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "chrono",
  "intermed-evidence",
@@ -2997,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-duckdb"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "chrono",
  "duckdb",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-dynamics"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "regex",
@@ -3025,7 +3025,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-evidence"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-facts",
  "serde",
@@ -3033,7 +3033,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-facts"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "proptest",
  "serde",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-lab"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "rayon",
@@ -3054,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-log"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "rayon",
@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-minecraft-scan"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "cafebabe",
  "intermed-doctor-core",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-mixin-intel"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "cafebabe",
  "intermed-doctor-core",
@@ -3092,7 +3092,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-packops"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-resource-ast",
  "intermed-vfs",
@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-query-bridge"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-columnar",
  "intermed-doctor-core",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-report"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "chrono",
  "intermed-doctor-core",
@@ -3128,7 +3128,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-resource-ast"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "intermed-resource-identity",
@@ -3143,14 +3143,14 @@ dependencies = [
 
 [[package]]
 name = "intermed-resource-identity"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "intermed-rules"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "base64",
  "chrono",
@@ -3170,7 +3170,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-sbom"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "rayon",
@@ -3185,7 +3185,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-security-audit"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "cafebabe",
  "intermed-doctor-core",
@@ -3200,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-spark-bridge"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "rayon",
@@ -3211,7 +3211,7 @@ dependencies = [
 
 [[package]]
 name = "intermed-vfs"
-version = "0.1.0-alpha"
+version = "0.1.1-alpha"
 dependencies = [
  "intermed-doctor-core",
  "intermed-resource-identity",

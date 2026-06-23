@@ -9,7 +9,7 @@ It explains; it does not change anything. A run never edits your pack, downloads
 mods, or starts the game. Output is a report you read in a terminal, or JSON /
 SARIF / HTML for tools and CI.
 
-This is `0.1.0-alpha`. The analysis runs and is tested; commands, flags, and
+This is `0.1.1-alpha`. The analysis runs and is tested; commands, flags, and
 output shapes may still change. The [roadmap](docs/ROADMAP.md) tracks what is
 planned and what is out of scope.
 
@@ -79,6 +79,11 @@ xattr -d com.apple.quarantine intermed-*/intermed   # unsigned: clear Gatekeeper
 
 On Windows, unzip `intermed-*-windows-x86_64.zip` and run `intermed.exe` from
 PowerShell: `.\intermed.exe doctor C:\path\to\mods`.
+
+The `-duckdb` archives are the same tool with the optional DuckDB backend compiled
+in (`--logic duckdb` and the `--db` analytics store); the Linux one needs glibc,
+not static. Most users want the plain archive — the default columnar engine is
+complete on its own.
 
 ### From source
 

@@ -14,7 +14,7 @@ guarantees below are best-effort, not an SLA.
 ## Supported versions
 
 Only the latest `main` and the most recent tagged release receive security
-fixes. Pre-`0.1.0` alphas are not patched in place; fixes land in a new release.
+fixes. Pre-`0.1.x` alphas are not patched in place; fixes land in a new release.
 
 ## What counts as a vulnerability
 

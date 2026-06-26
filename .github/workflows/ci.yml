@@ -6,6 +6,12 @@ on:
   schedule:
     - cron: "17 3 * * 1"
 
+env:
+  # Keep Cargo registry access stable on hosted runners; this avoids transient
+  # libcurl HTTP/2 framing failures during dependency fetches.
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   rust:
     runs-on: ubuntu-latest

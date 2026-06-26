@@ -11,6 +11,14 @@ on:
 permissions:
   contents: write
 
+env:
+  # GitHub-hosted runners occasionally hit libcurl HTTP/2 framing errors while
+  # updating the crates.io sparse index. Disable Cargo HTTP multiplexing and
+  # allow more network retries so release packaging is not failed by a transient
+  # registry fetch.
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -67,9 +75,19 @@ jobs:
       - name: Build
         shell: bash
         run: |
+          set -euo pipefail
           flags=""
           [ -n "${{ matrix.features }}" ] && flags="--features ${{ matrix.features }}"
-          cargo build --release --locked --target ${{ matrix.target }} -p intermed-cli $flags
+          retry() {
+            local attempt
+            for attempt in 1 2 3; do
+              "$@" && return 0
+              echo "cargo build failed on attempt ${attempt}; retrying after $((attempt * 10))s" >&2
+              sleep $((attempt * 10))
+            done
+            "$@"
+          }
+          retry cargo build --release --locked --target ${{ matrix.target }} -p intermed-cli $flags
 
       - name: Package (unix)
         if: runner.os != 'Windows'

@@ -47,10 +47,10 @@ it looks.
 Goal: ship a 0.1.x worth trusting, and quietly start the clock on the one thing
 that compounds with time (data).
 
-- **Close the remaining correctness items.** (The three latent parser panics from
-  the bug hunt are already fixed and fuzz-guarded.) Remaining: canonicalize/reject
-  nullable join keys at lowering, so the in-process engine (Null = Null) and the
-  DuckDB backend (SQL Null ≠ Null) can never silently diverge on a future rule.
+- **Keep correctness parity covered.** (The three latent parser panics from the
+  bug hunt are already fixed and fuzz-guarded.) Nullable join-key behavior is
+  covered by in-process/DuckDB parity tests; continue monitoring future lowering
+  changes so backend null semantics cannot silently diverge.
 - **Project Status / maturity statement** in the docs: this is an alpha, validated
   against the packs we ran, not yet widely exercised; here is what is deferred.
 - **Schema honesty as a CI gate**: a test asserting every `kind::` predicate is

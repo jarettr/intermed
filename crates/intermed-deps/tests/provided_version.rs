@@ -97,6 +97,44 @@ fn provider_with_in_range_version_satisfies() {
     );
 }
 
+/// Manifest aliases usually do not carry their own version; they inherit the
+/// provider mod's installed version for dependency range checks.
+#[test]
+fn metadata_alias_inherits_provider_mod_version() {
+    let mut store = FactStore::new();
+    store
+        .fact("meta", kind::MOD)
+        .subject("moda")
+        .attr("version", "1.0.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("fabric-api")
+        .attr("version", "0.92.9")
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("moda")
+        .attr("dep", "fabric")
+        .attr("range", ">=0.90.0")
+        .attr("mandatory", true)
+        .attr("relation", "depends")
+        .emit();
+    store
+        .fact("meta", kind::PROVIDED_DEPENDENCY)
+        .subject("fabric-api")
+        .attr("provides", "fabric")
+        .attr("scope", "metadata-alias")
+        .emit();
+
+    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    assert!(
+        !findings.iter().any(|f| f.id.contains("fabric")),
+        "metadata alias should inherit provider mod version: {:?}",
+        findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+    );
+}
+
 /// Provider exists but declares no version → low-confidence warning, not error.
 #[test]
 fn provider_with_unknown_version_is_a_soft_warning() {

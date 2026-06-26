@@ -24,7 +24,7 @@
 use intermed_facts::Fact;
 
 use crate::error::ColumnarError;
-use crate::executor::{ColumnarStore, execute_with};
+use crate::executor::{ColumnarStore, execute_strategy_with_stats, execute_with_stats};
 use crate::external::{ExternalFunction, FunctionRegistry};
 use crate::frontend::QuerySpec;
 use crate::ir::RelExpr;
@@ -95,7 +95,7 @@ impl QueryEngine {
 
     /// Optimize and execute a logical plan, returning the materialized result.
     pub fn run(&self, plan: &RelExpr) -> Result<Relation, ColumnarError> {
-        execute_with(plan, &self.store, &self.registry)
+        execute_with_stats(plan, &self.store, &self.stats, &self.registry)
     }
 
     /// Optimize and execute under an explicit [`ExecutionStrategy`] (debugging /
@@ -106,7 +106,7 @@ impl QueryEngine {
         plan: &RelExpr,
         strategy: crate::strategy::ExecutionStrategy,
     ) -> Result<Relation, ColumnarError> {
-        crate::executor::execute_strategy(plan, &self.store, strategy)
+        execute_strategy_with_stats(plan, &self.store, &self.stats, &self.registry, strategy)
     }
 
     /// Compile a declarative [`QuerySpec`], then optimize and execute it.

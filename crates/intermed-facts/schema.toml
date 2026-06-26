@@ -1,0 +1,531 @@
+# InterMed fact schema — machine-checkable contract.
+#
+# Every fact kind in `kind::all_kinds()` must appear here exactly once. Kinds
+# with `complete = true` have their full attribute set enumerated and typed;
+# the schema gate (tests/schema_gate.rs) then requires every attribute a rule
+# reads on such a kind to be declared here with a matching type. Kinds with
+# `complete = false` are registered but their attributes are not yet pinned —
+# tighten them to `true` as each layer is audited.
+
+schema_version = "intermed-fact-schema-v1"
+
+[kind.environment]
+subject = "environment"
+complete = false
+
+[kind.java_runtime]
+subject = "java runtime"
+complete = false
+
+[kind.target]
+subject = "target"
+complete = false
+
+[kind.mod]
+subject = "mod id"
+complete = true
+attrs.version = "string"
+attrs.loader = "string"
+attrs.file = "string"
+attrs.synthetic_id = "bool"
+attrs.api_version = "string"
+attrs.load_order = "string"
+
+[kind.plugin]
+subject = "plugin id"
+complete = true
+attrs.version = "string"
+attrs.loader = "string"
+attrs.file = "string"
+attrs.synthetic_id = "bool"
+
+[kind.invalid_metadata]
+subject = "archive file name"
+complete = true
+attrs.reason = "string"
+attrs.manifest = "string"
+attrs.loader = "string"
+
+[kind.secondary_identity]
+subject = "secondary identity"
+complete = false
+
+[kind.dependency]
+subject = "dependent mod id"
+complete = true
+attrs.dep = "string"
+attrs.range = "string"
+attrs.mandatory = "bool"
+attrs.relation = "string"
+attrs.feature = "string"
+
+[kind.provided_dependency]
+subject = "provided dependency"
+complete = false
+
+[kind.mod_side]
+subject = "mod side"
+complete = false
+
+[kind.entrypoint]
+subject = "entrypoint"
+complete = false
+
+[kind.mod_metadata]
+subject = "mod metadata"
+complete = false
+
+[kind.entrypoint_detail]
+subject = "entrypoint detail"
+complete = false
+
+[kind.package_owner]
+subject = "package owner"
+complete = false
+
+[kind.mod_relationship]
+subject = "mod id"
+complete = true
+attrs.related = "string"
+attrs.type = "string"
+attrs.reason = "string"
+
+[kind.mod_capability]
+subject = "mod id"
+complete = true
+attrs.capability = "string"
+attrs.reason = "string"
+attrs.subsystem = "string"
+attrs.source = "string"
+
+[kind.nested_jar]
+subject = "nested jar"
+complete = false
+
+[kind.unparseable_archive]
+subject = "archive file name"
+complete = true
+attrs.reason = "string"
+attrs.failure_class = "string"
+
+[kind.modpack_manifest]
+subject = "modpack manifest"
+complete = false
+
+[kind.modpack_file_ref]
+subject = "modpack file ref"
+complete = false
+
+[kind.modpack_project_ref]
+subject = "modpack project ref"
+complete = false
+
+[kind.modpack_incomplete]
+subject = "modpack incomplete"
+complete = false
+
+[kind.access_transform]
+subject = "access transform"
+complete = false
+
+[kind.coremod]
+subject = "coremod"
+complete = false
+
+[kind.log_signal]
+subject = "log signal"
+complete = false
+
+[kind.log_mentions_mod]
+subject = "log mentions mod"
+complete = false
+
+[kind.log_crash]
+subject = "log crash"
+complete = false
+
+[kind.log_mod_error]
+subject = "log mod error"
+complete = false
+
+[kind.scan_truncated]
+subject = "archive file name"
+complete = true
+attrs.layer = "string"
+attrs.reason = "string"
+
+[kind.resource_writer]
+subject = "mod id"
+complete = true
+attrs.path = "string"
+attrs.archive = "string"
+attrs.size = "int"
+attrs.json = "bool"
+
+[kind.resource_collision]
+subject = "resource path"
+complete = true
+attrs.class = "string"
+attrs.domain = "string"
+attrs.reason = "string"
+attrs.writers = "string"
+attrs.archives = "string"
+attrs.safe_merge = "bool"
+attrs.order_dependent = "bool"
+attrs.load_order_confidence = "string"
+attrs.writer_count = "int"
+
+[kind.json_merge_candidate]
+subject = "json merge candidate"
+complete = false
+
+[kind.safe_crdt_merge]
+subject = "safe crdt merge"
+complete = false
+
+[kind.lang_json_merge]
+subject = "lang json merge"
+complete = false
+
+[kind.lang_properties_merge]
+subject = "lang properties merge"
+complete = false
+
+[kind.lang_format_conflict]
+subject = "lang format conflict"
+complete = false
+
+[kind.unsafe_replace_conflict]
+subject = "unsafe replace conflict"
+complete = false
+
+[kind.tag_replace_conflict]
+subject = "tag replace conflict"
+complete = false
+
+[kind.tag_mixed_required]
+subject = "tag mixed required"
+complete = false
+
+[kind.tag_invalid]
+subject = "tag invalid"
+complete = false
+
+[kind.json_override_conflict]
+subject = "json override conflict"
+complete = false
+
+[kind.resource_overlay_action]
+subject = "resource overlay action"
+complete = false
+
+[kind.resource_ast_parsed]
+subject = "resource ast parsed"
+complete = false
+
+[kind.resource_definition]
+subject = "resource definition"
+complete = false
+
+[kind.resource_reference]
+subject = "resource reference"
+complete = false
+
+[kind.namespace_owner]
+subject = "namespace owner"
+complete = false
+
+[kind.implicit_dependency_candidate]
+subject = "implicit dependency candidate"
+complete = false
+
+[kind.implicit_dependency_edge]
+subject = "implicit dependency edge"
+complete = false
+
+[kind.resource_resolve_result]
+subject = "resource resolve result"
+complete = false
+
+[kind.resource_semantic_diff]
+subject = "resource semantic diff"
+complete = false
+
+[kind.resource_semantic_conflict]
+subject = "resource semantic conflict"
+complete = false
+
+[kind.resource_semantic_issue]
+subject = "resource semantic issue"
+complete = false
+
+[kind.resource_dangling_reference]
+subject = "resource dangling reference"
+complete = false
+
+[kind.runtime_removed_recipe]
+subject = "runtime removed recipe"
+complete = false
+
+[kind.runtime_script_modifies_recipe]
+subject = "runtime script modifies recipe"
+complete = false
+
+[kind.runtime_removed_item]
+subject = "runtime removed item"
+complete = false
+
+[kind.runtime_removed_loot_table]
+subject = "runtime removed loot table"
+complete = false
+
+[kind.runtime_removed_tag]
+subject = "runtime removed tag"
+complete = false
+
+[kind.mixin_config]
+subject = "mixin config"
+complete = false
+
+[kind.mixin_activation]
+subject = "mixin activation"
+complete = false
+
+[kind.mixin_application_site]
+subject = "mixin application site"
+complete = false
+
+[kind.mixin_classpath_coverage]
+subject = "mixin classpath coverage"
+complete = false
+
+[kind.mixin_composition]
+subject = "mixin composition"
+complete = false
+
+[kind.mixin_risk_cluster]
+subject = "mixin risk cluster"
+complete = false
+
+[kind.mixin_runtime_resource_mutation]
+subject = "mixin runtime resource mutation"
+complete = false
+
+[kind.mixin_security_surface]
+subject = "mixin security surface"
+complete = false
+
+[kind.mixin_config_plugin]
+subject = "mixin config plugin"
+complete = false
+
+[kind.mixin_refmap_loaded]
+subject = "mixin refmap loaded"
+complete = false
+
+[kind.mixin_class]
+subject = "mixin class"
+complete = false
+
+[kind.mixin_target]
+subject = "mixin target"
+complete = false
+
+[kind.mixin_operation]
+subject = "mixin operation"
+complete = false
+
+[kind.mixin_hotspot]
+subject = "mixin hotspot"
+complete = false
+
+[kind.mixin_overlap]
+subject = "mixin overlap"
+complete = false
+
+[kind.high_risk_overwrite]
+subject = "high risk overwrite"
+complete = false
+
+[kind.log_mixin_correlation]
+subject = "log mixin correlation"
+complete = false
+
+[kind.mixin_injection_point]
+subject = "mixin injection point"
+complete = false
+
+[kind.mixin_shadow]
+subject = "mixin shadow"
+complete = false
+
+[kind.mixin_added_member]
+subject = "mixin added member"
+complete = false
+
+[kind.mixin_calls]
+subject = "mixin calls"
+complete = false
+
+[kind.mixin_interaction]
+subject = "mixin interaction"
+complete = false
+
+[kind.mixin_conflict_edge]
+subject = "mixin conflict edge"
+complete = false
+
+[kind.mixin_priority_conflict]
+subject = "mixin priority conflict"
+complete = false
+
+[kind.mixin_risk_score]
+subject = "mixin risk score"
+complete = false
+
+[kind.mixin_handler_body]
+subject = "mixin handler body"
+complete = false
+
+[kind.mixin_handler_effect]
+subject = "mixin handler effect"
+complete = false
+
+[kind.mixin_effect]
+subject = "mixin effect"
+complete = false
+
+[kind.mixin_recommendation]
+subject = "mixin recommendation"
+complete = false
+
+[kind.mixin_hierarchy]
+subject = "mixin hierarchy"
+complete = false
+
+[kind.mixin_class_complexity]
+subject = "mixin class complexity"
+complete = false
+
+[kind.mixin_mod_complexity]
+subject = "mixin mod complexity"
+complete = false
+
+[kind.mixin_bloat]
+subject = "mixin bloat"
+complete = false
+
+[kind.mixin_dataflow_metrics]
+subject = "mixin dataflow metrics"
+complete = false
+
+[kind.uses_process_spawn]
+subject = "uses process spawn"
+complete = false
+
+[kind.uses_socket]
+subject = "uses socket"
+complete = false
+
+[kind.uses_reflection_set_accessible]
+subject = "uses reflection set accessible"
+complete = false
+
+[kind.uses_unsafe]
+subject = "uses unsafe"
+complete = false
+
+[kind.uses_native_library]
+subject = "uses native library"
+complete = false
+
+[kind.uses_dynamic_class_definition]
+subject = "uses dynamic class definition"
+complete = false
+
+[kind.uses_reflective_invocation]
+subject = "uses reflective invocation"
+complete = false
+
+[kind.uses_script_engine]
+subject = "uses script engine"
+complete = false
+
+[kind.uses_deserialization]
+subject = "uses deserialization"
+complete = false
+
+[kind.uses_system_exit]
+subject = "uses system exit"
+complete = false
+
+[kind.uses_method_handles]
+subject = "uses method handles"
+complete = false
+
+[kind.writes_files]
+subject = "writes files"
+complete = false
+
+[kind.security_suspect_modification]
+subject = "security suspect modification"
+complete = false
+
+[kind.checksum]
+subject = "checksum"
+complete = false
+
+[kind.artifact_identity]
+subject = "artifact identity"
+complete = false
+
+[kind.unknown_source]
+subject = "archive file name"
+complete = true
+attrs.reason = "string"
+
+[kind.signature_status]
+subject = "archive file name"
+complete = true
+attrs.status = "string"
+attrs.jar_signed = "bool"
+
+[kind.sbom]
+subject = "sbom"
+complete = false
+
+[kind.trust_score]
+subject = "trust score"
+complete = false
+
+[kind.tick_spike]
+subject = "tick spike"
+complete = false
+
+[kind.hot_method]
+subject = "hot method"
+complete = false
+
+[kind.hot_mod]
+subject = "hot mod"
+complete = false
+
+[kind.gc_pause]
+subject = "gc pause"
+complete = false
+
+[kind.heap_pressure]
+subject = "heap pressure"
+complete = false
+
+[kind.thread_hotspot]
+subject = "thread hotspot"
+complete = false
+
+[kind.spark_import_failure]
+subject = "spark import failure"
+complete = false
+
+[kind.deferred_layer]
+subject = "deferred layer"
+complete = false

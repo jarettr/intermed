@@ -494,6 +494,22 @@
       }
     },
     {
+      "id": "corrupt-jar",
+      "kind": "fact-finding",
+      "input_kinds": ["unparseable_archive"],
+      "where_all": { "attr:failure_class": "corrupt" },
+      "finding": {
+        "id": "corrupt-jar:{subject}",
+        "rule_id": "corrupt-jar",
+        "severity": "warn",
+        "category": "metadata",
+        "title": "Unreadable jar: {subject}",
+        "explanation": "The archive could not be read ({attr:reason}). It cannot load and is likely a corrupt or truncated download.",
+        "fix": "Re-download the mod and verify the file size; remove the broken jar if it is a leftover.",
+        "tags": ["metadata", "corrupt"]
+      }
+    },
+    {
       "id": "sbom-security-correlation",
       "kind": "correlation",
       "anchor": { "kind": "sbom", "alias": "s", "select": ["subject", "attr:trust_score"] },

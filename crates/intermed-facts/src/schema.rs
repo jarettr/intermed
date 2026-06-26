@@ -61,6 +61,9 @@ const SCHEMA: &[(&str, &str, AttrType)] = &[
     ("resource_writer", "size", AttrType::Int),
     ("resource_writer", "json", AttrType::Bool),
     ("resource_collision", "safe_merge", AttrType::Bool),
+    ("resource_collision", "order_dependent", AttrType::Bool),
+    ("resource_collision", "writer_count", AttrType::Int),
+    ("signature_status", "jar_signed", AttrType::Bool),
     // Dependency facts.
     ("dependency", "mandatory", AttrType::Bool),
     // Modpack manifest completeness.
@@ -69,6 +72,13 @@ const SCHEMA: &[(&str, &str, AttrType)] = &[
     ("modpack_incomplete", "materialized_jars", AttrType::Int),
     ("modpack_incomplete", "completeness_pct", AttrType::Int),
 ];
+
+/// The constrained `(kind, attr, type)` rows, exposed for the schema gate so it
+/// can cross-check them against the static contract (`schema_contract`).
+#[must_use]
+pub fn constrained_attrs() -> &'static [(&'static str, &'static str, AttrType)] {
+    SCHEMA
+}
 
 /// The expected type for a `(kind, attr)` pair, if the schema constrains it.
 #[must_use]

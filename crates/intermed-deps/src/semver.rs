@@ -188,10 +188,28 @@ pub fn parse_lenient(version: &str) -> Option<semver::Version> {
         .chars()
         .take_while(|c| c.is_ascii_digit() || *c == '.')
         .collect();
+    let prefix = prefix.trim_end_matches('.');
     if prefix.is_empty() {
         return None;
     }
-    semver::Version::parse(&pad_mc_version(prefix.trim_end_matches('.'))).ok()
+    semver::Version::parse(&pad_mc_version(prefix))
+        .ok()
+        // Many Forge/Bukkit mods carry 4+ numeric segments (`15.20.0.130`,
+        // `0.103.0.0`). Strict semver rejects them, which would drop the mod
+        // from the graph entirely. Collapse to the leading 3 segments so the
+        // mod resolves; ranges practically never discriminate on a 4th segment.
+        .or_else(|| semver::Version::parse(&truncate_to_three_segments(prefix)).ok())
+}
+
+/// Keep only the leading three dot-separated segments of a numeric version, so a
+/// 4+-component build number parses as semver. Returns the input unchanged when
+/// it already has three or fewer segments.
+fn truncate_to_three_segments(version: &str) -> String {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() <= 3 {
+        return version.to_string();
+    }
+    parts[..3].join(".")
 }
 
 /// Pad two-component Minecraft release versions so `1.20` matches `>=1.20.0`.
@@ -229,6 +247,25 @@ mod tests {
         assert_eq!(version_in_range("0.9.0", ">=1.0.0"), Some(false));
         assert_eq!(version_in_range("0.5.3+1.20.1", ">=0.5.0"), Some(true));
         assert_eq!(version_in_range("mc1.20.1-x", ">=1.0.0"), None);
+    }
+
+    #[test]
+    fn four_segment_versions_parse_and_compare() {
+        // Real Forge/Bukkit mods (jei `15.20.0.130`, Towny `0.103.0.0`,
+        // tconstruct `3.11.2.166`) use 4 numeric segments. They must parse so
+        // the mod is not dropped from the dependency graph.
+        assert!(parse_mod_version("15.20.0.130").is_some());
+        assert!(parse_mod_version("0.103.0.0").is_some());
+        assert!(parse_mod_version("3.11.2.166").is_some());
+        // The leading 3 segments drive comparison.
+        assert_eq!(version_in_range("15.20.0.130", ">=15.20.0"), Some(true));
+        assert_eq!(version_in_range("15.20.0.130", ">=15.21.0"), Some(false));
+        assert_eq!(version_in_range("0.103.0.0", ">=0.100"), Some(true));
+        // The `+build` form already truncated at `+` keeps working.
+        assert_eq!(
+            version_in_range("6.0.8.1+build.1744-mc1.20.1", ">=6.0.0"),
+            Some(true)
+        );
     }
 
     #[test]

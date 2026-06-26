@@ -123,39 +123,34 @@ pub fn build_interaction_graph(scan: &MixinScan) -> MixinInteractionGraph {
     )
 }
 
-fn graph_available(scan: &MixinScan) -> bool {
-    !scan.classes.is_empty() || !scan.interactions.is_empty() || !scan.conflict_edges.is_empty()
-}
-
 /// Export the interaction graph as Graphviz DOT.
+///
+/// An empty scan (e.g. a Bukkit/Paper plugin pack with no Mixins) is a valid
+/// result, not an error: it yields a well-formed empty graph. The `Option`
+/// signature is retained for API symmetry with [`graph_to_json`].
 pub fn graph_to_dot(scan: &MixinScan) -> Option<String> {
-    if !graph_available(scan) {
-        return None;
-    }
     Some(build_interaction_graph(scan).to_dot())
 }
 
 /// Export the interaction graph as GraphML.
+///
+/// An empty scan yields a well-formed empty document (see [`graph_to_dot`]).
 pub fn graph_to_graphml(scan: &MixinScan) -> Option<String> {
-    if !graph_available(scan) {
-        return None;
-    }
     Some(build_interaction_graph(scan).to_graphml())
 }
 
 /// Export a self-contained interactive HTML visualization.
+///
+/// An empty scan yields a well-formed empty page (see [`graph_to_dot`]).
 pub fn graph_to_html(scan: &MixinScan, title: &str) -> Option<String> {
-    if !graph_available(scan) {
-        return None;
-    }
     Some(build_interaction_graph(scan).to_html(title))
 }
 
 /// Export the interaction graph as JSON (`MixinGraphExport`).
+///
+/// An empty scan serializes to an empty node/edge set. `None` is reserved for a
+/// genuine serialization failure.
 pub fn graph_to_json(scan: &MixinScan) -> Option<String> {
-    if !graph_available(scan) {
-        return None;
-    }
     serde_json::to_string(&build_interaction_graph(scan).export()).ok()
 }
 
@@ -350,6 +345,27 @@ mod tests {
         let json = graph_to_json(&scan).expect("graph json");
         assert!(json.contains("RenderMixin"));
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn empty_scan_exports_valid_empty_graph() {
+        // A pack with no Mixins (e.g. Bukkit/Paper plugins) is a valid result,
+        // not an error: every export format must yield a well-formed document.
+        let scan = MixinScan::default();
+        let json = graph_to_json(&scan).expect("empty json");
+        assert!(json.contains("\"nodes\""));
+        assert!(json.contains("\"edges\""));
+        assert!(graph_to_dot(&scan).expect("empty dot").contains("digraph"));
+        assert!(
+            graph_to_graphml(&scan)
+                .expect("empty graphml")
+                .contains("<graphml")
+        );
+        assert!(
+            graph_to_html(&scan, "T")
+                .expect("empty html")
+                .contains("<html")
+        );
     }
 
     #[test]

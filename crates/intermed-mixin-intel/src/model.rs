@@ -1241,7 +1241,7 @@ pub struct MixinScanFailure {
 }
 
 /// Full scan + analysis result for CLI and tests.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MixinScan {
     pub target: String,
     pub configs: Vec<MixinConfigRecord>,

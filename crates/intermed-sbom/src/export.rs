@@ -30,6 +30,11 @@ fn spdx_json(scan: &SbomScan) -> Result<String, String> {
             "https://intermed.local/sbom/{}",
             scan.target.replace('/', "-")
         ),
+        creation_info: SpdxCreationInfo {
+            // SPDX 2.x requires UTC, seconds precision, no fractional part.
+            created: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            creators: vec![format!("Tool: intermed-{}", env!("CARGO_PKG_VERSION"))],
+        },
         packages,
     };
     serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
@@ -46,7 +51,17 @@ struct SpdxDocument<'a> {
     name: String,
     #[serde(rename = "documentNamespace")]
     document_namespace: String,
+    // Required by the SPDX 2.x schema; conformant validators reject a document
+    // without it.
+    #[serde(rename = "creationInfo")]
+    creation_info: SpdxCreationInfo,
     packages: Vec<SpdxPackage>,
+}
+
+#[derive(Serialize)]
+struct SpdxCreationInfo {
+    created: String,
+    creators: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -54,9 +69,11 @@ struct SpdxPackage {
     #[serde(rename = "SPDXID")]
     spdx_id: String,
     name: String,
+    #[serde(rename = "versionInfo")]
     version_info: String,
     #[serde(rename = "downloadLocation")]
     download_location: String,
+    #[serde(rename = "filesAnalyzed")]
     files_analyzed: bool,
     #[serde(rename = "checksums")]
     checksums: Vec<SpdxChecksum>,
@@ -229,5 +246,34 @@ mod tests {
         let cdx = export_scan(&scan, SbomExportFormat::CycloneDxJson).expect("cdx");
         assert!(cdx.contains("CycloneDX"));
         assert!(cdx.contains("sodium"));
+    }
+
+    #[test]
+    fn spdx_package_keys_are_spec_camel_case() {
+        // SPDX 2.3 JSON uses camelCase property names; snake_case keys are
+        // dropped by conformant consumers (e.g. the version would be lost).
+        let spdx = export_scan(&sample_scan(), SbomExportFormat::SpdxJson).expect("spdx");
+        let doc: serde_json::Value = serde_json::from_str(&spdx).unwrap();
+        let pkg = &doc["packages"][0];
+        assert_eq!(pkg["versionInfo"], "0.5.3");
+        assert!(pkg.get("filesAnalyzed").is_some());
+        assert!(pkg.get("version_info").is_none(), "leaked snake_case key");
+        assert!(pkg.get("files_analyzed").is_none(), "leaked snake_case key");
+    }
+
+    #[test]
+    fn spdx_document_has_required_creation_info() {
+        // SPDX 2.x marks creationInfo (with created + creators) as required.
+        let spdx = export_scan(&sample_scan(), SbomExportFormat::SpdxJson).expect("spdx");
+        let doc: serde_json::Value = serde_json::from_str(&spdx).unwrap();
+        let ci = &doc["creationInfo"];
+        assert!(ci["created"].as_str().unwrap().ends_with('Z'));
+        assert!(
+            ci["creators"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_str().unwrap().starts_with("Tool: intermed-"))
+        );
     }
 }

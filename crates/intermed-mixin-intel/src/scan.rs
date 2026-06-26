@@ -7,6 +7,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use intermed_doctor_core::bounded_zip;
 use intermed_doctor_core::settings::MixinSettings;
 use intermed_doctor_core::{JarCache, Target, TargetKind};
 
@@ -24,7 +25,7 @@ use crate::refmap::{MappingContext, Namespace, Refmap, TinyMappings, dotted_name
 
 const EXTRACTOR: &str = "mixin-analyzer";
 /// Bump trailing revision when parse / analysis logic changes within a release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r28");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r29");
 
 /// Stable collector / fact extractor id (`mixin-analyzer`).
 pub fn extractor_id() -> &'static str {
@@ -182,7 +183,9 @@ fn ingest_minecraft_jar(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("zip {}: {e}", jar.display()))?;
     let mut hierarchy = HierarchyIndex::new();
-    index_jar_classes(&mut archive, &mut hierarchy, target_index);
+    // The vanilla jar is trusted; class-index caps still apply but truncation
+    // reporting is not meaningful here.
+    let _ = index_jar_classes(&mut archive, &mut hierarchy, target_index);
     Ok(())
 }
 
@@ -310,7 +313,7 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
 
     let mut hierarchy = HierarchyIndex::new();
     let mut target_index = crate::apply_failure::TargetClassIndex::new();
-    index_jar_classes(&mut archive, &mut hierarchy, &mut target_index);
+    let class_truncations = index_jar_classes(&mut archive, &mut hierarchy, &mut target_index);
 
     let mut partial = JarScanPartial {
         configs: Vec::new(),
@@ -319,6 +322,15 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
         hierarchy,
         target_index,
     };
+    // Surface class-index caps that fired on this jar as scan failures so an
+    // oversized/crafted archive is reported, not silently under-analyzed.
+    for reason in class_truncations {
+        partial.failures.push(MixinScanFailure {
+            archive: archive_label.clone(),
+            path: None,
+            reason: format!("scan truncated: {reason}"),
+        });
+    }
 
     for config_path in config_paths {
         match read_zip_text(&mut archive, &config_path)
@@ -426,11 +438,17 @@ pub(crate) fn analyze_class(
     }
 }
 
+/// Index every `.class` for hierarchy/target analysis, bounded against a crafted
+/// archive: each class is capped at [`bounded_zip::MAX_CLASS_BYTES`] and the
+/// aggregate at [`bounded_zip::MAX_CLASS_INDEX_BYTES_TOTAL`]. Returns the
+/// `scan_truncated` reasons for any class skipped by a cap.
 fn index_jar_classes(
     archive: &mut zip::ZipArchive<std::fs::File>,
     hierarchy: &mut HierarchyIndex,
     target_index: &mut crate::apply_failure::TargetClassIndex,
-) {
+) -> Vec<String> {
+    let mut truncations = Vec::new();
+    let mut total: u64 = 0;
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
@@ -438,12 +456,40 @@ fn index_jar_classes(
         if !entry.name().ends_with(".class") {
             continue;
         }
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_ok() {
-            hierarchy.ingest_class(&bytes);
-            target_index.ingest_class(&bytes);
+        let name = entry.name().to_string();
+        if entry.size() > bounded_zip::MAX_CLASS_BYTES {
+            truncations.push(format!(
+                "{name}: {} bytes exceeds {} byte class cap, skipped",
+                entry.size(),
+                bounded_zip::MAX_CLASS_BYTES
+            ));
+            continue;
         }
+        if total >= bounded_zip::MAX_CLASS_INDEX_BYTES_TOTAL {
+            truncations.push(format!(
+                "reached {} byte class-index cap; remaining classes skipped",
+                bounded_zip::MAX_CLASS_INDEX_BYTES_TOTAL
+            ));
+            break;
+        }
+        // Enforce the per-class cap on the *decompressed* stream so a lying header
+        // cannot inflate past the limit.
+        let mut bytes = Vec::new();
+        if std::io::Read::take(&mut entry, bounded_zip::MAX_CLASS_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .is_err()
+        {
+            continue;
+        }
+        if bytes.len() as u64 > bounded_zip::MAX_CLASS_BYTES {
+            truncations.push(format!("{name}: decompressed past class cap, skipped"));
+            continue;
+        }
+        total = total.saturating_add(bytes.len() as u64);
+        hierarchy.ingest_class(&bytes);
+        target_index.ingest_class(&bytes);
     }
+    truncations
 }
 
 fn discover_tiny_mappings(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<TinyMappings> {
@@ -828,18 +874,19 @@ fn detect_mod_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<String>
         })
 }
 
+/// Bounded manifest/config/refmap text read — the per-entry cap is picked from
+/// the entry name (a `*-refmap.json` may legitimately be large, a config small).
+/// An oversized or crafted entry yields `None` rather than driving unbounded
+/// decompression.
 fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    let mut entry = archive.by_name(name).ok()?;
-    let mut text = String::new();
-    entry.read_to_string(&mut text).ok()?;
-    Some(text)
+    bounded_zip::read_zip_text_opt(archive, name, bounded_zip::cap_for_entry(name))
 }
 
+/// Bounded byte read (mixin `.class` files); cap chosen by entry name.
 fn read_zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<Vec<u8>> {
-    let mut entry = archive.by_name(name).ok()?;
-    let mut bytes = Vec::new();
-    entry.read_to_end(&mut bytes).ok()?;
-    Some(bytes)
+    bounded_zip::read_zip_bytes_bounded(archive, name, bounded_zip::cap_for_entry(name))
+        .ok()
+        .flatten()
 }
 #[cfg(test)]
 mod discovery_tests {

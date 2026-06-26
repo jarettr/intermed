@@ -11,6 +11,7 @@ use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
 use intermed_doctor_core::facts::{SourceRef, kind};
+use intermed_doctor_core::jar_meta;
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
 };
@@ -26,7 +27,7 @@ const EXTRACTOR: &str = "sbom-generator";
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r4");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r5");
 const CORPUS_LOCK_SCHEMA: &str = "intermed-corpus-lock-v1";
 
 /// Implementation status for help text.
@@ -669,7 +670,8 @@ fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> JarIdentity 
     }
     if let Some(text) = read_zip_text(archive, "META-INF/mods.toml") {
         if let Ok(v) = toml::from_str::<toml::Value>(&text) {
-            if let Some(identity) = forge_identity_from_toml(&v, "forge") {
+            if let Some(mut identity) = forge_identity_from_toml(&v, "forge") {
+                resolve_jar_version_placeholder(archive, &mut identity);
                 return identity;
             }
         }
@@ -704,12 +706,25 @@ fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> JarIdentity 
     }
     if let Some(text) = read_zip_text(archive, "META-INF/neoforge.mods.toml") {
         if let Ok(v) = toml::from_str::<toml::Value>(&text) {
-            if let Some(identity) = forge_identity_from_toml(&v, "neoforge") {
+            if let Some(mut identity) = forge_identity_from_toml(&v, "neoforge") {
+                resolve_jar_version_placeholder(archive, &mut identity);
                 return identity;
             }
         }
     }
     JarIdentity::default()
+}
+
+/// Resolve Forge's `${file.jarVersion}` placeholder on a parsed identity, using
+/// the shared [`jar_meta`] helper so the substitution matches the metadata and
+/// identity scanners. Without it the SBOM/PURL carries the raw template.
+fn resolve_jar_version_placeholder(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    identity: &mut JarIdentity,
+) {
+    if let Some(version) = identity.version.as_ref() {
+        identity.version = Some(jar_meta::resolve_jar_version(version, archive));
+    }
 }
 
 fn jar_signature_strength(archive: &mut zip::ZipArchive<std::fs::File>) -> SignatureStrength {
@@ -900,11 +915,16 @@ fn sha256_file(path: &Path) -> Result<String, SbomScanError> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Bounded manifest read. All callers read loader manifests / `MANIFEST.MF`, so
+/// the manifest cap applies; an oversized or crafted entry yields `None` instead
+/// of driving unbounded decompression. Per-jar truncation is already surfaced by
+/// the metadata layer (which scans the same jars).
 fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    let mut entry = archive.by_name(name).ok()?;
-    let mut buf = String::new();
-    entry.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    intermed_doctor_core::bounded_zip::read_zip_text_opt(
+        archive,
+        name,
+        intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+    )
 }
 
 fn mods_dir(target: &Target) -> Option<PathBuf> {

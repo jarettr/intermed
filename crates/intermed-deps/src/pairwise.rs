@@ -131,11 +131,15 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     let mut provided: HashMap<String, Vec<ProviderEntry>> = HashMap::new();
     for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
         if let Some(p) = f.attr("provides") {
+            let version = f
+                .attr("version")
+                .map(str::to_string)
+                .or_else(|| installed.get(&f.subject).and_then(|v| v.first()).cloned());
             provided
                 .entry(p.to_string())
                 .or_default()
                 .push(ProviderEntry {
-                    version: f.attr("version").map(str::to_string),
+                    version,
                     fact: f.id,
                     scope: f.attr("scope").unwrap_or("global").to_string(),
                 });

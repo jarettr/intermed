@@ -153,6 +153,26 @@ fn findings_exit_code(
     }
 }
 
+fn stdout_artifact_count(output: &intermed_cli::command::DoctorOutputArgs) -> usize {
+    [output.json.as_ref(), output.sarif.as_ref()]
+        .into_iter()
+        .flatten()
+        .filter(|target| target.is_none())
+        .count()
+}
+
+fn write_report_artifact(
+    path: &Path,
+    report: &intermed_doctor_core::report::DoctorReport,
+    facts: &[Fact],
+    format: Format,
+    label: &str,
+) -> AnyhowResult<()> {
+    let rendered = intermed_report::render_with_facts(report, facts, format);
+    write_atomic(path, rendered.as_bytes())
+        .with_context(|| format!("could not write {label} report to {}", path.display()))
+}
+
 fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
     // Bug fix (Баг 10): delegate to run_doctor_inner which returns anyhow::Result
     // so error chains are preserved and displayed with full context instead of
@@ -170,6 +190,11 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
 fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> AnyhowResult<ExitCode> {
     if !args.target.exists() {
         anyhow::bail!("target does not exist: {}", args.target.display());
+    }
+    if stdout_artifact_count(&args.output) > 1 {
+        anyhow::bail!(
+            "--json and --sarif can both be requested as files, but only one report format can write to stdout"
+        );
     }
 
     // Bug fix (Баг 9): fail-fast on unavailable engines before any I/O.
@@ -309,22 +334,50 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         let html = intermed_report::render_html_with_facts(&run.report, &run.facts);
         write_atomic(path, html.as_bytes())
             .with_context(|| format!("could not write HTML report to {}", path.display()))?;
-        return Ok(findings_exit_code(&run.report, args.output.exit_zero));
     }
 
-    let format = if args.output.sarif {
-        Format::Sarif
-    } else if args.output.json {
-        Format::Json
-    } else {
-        let color = !args.output.no_color && std::io::stdout().is_terminal();
-        Format::Terminal { color }
-    };
+    let mut wrote_artifact = args.output.html.is_some();
+    let mut wrote_stdout = false;
 
-    println!(
-        "{}",
-        intermed_report::render_with_facts(&run.report, &run.facts, format)
-    );
+    if let Some(target) = &args.output.json {
+        wrote_artifact = true;
+        match target {
+            Some(path) => {
+                write_report_artifact(path, &run.report, &run.facts, Format::Json, "JSON")?
+            }
+            None => {
+                println!(
+                    "{}",
+                    intermed_report::render_with_facts(&run.report, &run.facts, Format::Json)
+                );
+                wrote_stdout = true;
+            }
+        }
+    }
+
+    if let Some(target) = &args.output.sarif {
+        wrote_artifact = true;
+        match target {
+            Some(path) => {
+                write_report_artifact(path, &run.report, &run.facts, Format::Sarif, "SARIF")?
+            }
+            None => {
+                println!(
+                    "{}",
+                    intermed_report::render_with_facts(&run.report, &run.facts, Format::Sarif)
+                );
+                wrote_stdout = true;
+            }
+        }
+    }
+
+    if !wrote_artifact && !wrote_stdout {
+        let color = !args.output.no_color && std::io::stdout().is_terminal();
+        println!(
+            "{}",
+            intermed_report::render_with_facts(&run.report, &run.facts, Format::Terminal { color })
+        );
+    }
     Ok(findings_exit_code(&run.report, args.output.exit_zero))
 }
 
@@ -1654,7 +1707,7 @@ fn run_mixin_map(args: MixinMapArgs) -> ExitCode {
                 GraphExportFormat::Json => None,
             };
             let Some(text) = payload else {
-                eprintln!("error: no mixin graph data (empty scan?)");
+                eprintln!("error: failed to serialize mixin graph");
                 return ExitCode::from(2);
             };
             if let Some(path) = args.graph_out {

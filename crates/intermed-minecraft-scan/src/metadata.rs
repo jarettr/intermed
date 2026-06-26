@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use intermed_doctor_core::bounded_zip;
 use intermed_doctor_core::facts::{SourceRef, kind};
+use intermed_doctor_core::jar_meta;
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, Layer, Loader, MetadataLevel, Target,
     list_jar_archives,
@@ -25,7 +27,7 @@ use crate::forge_annotation;
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan/parse logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r13");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r16");
 
 pub struct MetadataCollector;
 
@@ -76,18 +78,38 @@ impl Collector for MetadataCollector {
 
         for (jar, name, outcome) in scanned {
             match outcome {
-                CachedJarOutcome::Parsed(cached) => {
+                CachedJarOutcome::Parsed {
+                    artifacts,
+                    truncations,
+                } => {
                     parsed += 1;
-                    for m in cached.into_iter().map(cached_to_artifact) {
+                    for m in artifacts.into_iter().map(cached_to_artifact) {
                         emitted += emit_artifact(ctx, &m, &name);
+                    }
+                    // Surface per-entry caps that fired while scanning this jar
+                    // (oversized/crafted archive), consistent with the VFS /
+                    // security / resource-AST layers.
+                    for reason in truncations {
+                        ctx.store
+                            .fact(self.id(), kind::SCAN_TRUNCATED)
+                            .subject(name.clone())
+                            .attr("reason", reason)
+                            .source(SourceRef::file(jar.display().to_string()))
+                            .confidence(0.9)
+                            .emit();
+                        emitted += 1;
                     }
                 }
                 CachedJarOutcome::NoManifest => {
                     failed += 1;
+                    // A jar without a recognised mod manifest is usually benign
+                    // (a bundled library/dependency jar), so it is tagged
+                    // `no-manifest` and does not raise a finding on its own.
                     ctx.store
                         .fact(self.id(), kind::UNPARSEABLE_ARCHIVE)
                         .subject(name.clone())
                         .attr("reason", "no recognised manifest")
+                        .attr("failure_class", "no-manifest")
                         .source(SourceRef::file(jar.display().to_string()))
                         .confidence(0.7)
                         .emit();
@@ -95,10 +117,14 @@ impl Collector for MetadataCollector {
                 }
                 CachedJarOutcome::Error(reason) => {
                     failed += 1;
+                    // A genuine read error (corrupt/truncated zip, unreadable
+                    // entry) means the archive cannot load — tagged `corrupt`
+                    // so the `corrupt-jar` rule surfaces it as a warning.
                     ctx.store
                         .fact(self.id(), kind::UNPARSEABLE_ARCHIVE)
                         .subject(name.clone())
                         .attr("reason", reason)
+                        .attr("failure_class", "corrupt")
                         .source(SourceRef::file(jar.display().to_string()))
                         .confidence(0.7)
                         .emit();
@@ -550,17 +576,25 @@ struct CachedArtifact {
 
 #[derive(Serialize, Deserialize, Clone)]
 enum CachedJarOutcome {
-    Parsed(Vec<CachedArtifact>),
+    Parsed {
+        artifacts: Vec<CachedArtifact>,
+        #[serde(default)]
+        truncations: Vec<String>,
+    },
     NoManifest,
     Error(String),
 }
 
 fn scan_jar_cached(path: &Path, metadata_level: MetadataLevel) -> CachedJarOutcome {
     match parse_jar(path, metadata_level) {
-        Ok(artifacts) if artifacts.is_empty() => CachedJarOutcome::NoManifest,
-        Ok(artifacts) => {
-            CachedJarOutcome::Parsed(artifacts.iter().map(artifact_to_cached).collect())
+        // No artifacts and nothing truncated: a benign manifest-less jar.
+        Ok((artifacts, truncations)) if artifacts.is_empty() && truncations.is_empty() => {
+            CachedJarOutcome::NoManifest
         }
+        Ok((artifacts, truncations)) => CachedJarOutcome::Parsed {
+            artifacts: artifacts.iter().map(artifact_to_cached).collect(),
+            truncations,
+        },
         Err(e) => CachedJarOutcome::Error(e.as_str().to_string()),
     }
 }
@@ -903,21 +937,47 @@ impl ParseErr {
 /// (Create → Registrate → its libs); the bound stops pathological archives.
 const MAX_NEST_DEPTH: u8 = 4;
 
+use bounded_zip::cap_for_entry as cap_for;
+
+/// Bounded text read: an oversized or unreadable entry yields `None` instead of
+/// driving unbounded decompression. The per-jar oversized-entry sweep in
+/// [`parse_jar`] surfaces the truncation as a `scan_truncated` diagnostic.
 fn read_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
-    let mut f = archive.by_name(name).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    Some(s)
+    bounded_zip::read_zip_text_opt(archive, name, cap_for(name))
 }
 
+/// Bounded byte read; truncation semantics mirror [`read_entry`].
 fn read_entry_bytes<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     name: &str,
 ) -> Option<Vec<u8>> {
-    let mut f = archive.by_name(name).ok()?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).ok()?;
-    Some(buf)
+    bounded_zip::read_zip_bytes_bounded(archive, name, cap_for(name)).unwrap_or_default()
+}
+
+/// Sweep every entry once and report those whose declared uncompressed size
+/// exceeds the per-entry cap, so an oversized/crafted archive surfaces a
+/// `scan_truncated` reason rather than silently losing the skipped entry. The
+/// bounded readers above enforce the cap regardless of what the header claims;
+/// this sweep is the reporting half.
+fn oversized_entries<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in 0..archive.len() {
+        let Ok(entry) = archive.by_index(i) else {
+            continue;
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        let cap = cap_for(&name);
+        if entry.size() > cap {
+            out.push(format!(
+                "{name}: {} bytes exceeds {cap} byte cap, skipped",
+                entry.size()
+            ));
+        }
+    }
+    out
 }
 
 /// Dispatch on whichever manifest an archive carries. Generic over the reader so
@@ -1009,7 +1069,10 @@ fn collect_bundled<R: Read + Seek>(
         if let Ok(arts) = parse_archive(&mut inner) {
             for a in arts {
                 if !a.id.is_empty() {
-                    out.push((a.id, a.version));
+                    // Resolve the nested jar's own `${file.jarVersion}` against
+                    // its manifest, so a bundled provider carries a real version.
+                    let version = jar_meta::resolve_jar_version(&a.version, &mut inner);
+                    out.push((a.id, version));
                 }
             }
         }
@@ -1017,9 +1080,16 @@ fn collect_bundled<R: Read + Seek>(
     }
 }
 
-fn parse_jar(path: &Path, metadata_level: MetadataLevel) -> Result<Vec<Artifact>, ParseErr> {
+fn parse_jar(
+    path: &Path,
+    metadata_level: MetadataLevel,
+) -> Result<(Vec<Artifact>, Vec<String>), ParseErr> {
     let file = std::fs::File::open(path).map_err(|e| ParseErr(format!("open: {e}")))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| ParseErr(format!("zip: {e}")))?;
+
+    // Report entries skipped by the per-entry caps (the bounded readers enforce
+    // them; this is the diagnostic half).
+    let truncations = oversized_entries(&mut archive);
 
     let mut artifacts = parse_archive(&mut archive)?;
     if artifacts.is_empty() {
@@ -1073,6 +1143,14 @@ fn parse_jar(path: &Path, metadata_level: MetadataLevel) -> Result<Vec<Artifact>
         }
     }
 
+    // Forge substitutes `${file.jarVersion}` in `mods.toml` with the jar
+    // manifest's `Implementation-Version` at load time. Resolve it the same way
+    // (shared with the SBOM/identity scanners) so the literal placeholder is not
+    // an unparseable version that drops the mod from the dependency graph.
+    for a in &mut artifacts {
+        a.version = jar_meta::resolve_jar_version(&a.version, &mut archive);
+    }
+
     // Data-pack content signals (shared by all artifacts in the jar) — real
     // evidence for worldgen / dimension / content capability inference.
     let signals = collect_data_signals(&mut archive);
@@ -1091,7 +1169,7 @@ fn parse_jar(path: &Path, metadata_level: MetadataLevel) -> Result<Vec<Artifact>
         }
     }
 
-    Ok(artifacts)
+    Ok((artifacts, truncations))
 }
 
 /// Distinctive class-package roots a jar ships, for frame-to-jar ownership. Returns
@@ -2249,5 +2327,106 @@ mod version_tests {
         assert!(!version_ambiguous("1.2.3"));
         assert!(!version_ambiguous("4.0.0+build.7"));
         assert!(!version_ambiguous("1.0.0-alpha")); // alpha is not a second version
+    }
+}
+
+#[cfg(test)]
+mod jar_version_tests {
+    use super::{MetadataLevel, bounded_zip, parse_jar};
+    use std::io::Write;
+
+    fn write_jar(entries: &[(&str, &str)]) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "imd-jarver-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mod.jar");
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    }
+
+    #[test]
+    fn forge_jar_version_placeholder_resolves_from_manifest() {
+        // Forge replaces `${file.jarVersion}` with the manifest's
+        // Implementation-Version at load time; the scanner must do the same so
+        // the mod is not dropped from the dependency graph.
+        let jar = write_jar(&[
+            (
+                "META-INF/mods.toml",
+                "[[mods]]\nmodId=\"jade\"\nversion=\"${file.jarVersion}\"\n",
+            ),
+            (
+                "META-INF/MANIFEST.MF",
+                "Manifest-Version: 1.0\nImplementation-Version: 11.13.2+forge\n",
+            ),
+        ]);
+        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        let jade = arts.iter().find(|a| a.id == "jade").expect("jade");
+        assert_eq!(jade.version, "11.13.2+forge");
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn placeholder_without_manifest_attribute_is_left_intact() {
+        // No Implementation-Version to substitute → leave the raw value so the
+        // caller can still record it rather than fabricating a version.
+        let jar = write_jar(&[(
+            "META-INF/mods.toml",
+            "[[mods]]\nmodId=\"x\"\nversion=\"${file.jarVersion}\"\n",
+        )]);
+        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        assert_eq!(arts[0].version, "${file.jarVersion}");
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn cap_for_picks_per_entry_limit() {
+        use super::cap_for;
+        assert_eq!(
+            cap_for("META-INF/jars/inner.jar"),
+            bounded_zip::MAX_NESTED_JAR_BYTES
+        );
+        assert_eq!(cap_for("foo/Bar.class"), bounded_zip::MAX_CLASS_BYTES);
+        assert_eq!(cap_for("mymod-refmap.json"), bounded_zip::MAX_REFMAP_BYTES);
+        assert_eq!(
+            cap_for("mymod.mixins.json"),
+            bounded_zip::MAX_MIXIN_CONFIG_BYTES
+        );
+        assert_eq!(cap_for("fabric.mod.json"), bounded_zip::MAX_MANIFEST_BYTES);
+    }
+
+    #[test]
+    fn oversized_manifest_truncates_and_is_skipped() {
+        // A manifest past the cap must not be parsed (the mod is dropped) and the
+        // truncation must be reported, not silently swallowed.
+        let huge = format!(
+            "{{\"id\":\"x\",\"version\":\"1.0.0\",\"_pad\":\"{}\"}}",
+            "a".repeat((bounded_zip::MAX_MANIFEST_BYTES as usize) + 16)
+        );
+        let jar = write_jar(&[("fabric.mod.json", &huge)]);
+        let (arts, trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        assert!(
+            arts.is_empty(),
+            "oversized manifest must not yield an artifact"
+        );
+        assert!(
+            trunc
+                .iter()
+                .any(|t| t.contains("fabric.mod.json") && t.contains("cap")),
+            "expected a scan_truncated reason, got: {trunc:?}"
+        );
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
     }
 }

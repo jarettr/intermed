@@ -361,8 +361,20 @@ pub fn execute_with(
     registry: &FunctionRegistry,
 ) -> Result<Relation, ColumnarError> {
     let stats = store.statistics();
-    let optimized = crate::optimizer::optimize(expr, &stats);
-    let phys = physical::plan(&optimized, &stats);
+    execute_with_stats(expr, store, &stats, registry)
+}
+
+/// Like [`execute_with`], but reuses caller-owned catalog statistics. `QueryEngine`
+/// builds these once alongside the store and passes them here so a pack with many
+/// rules does not re-scan every batch just to optimize each plan.
+pub fn execute_with_stats(
+    expr: &RelExpr,
+    store: &ColumnarStore,
+    stats: &Statistics,
+    registry: &FunctionRegistry,
+) -> Result<Relation, ColumnarError> {
+    let optimized = crate::optimizer::optimize(expr, stats);
+    let phys = physical::plan(&optimized, stats);
     run_physical(&phys, store, registry, ExecutionStrategy::Auto)
 }
 
@@ -377,10 +389,21 @@ pub fn execute_strategy(
     strategy: ExecutionStrategy,
 ) -> Result<Relation, ColumnarError> {
     let stats = store.statistics();
-    let optimized = crate::optimizer::optimize(expr, &stats);
-    let phys = physical::plan(&optimized, &stats);
     let registry = FunctionRegistry::empty();
-    run_physical(&phys, store, &registry, strategy)
+    execute_strategy_with_stats(expr, store, &stats, &registry, strategy)
+}
+
+/// Execute with an explicit strategy and caller-owned statistics/registry.
+pub fn execute_strategy_with_stats(
+    expr: &RelExpr,
+    store: &ColumnarStore,
+    stats: &Statistics,
+    registry: &FunctionRegistry,
+    strategy: ExecutionStrategy,
+) -> Result<Relation, ColumnarError> {
+    let optimized = crate::optimizer::optimize(expr, stats);
+    let phys = physical::plan(&optimized, stats);
+    run_physical(&phys, store, registry, strategy)
 }
 
 /// Run an already-lowered physical plan, resolving `strategy` against it: the
@@ -610,6 +633,75 @@ fn eval_condition(cond: &Condition, resolve: &impl Fn(&str) -> Value) -> bool {
     }
 }
 
+fn term_for_alias<'a>(term: &'a str, alias: &str) -> Option<&'a str> {
+    let (term_alias, col) = term.split_once('.')?;
+    (term_alias == alias).then_some(col)
+}
+
+fn mandatory_join_filter_keys(
+    cond: &Condition,
+    left_alias: &str,
+    right_alias: &str,
+) -> Vec<(String, String)> {
+    match cond {
+        Condition::ColCmp {
+            left,
+            op: CmpOp::Eq,
+            right,
+        } => {
+            if let (Some(l), Some(r)) = (
+                term_for_alias(left, left_alias),
+                term_for_alias(right, right_alias),
+            ) {
+                return vec![(l.to_string(), r.to_string())];
+            }
+            if let (Some(l), Some(r)) = (
+                term_for_alias(right, left_alias),
+                term_for_alias(left, right_alias),
+            ) {
+                return vec![(l.to_string(), r.to_string())];
+            }
+            Vec::new()
+        }
+        Condition::And(a, b) => {
+            let mut out = mandatory_join_filter_keys(a, left_alias, right_alias);
+            out.extend(mandatory_join_filter_keys(b, left_alias, right_alias));
+            out
+        }
+        // Keys under OR/NOT are not mandatory: using them for an index would drop
+        // pairs that satisfy another branch.
+        _ => Vec::new(),
+    }
+}
+
+fn join_filter_pair_matches(
+    condition: &Condition,
+    left_alias: &str,
+    right_alias: &str,
+    l_schema: &Schema,
+    r_schema: &Schema,
+    lt: &Tuple,
+    rt: &Tuple,
+) -> bool {
+    let pick = |schema: &Schema, t: &Tuple, col: &str| -> Value {
+        schema
+            .pos(col)
+            .and_then(|i| t.get(i).cloned())
+            .unwrap_or(Value::Null)
+    };
+    let resolve = |name: &str| -> Value {
+        let (alias, col) = name.split_once('.').unwrap_or(("", name));
+        if alias == left_alias {
+            pick(l_schema, lt, col)
+        } else if alias == right_alias {
+            pick(r_schema, rt, col)
+        } else {
+            Value::Null
+        }
+    };
+    eval_condition(condition, &resolve)
+}
+
 /// Declarative-rule join: cross two scanned kinds and keep rows satisfying `condition`
 /// (alias-qualified). Output columns mirror the SQL form
 /// (`left_fact_id`/`left_subject`/`right_fact_id`/`right_subject`).
@@ -639,25 +731,96 @@ fn join_filter<'a>(
     };
 
     let mut out: Vec<Tuple> = Vec::new();
-    for lt in l_rows {
-        for rt in r_rows {
-            let resolve = |name: &str| -> Value {
-                let (alias, col) = name.split_once('.').unwrap_or(("", name));
-                if alias == left_alias {
-                    pick(&l_schema, lt, col)
-                } else if alias == right_alias {
-                    pick(&r_schema, rt, col)
-                } else {
-                    Value::Null
+    let keys = mandatory_join_filter_keys(condition, left_alias, right_alias);
+    if keys.is_empty() {
+        for lt in l_rows {
+            for rt in r_rows {
+                if join_filter_pair_matches(
+                    condition,
+                    left_alias,
+                    right_alias,
+                    &l_schema,
+                    &r_schema,
+                    lt,
+                    rt,
+                ) {
+                    out.push(vec![
+                        pick(&l_schema, lt, "fact_id"),
+                        pick(&l_schema, lt, "subject"),
+                        pick(&r_schema, rt, "fact_id"),
+                        pick(&r_schema, rt, "subject"),
+                    ]);
                 }
-            };
-            if eval_condition(condition, &resolve) {
-                out.push(vec![
-                    pick(&l_schema, lt, "fact_id"),
-                    pick(&l_schema, lt, "subject"),
-                    pick(&r_schema, rt, "fact_id"),
-                    pick(&r_schema, rt, "subject"),
-                ]);
+            }
+        }
+    } else {
+        let l_key_pos: Vec<Option<usize>> = keys.iter().map(|(l, _)| l_schema.pos(l)).collect();
+        let r_key_pos: Vec<Option<usize>> = keys.iter().map(|(_, r)| r_schema.pos(r)).collect();
+        if r_rows.len() <= l_rows.len() {
+            let mut index: AHashMap<Vec<HashKey>, Vec<&Tuple>> = AHashMap::new();
+            for rt in r_rows {
+                if let Some(key) = key_of(rt, &r_key_pos) {
+                    index.entry(key).or_default().push(rt);
+                }
+            }
+            for lt in l_rows {
+                let Some(key) = key_of(lt, &l_key_pos) else {
+                    continue;
+                };
+                let Some(candidates) = index.get(&key) else {
+                    continue;
+                };
+                for rt in candidates {
+                    if join_filter_pair_matches(
+                        condition,
+                        left_alias,
+                        right_alias,
+                        &l_schema,
+                        &r_schema,
+                        lt,
+                        rt,
+                    ) {
+                        out.push(vec![
+                            pick(&l_schema, lt, "fact_id"),
+                            pick(&l_schema, lt, "subject"),
+                            pick(&r_schema, rt, "fact_id"),
+                            pick(&r_schema, rt, "subject"),
+                        ]);
+                    }
+                }
+            }
+        } else {
+            let mut index: AHashMap<Vec<HashKey>, Vec<&Tuple>> = AHashMap::new();
+            for lt in l_rows {
+                if let Some(key) = key_of(lt, &l_key_pos) {
+                    index.entry(key).or_default().push(lt);
+                }
+            }
+            for rt in r_rows {
+                let Some(key) = key_of(rt, &r_key_pos) else {
+                    continue;
+                };
+                let Some(candidates) = index.get(&key) else {
+                    continue;
+                };
+                for lt in candidates {
+                    if join_filter_pair_matches(
+                        condition,
+                        left_alias,
+                        right_alias,
+                        &l_schema,
+                        &r_schema,
+                        lt,
+                        rt,
+                    ) {
+                        out.push(vec![
+                            pick(&l_schema, lt, "fact_id"),
+                            pick(&l_schema, lt, "subject"),
+                            pick(&r_schema, rt, "fact_id"),
+                            pick(&r_schema, rt, "subject"),
+                        ]);
+                    }
+                }
             }
         }
     }
@@ -732,24 +895,30 @@ enum HashKey {
     Int(i64),
     Bool(bool),
     Float(u64),
-    Null,
 }
 
-fn hash_key(v: &Value) -> HashKey {
+fn hash_key(v: &Value) -> Option<HashKey> {
     match v {
-        Value::Str(s) => HashKey::Str(s.clone()),
-        Value::Int(i) => HashKey::Int(*i),
-        Value::Bool(b) => HashKey::Bool(*b),
-        Value::Float(f) => HashKey::Float(f.to_bits()),
-        Value::Null => HashKey::Null,
+        Value::Str(s) => Some(HashKey::Str(s.clone())),
+        Value::Int(i) => Some(HashKey::Int(*i)),
+        Value::Bool(b) => Some(HashKey::Bool(*b)),
+        Value::Float(f) => Some(HashKey::Float(f.to_bits())),
+        Value::Null => None,
     }
 }
 
-/// Compose the join key of a tuple over the given column positions (absent → `Null`).
-fn key_of(tuple: &Tuple, positions: &[Option<usize>]) -> Vec<HashKey> {
+/// Compose the join key of a tuple over the given column positions.
+///
+/// SQL/DuckDB semantics: an absent/`NULL` key term does not join, even against
+/// another `NULL`. Returning `None` keeps those rows out of the hash table and
+/// out of probe candidates.
+fn key_of(tuple: &Tuple, positions: &[Option<usize>]) -> Option<Vec<HashKey>> {
     positions
         .iter()
-        .map(|p| hash_key(p.and_then(|i| tuple.get(i)).unwrap_or(&Value::Null)))
+        .map(|p| {
+            let value = p.and_then(|i| tuple.get(i))?;
+            hash_key(value)
+        })
         .collect()
 }
 
@@ -833,16 +1002,17 @@ fn hash_join<'a>(
     // Build phase.
     let mut table: AHashMap<Vec<HashKey>, Vec<Tuple>> = AHashMap::new();
     for tuple in build_stream.iter {
-        table
-            .entry(key_of(&tuple, &build_key_pos))
-            .or_default()
-            .push(tuple);
+        if let Some(key) = key_of(&tuple, &build_key_pos) {
+            table.entry(key).or_default().push(tuple);
+        }
     }
 
     // Probe phase: stream the probe side, merge respecting the logical left/right
     // relations (not the physical build/probe roles).
     let iter = probe_stream.iter.flat_map(move |ptuple| {
-        let key = key_of(&ptuple, &probe_key_pos);
+        let Some(key) = key_of(&ptuple, &probe_key_pos) else {
+            return Vec::new().into_iter();
+        };
         match table.get(&key) {
             Some(bucket) => bucket
                 .iter()
@@ -880,7 +1050,7 @@ pub(crate) fn scalar_to_value(s: &ScalarValue) -> Value {
 /// the IR engine selects exactly the facts the interpreter's `where_all`/`where_not`
 /// would. Numeric comparisons (below) stay typed.
 fn value_eq(lhs: &Value, rhs: &Value) -> bool {
-    if lhs.is_null() {
+    if lhs.is_null() || rhs.is_null() {
         return false;
     }
     lhs == rhs || lhs.to_display() == rhs.to_display()
@@ -889,7 +1059,7 @@ fn value_eq(lhs: &Value, rhs: &Value) -> bool {
 pub(crate) fn eval_cmp(lhs: &Value, op: CmpOp, rhs: &Value) -> bool {
     match op {
         CmpOp::Eq => value_eq(lhs, rhs),
-        CmpOp::Ne => !value_eq(lhs, rhs),
+        CmpOp::Ne => !lhs.is_null() && !rhs.is_null() && !value_eq(lhs, rhs),
         CmpOp::Lt => matches!(lhs.partial_cmp_value(rhs), Some(Ordering::Less)),
         CmpOp::Le => matches!(
             lhs.partial_cmp_value(rhs),
@@ -1051,16 +1221,26 @@ fn compute_window(
                 dense[i] = dense[i - 1] + 1;
             }
         }
+        let partition_values: Vec<Option<Value>> = functions
+            .iter()
+            .zip(fpos)
+            .map(|(f, &fp)| match f.func {
+                WindowFn::Sum | WindowFn::Avg | WindowFn::Min | WindowFn::Max => {
+                    window_agg(f.func, &part, fp).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Result<_, ColumnarError>>()?;
         for (idx, row) in part.iter().enumerate() {
             let mut tuple = row.clone();
-            for (f, &fp) in functions.iter().zip(fpos) {
+            for (fn_idx, f) in functions.iter().enumerate() {
                 let v = match f.func {
                     WindowFn::RowNumber => Value::Int((idx + 1) as i64),
                     WindowFn::Rank => Value::Int(rank[idx] as i64),
                     WindowFn::DenseRank => Value::Int(dense[idx] as i64),
                     WindowFn::Count => Value::Int(part.len() as i64),
                     WindowFn::Sum | WindowFn::Avg | WindowFn::Min | WindowFn::Max => {
-                        window_agg(f.func, &part, fp)?
+                        partition_values[fn_idx].clone().unwrap_or(Value::Null)
                     }
                 };
                 tuple.push(v);
@@ -1119,30 +1299,37 @@ fn transitive_closure<'a>(
     to: Option<usize>,
 ) -> Vec<Tuple> {
     let mut closure: AHashSet<(String, String)> = AHashSet::new();
+    let mut adjacency: AHashMap<String, AHashSet<String>> = AHashMap::new();
     if let (Some(fi), Some(ti)) = (from, to) {
         for tuple in rows {
-            let (Some(a), Some(b)) = (
-                tuple.get(fi).map(Value::to_display),
-                tuple.get(ti).map(Value::to_display),
-            ) else {
+            let (Some(a), Some(b)) = (tuple.get(fi), tuple.get(ti)) else {
                 continue;
             };
+            if a.is_null() || b.is_null() {
+                continue;
+            }
+            let (a, b) = (a.to_display(), b.to_display());
+            adjacency.entry(a.clone()).or_default().insert(b.clone());
             closure.insert((a, b));
         }
     }
-    loop {
+    let mut delta = closure.clone();
+    while !delta.is_empty() {
         let mut added = Vec::new();
-        for (a, b) in &closure {
-            for (c, d) in &closure {
-                if b == c && !closure.contains(&(a.clone(), d.clone())) {
-                    added.push((a.clone(), d.clone()));
+        for (a, b) in &delta {
+            if let Some(targets) = adjacency.get(b) {
+                for d in targets {
+                    if !closure.contains(&(a.clone(), d.clone())) {
+                        added.push((a.clone(), d.clone()));
+                    }
                 }
             }
         }
         if added.is_empty() {
             break;
         }
-        closure.extend(added);
+        delta = added.into_iter().collect();
+        closure.extend(delta.iter().cloned());
     }
     // Deterministic output order (the set is unordered).
     let mut pairs: Vec<(String, String)> = closure.into_iter().collect();
@@ -1323,6 +1510,71 @@ mod tests {
     }
 
     #[test]
+    fn hash_join_does_not_match_null_keys() {
+        let mut s = FactStore::new();
+        s.fact("left", "left_rel")
+            .subject("left-null")
+            .attr("other", "present")
+            .emit();
+        s.fact("left", "left_rel")
+            .subject("left-x")
+            .attr("key", "x")
+            .emit();
+        s.fact("right", "right_rel")
+            .subject("right-null")
+            .attr("other", "present")
+            .emit();
+        s.fact("right", "right_rel")
+            .subject("right-x")
+            .attr("key", "x")
+            .emit();
+        let store = ColumnarStore::from_facts(s.all());
+
+        let plan = RelExpr::scan("left_rel").join(
+            RelExpr::scan("right_rel"),
+            vec![("key".into(), "key".into())],
+        );
+        let r = execute(&plan, &store).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r.rows[0].get("subject").and_then(Value::as_str),
+            Some("left-x")
+        );
+        assert_eq!(
+            r.rows[0].get("right.subject").and_then(Value::as_str),
+            Some("right-x")
+        );
+    }
+
+    #[test]
+    fn ne_filter_does_not_match_null() {
+        let mut s = FactStore::new();
+        s.fact("meta", "mod")
+            .subject("missing-loader")
+            .attr("file", "a.jar")
+            .emit();
+        s.fact("meta", "mod")
+            .subject("forge")
+            .attr("loader", "forge")
+            .emit();
+        let store = ColumnarStore::from_facts(s.all());
+
+        let plan = RelExpr::scan("mod")
+            .filter(Predicate {
+                column: "loader".into(),
+                op: CmpOp::Ne,
+                value: ScalarValue::Str("fabric".into()),
+            })
+            .project(vec!["subject".into()]);
+        let r = execute(&plan, &store).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r.rows[0].get("subject").and_then(Value::as_str),
+            Some("forge")
+        );
+    }
+
+    #[test]
     fn hash_join_output_independent_of_build_side() {
         // The merged column layout must not depend on which side builds the table.
         let s = store();
@@ -1456,6 +1708,64 @@ mod tests {
         assert_eq!(
             r.rows[0].get("right_subject").and_then(Value::as_str),
             Some("server")
+        );
+    }
+
+    #[test]
+    fn join_filter_does_not_match_null_equality_or_inequality() {
+        use crate::ir::Condition;
+        let mut s = FactStore::new();
+        s.fact("meta", "mod")
+            .subject("missing-loader")
+            .attr("file", "a.jar")
+            .emit();
+        s.fact("meta", "mod")
+            .subject("fabric-mod")
+            .attr("loader", "fabric")
+            .emit();
+        s.fact("env", "environment")
+            .subject("missing-env-loader")
+            .attr("side", "server")
+            .emit();
+        s.fact("env", "environment")
+            .subject("forge-env")
+            .attr("loader", "forge")
+            .emit();
+        let store = ColumnarStore::from_facts(s.all());
+
+        let eq_plan = RelExpr::JoinFilter {
+            left_kind: "mod".into(),
+            left_alias: "m".into(),
+            right_kind: "environment".into(),
+            right_alias: "e".into(),
+            condition: Condition::ColCmp {
+                left: "m.loader".into(),
+                op: CmpOp::Eq,
+                right: "e.loader".into(),
+            },
+        };
+        assert!(execute(&eq_plan, &store).unwrap().is_empty());
+
+        let ne_plan = RelExpr::JoinFilter {
+            left_kind: "mod".into(),
+            left_alias: "m".into(),
+            right_kind: "environment".into(),
+            right_alias: "e".into(),
+            condition: Condition::ColCmp {
+                left: "m.loader".into(),
+                op: CmpOp::Ne,
+                right: "e.loader".into(),
+            },
+        };
+        let r = execute(&ne_plan, &store).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r.rows[0].get("left_subject").and_then(Value::as_str),
+            Some("fabric-mod")
+        );
+        assert_eq!(
+            r.rows[0].get("right_subject").and_then(Value::as_str),
+            Some("forge-env")
         );
     }
 

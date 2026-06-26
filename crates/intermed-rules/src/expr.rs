@@ -117,15 +117,18 @@ fn collect_equijoins(expr: &Expr) -> Vec<(String, String)> {
             }
         }
         Expr::And(a, b) => {
+            // A top-level conjunction: each equality must hold, so any equijoin
+            // from either side is a sound mandatory index key.
             let mut out = collect_equijoins(a);
             out.extend(collect_equijoins(b));
             out
         }
-        Expr::Or(a, b) => {
-            let mut out = collect_equijoins(a);
-            out.extend(collect_equijoins(b));
-            out
-        }
+        // A disjunction yields NO mandatory key: an equality under `OR` need not
+        // hold for a matching pair, so using it as the hash-index key would drop
+        // pairs that only satisfy the other branch. Returning empty forces the
+        // interpreter onto its nested-loop fallback, which evaluates the full
+        // `on` expression (including the `OR`) against every candidate pair.
+        Expr::Or(_, _) => Vec::new(),
         Expr::Not(_) => Vec::new(),
         _ => Vec::new(),
     }
@@ -670,6 +673,25 @@ fn compare(left: &str, right: &str, op: CmpOp) -> bool {
 mod tests {
     use super::*;
     use intermed_doctor_core::facts::{FactStore, kind};
+
+    #[test]
+    fn equijoin_keys_only_from_top_level_conjunctions() {
+        // A plain equality and a top-level AND yield mandatory keys.
+        assert_eq!(
+            extract_equijoin_keys("a.id = b.id"),
+            vec![("a.id".to_string(), "b.id".to_string())]
+        );
+        assert_eq!(extract_equijoin_keys("a.id = b.id AND a.x = b.x").len(), 2);
+        // A disjunction yields NO key: neither equality is mandatory, so using
+        // one as an index would drop pairs matching only the other branch.
+        assert!(extract_equijoin_keys("a.id = b.id OR a.alias = b.id").is_empty());
+        // A mandatory conjunct beside a disjunction still contributes only the
+        // mandatory key; the OR part is left to full predicate evaluation.
+        assert_eq!(
+            extract_equijoin_keys("a.k = b.k AND (a.id = b.id OR a.alias = b.id)"),
+            vec![("a.k".to_string(), "b.k".to_string())]
+        );
+    }
 
     #[test]
     fn referenced_aliases_extracts_idents_and_skips_settings() {

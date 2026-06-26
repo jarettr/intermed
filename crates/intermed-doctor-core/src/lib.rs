@@ -16,11 +16,13 @@
 //! the seam that keeps later phases cheap: a new layer is a new `Collector`
 //! impl plus one registration line.
 
+pub mod bounded_zip;
 pub mod collector;
 pub mod engine;
 pub mod instance_layout;
 pub mod io_util;
 pub mod jar_cache;
+pub mod jar_meta;
 pub mod layer;
 pub mod modpack;
 pub mod modpack_manifest;

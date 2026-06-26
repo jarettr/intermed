@@ -97,6 +97,55 @@ fn doctor_dump_facts_contains_phase_two_and_three_facts() {
 }
 
 #[test]
+fn doctor_writes_multiple_report_artifacts_in_one_run() {
+    let fixture = Fixture::new("doctor-multi-output");
+    fixture.write_safe_merge_mods();
+    let json = fixture.root.join("report.json");
+    let sarif = fixture.root.join("report.sarif");
+    let html = fixture.root.join("report.html");
+
+    let output = run([
+        "doctor",
+        fixture.mods_str(),
+        "--json",
+        json.to_str().unwrap(),
+        "--sarif",
+        sarif.to_str().unwrap(),
+        "--html",
+        html.to_str().unwrap(),
+        "--exit-zero",
+    ]);
+    assert_success(&output);
+    assert!(
+        output.stdout.is_empty(),
+        "file artifact run should not print"
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
+    assert_eq!(report["schema"], "intermed-doctor-report-v1");
+    let sarif_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sarif).unwrap()).unwrap();
+    assert_eq!(sarif_doc["version"], "2.1.0");
+    assert!(
+        std::fs::read_to_string(html)
+            .unwrap()
+            .starts_with("<!DOCTYPE html>")
+    );
+}
+
+#[test]
+fn doctor_rejects_two_stdout_report_formats() {
+    let fixture = Fixture::new("doctor-double-stdout");
+    fixture.write_safe_merge_mods();
+
+    let output = run(["doctor", fixture.mods_str(), "--json", "--sarif"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("only one report format can write to stdout"));
+}
+
+#[test]
 fn doctor_dump_facts_contains_security_predicates() {
     let fixture = Fixture::new("dump-facts-security");
     fixture.write_process_spawn_mod();

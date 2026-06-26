@@ -115,7 +115,7 @@ pub fn detect_from_zip(archive: &mut ZipArchive<File>) -> ArtifactIdentity {
     }
     if let Some(text) = read_zip_text(archive, "META-INF/mods.toml") {
         if let Some(id) = forge_identity(&text, "forge") {
-            return id;
+            return resolve_identity_version(archive, id);
         }
     }
     if let Some(text) = read_zip_text(archive, "plugin.yml") {
@@ -130,10 +130,25 @@ pub fn detect_from_zip(archive: &mut ZipArchive<File>) -> ArtifactIdentity {
     }
     if let Some(text) = read_zip_text(archive, "META-INF/neoforge.mods.toml") {
         if let Some(id) = forge_identity(&text, "neoforge") {
-            return id;
+            return resolve_identity_version(archive, id);
         }
     }
     ArtifactIdentity::default()
+}
+
+/// Apply Forge's `${file.jarVersion}` → `Implementation-Version` substitution
+/// (shared [`jar_meta`] helper) so this identity layer agrees with the metadata
+/// and SBOM scanners instead of leaking the raw placeholder.
+fn resolve_identity_version(
+    archive: &mut ZipArchive<File>,
+    mut identity: ArtifactIdentity,
+) -> ArtifactIdentity {
+    if let Some(version) = identity.version.as_ref() {
+        identity.version = Some(intermed_doctor_core::jar_meta::resolve_jar_version(
+            version, archive,
+        ));
+    }
+    identity
 }
 
 /// The file stem of an archive path (used as a last-resort id).

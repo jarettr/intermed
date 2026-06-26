@@ -78,7 +78,8 @@ pub use datalog::{FACT_SCHEMA, to_datalog};
 pub use engine::QueryEngine;
 pub use error::ColumnarError;
 pub use executor::{
-    ColumnarStore, count_physical, execute, execute_physical, execute_strategy, execute_with,
+    ColumnarStore, count_physical, execute, execute_physical, execute_strategy,
+    execute_strategy_with_stats, execute_with, execute_with_stats,
 };
 pub use explain::{explain, explain_analyze};
 pub use external::{ExternalFunction, FunctionRegistry};

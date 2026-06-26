@@ -9,7 +9,7 @@ It explains; it does not change anything. A run never edits your pack, downloads
 mods, or starts the game. Output is a report you read in a terminal, or JSON /
 SARIF / HTML for tools and CI.
 
-This is `0.1.2-alpha`. The analysis runs and is tested; commands, flags, and
+This is `0.1.3-alpha`. The analysis runs and is tested; commands, flags, and
 output shapes may still change. The [roadmap](docs/ROADMAP.md) tracks what is
 planned and what is out of scope.
 
@@ -18,7 +18,7 @@ intermed doctor ./mods
 ```
 
 ```
-InterMed Doctor v0.1.2-alpha
+InterMed Doctor v0.1.3-alpha
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 
@@ -71,7 +71,7 @@ completions.
 tar -xzf intermed-*-linux-x86_64.tar.gz
 ./intermed-*/intermed doctor ./mods
 
-# macOS — Apple Silicon (...-macos-aarch64) or Intel (...-macos-x86_64)
+# macOS — Apple Silicon (...-macos-aarch64)
 tar -xzf intermed-*-macos-*.tar.gz
 xattr -d com.apple.quarantine intermed-*/intermed   # unsigned: clear Gatekeeper
 ./intermed-*/intermed doctor ./mods
@@ -79,6 +79,9 @@ xattr -d com.apple.quarantine intermed-*/intermed   # unsigned: clear Gatekeeper
 
 On Windows, unzip `intermed-*-windows-x86_64.zip` and run `intermed.exe` from
 PowerShell: `.\intermed.exe doctor C:\path\to\mods`.
+
+Intel macOS users can build from source with Rust; the release matrix currently
+ships Apple Silicon macOS archives only.
 
 The `-duckdb` archives are the same tool with the optional DuckDB backend compiled
 in (`--logic duckdb` and the `--db` analytics store); the Linux one needs glibc,

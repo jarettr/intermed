@@ -7,6 +7,7 @@ license.workspace = true
 description = "Layer H — SBOM / provenance / packaging hygiene (Phase 6)."
 
 [dependencies]
+chrono.workspace = true
 intermed-doctor-core.workspace = true
 rayon.workspace = true
 serde.workspace = true

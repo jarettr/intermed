@@ -8,6 +8,7 @@ description = "InterMed fact model and fact store — the language-independent g
 
 [dependencies]
 serde.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

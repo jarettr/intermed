@@ -3,6 +3,8 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
 
 jobs:
   rust:
@@ -46,6 +48,22 @@ jobs:
       - name: CLI duckdb e2e
         run: cargo test -p intermed-cli --features duckdb --test duckdb_e2e
 
+  optional-backends:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+      - name: DataFusion backend compiles
+        run: cargo check -p intermed-columnar --features datafusion-backend
+      - name: Polars backend compiles
+        run: cargo check -p intermed-columnar --features polars-backend
+      - name: Ascent backend compiles
+        run: cargo check -p intermed-columnar --features ascent-backend
+      - name: WASM backend tests
+        run: cargo test -p intermed-columnar --features wasm
+
   # Dependency security audit (RustSec advisory DB). Fails the build on a known
   # vulnerability; accepted unmaintained-only advisories are listed in
   # .cargo/audit.toml so the check stays green while a real new advisory surfaces.
@@ -60,3 +78,19 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: Audit dependencies
         run: cargo audit
+
+  fuzz-smoke:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run fuzz smoke targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for target in class_parser deps_semver log_stacktrace resource_ast resource_json runtime_log tiny_mappings; do
+            cargo fuzz run "$target" -- -max_total_time=45
+          done

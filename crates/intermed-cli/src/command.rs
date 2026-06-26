@@ -166,15 +166,21 @@ pub struct DoctorArgs {
 #[derive(Args, Default)]
 pub struct DoctorOutputArgs {
     /// Emit the full report as `intermed-doctor-report-v1` JSON.
-    #[arg(long, conflicts_with_all = ["sarif", "html"])]
-    pub json: bool,
+    ///
+    /// With no value, writes to stdout. With `FILE`, writes that artifact and can
+    /// be combined with `--sarif FILE` / `--html FILE` in one scan.
+    #[arg(long, value_name = "FILE", num_args = 0..=1)]
+    pub json: Option<Option<PathBuf>>,
 
     /// Emit SARIF 2.1.0 (for IDE / CI code-scanning).
-    #[arg(long, conflicts_with_all = ["json", "html"])]
-    pub sarif: bool,
+    ///
+    /// With no value, writes to stdout. With `FILE`, writes that artifact and can
+    /// be combined with `--json FILE` / `--html FILE` in one scan.
+    #[arg(long, value_name = "FILE", num_args = 0..=1)]
+    pub sarif: Option<Option<PathBuf>>,
 
     /// Write a self-contained HTML report (`index.html` style).
-    #[arg(long, value_name = "FILE", conflicts_with_all = ["json", "sarif"])]
+    #[arg(long, value_name = "FILE")]
     pub html: Option<PathBuf>,
 
     /// Disable ANSI colour even on a TTY.

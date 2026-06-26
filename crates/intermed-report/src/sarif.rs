@@ -85,7 +85,7 @@ pub fn to_sarif_with_facts(report: &DoctorReport, facts: &[Fact]) -> Value {
             "tool": {
                 "driver": {
                     "name": "InterMed Doctor",
-                    "informationUri": "https://github.com/intermed/intermed",
+                    "informationUri": "https://github.com/jarettr/intermed",
                     "version": report.tool_version,
                     "rules": rules
                 }

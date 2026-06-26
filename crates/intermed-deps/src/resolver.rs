@@ -42,6 +42,24 @@ pub enum ResolutionSkipReason {
     ProviderBuildFailed,
 }
 
+impl ResolutionSkipReason {
+    /// A one-line, user-facing explanation of why global resolution did not run.
+    #[must_use]
+    pub fn human_reason(self) -> &'static str {
+        match self {
+            ResolutionSkipReason::NoResolvablePackages => {
+                "no installed mods carried a semver-parseable version, so PubGrub had nothing to solve"
+            }
+            ResolutionSkipReason::RootVersionUnparseable => {
+                "the synthetic modpack root version could not be parsed"
+            }
+            ResolutionSkipReason::ProviderBuildFailed => {
+                "the dependency provider could not be built from the installed set"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ResolverError {
     #[error("provider build failed: {0}")]

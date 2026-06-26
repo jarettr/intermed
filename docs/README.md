@@ -1,6 +1,6 @@
 # Documentation
 
-InterMed is at `0.1.2-alpha`; the [roadmap](ROADMAP.md) tracks what is planned.
+InterMed is at `0.1.3-alpha`; the [roadmap](ROADMAP.md) tracks what is planned.
 
 The documentation has three layers. Start at the top and go deeper only when you
 need to.

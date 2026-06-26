@@ -3,7 +3,7 @@
 A `doctor` report has three parts: a header, the findings, and a summary line.
 
 ```
-InterMed Doctor v0.1.2-alpha
+InterMed Doctor v0.1.3-alpha
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 

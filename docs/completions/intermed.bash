@@ -726,7 +726,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__db__subcmd__query)
-            opts="-v -h --db --config --dump-config --quiet --verbose --help <SQL>"
+            opts="-v -h --db --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -808,7 +808,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__demo__subcmd__report)
-            opts="-o -v -h --out --config --dump-config --quiet --verbose --help <RUN_DIR>"
+            opts="-o -v -h --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -852,7 +852,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__graph)
-            opts="-v -h --mods-dir --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --mods-dir --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -986,7 +986,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__implicit)
-            opts="-v -h --namespace --mods-dir --json --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --namespace --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1012,7 +1012,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__path)
-            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <FROM> <TO> [TARGET]"
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1034,7 +1034,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__resolve)
-            opts="-v -h --mods-dir --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --mods-dir --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1056,7 +1056,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__why)
-            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1078,7 +1078,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__deps__subcmd__why__subcmd__missing)
-            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1100,7 +1100,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__doctor)
-            opts="-v -h --mods-dir --pack-manifest --mixin-risk --logic --threads --jobs --json --sarif --html --no-color --profile --telemetry-out --telemetry-endpoint --telemetry-include-log-excerpts --exit-zero --no-cache --cache-dir --cache-remote-dir --cache-max-size --cache-max-age-days --changed-since --dump-facts --explain --performance --spark-report --perf-tick-spike-ms --perf-high-cpu-percent --perf-hot-method-floor --perf-tick-spike-warn-ms --metadata-level --resource-level --security-min-note-signals --sbom-well-identified-trust --log-parallel-line-threshold --security-corroborated-confidence --minecraft-jar --minecraft-mappings --mixin-level --no-mixin-handler-effects --mixin-handler-effects --no-mixin-recommendations --mixin-recommendations --db --db-best-effort --rule-pack --rule-pack-dir --core-rule-pack-only --rule-pack-trusted-keys --rule-pack-registry --allow-insecure-registry --allow-unsigned-rules --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --mods-dir --pack-manifest --mixin-risk --logic --threads --jobs --json --sarif --html --no-color --profile --telemetry-out --telemetry-endpoint --telemetry-include-log-excerpts --exit-zero --no-cache --cache-dir --cache-remote-dir --cache-max-size --cache-max-age-days --changed-since --dump-facts --explain --performance --spark-report --perf-tick-spike-ms --perf-high-cpu-percent --perf-hot-method-floor --perf-tick-spike-warn-ms --metadata-level --resource-level --security-min-note-signals --sbom-well-identified-trust --log-parallel-line-threshold --security-corroborated-confidence --minecraft-jar --minecraft-mappings --mixin-level --no-mixin-handler-effects --mixin-handler-effects --no-mixin-recommendations --mixin-recommendations --db --db-best-effort --rule-pack --rule-pack-dir --core-rule-pack-only --rule-pack-trusted-keys --rule-pack-registry --allow-insecure-registry --allow-unsigned-rules --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2264,7 +2264,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__impact__subcmd__remove)
-            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> [TARGET]"
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2286,7 +2286,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__impact__subcmd__update)
-            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help <ID> <FROM> <TO> [TARGET]"
+            opts="-v -h --mods-dir --json --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2326,7 +2326,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__lab__subcmd__discover)
-            opts="-v -h --out --config --dump-config --quiet --verbose --help <CANDIDATES>"
+            opts="-v -h --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2470,7 +2470,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__lab__subcmd__report)
-            opts="-v -h --out --config --dump-config --quiet --verbose --help <RUN>"
+            opts="-v -h --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2492,7 +2492,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__lab__subcmd__run)
-            opts="-v -h --logs --out --lab-excerpt-max --config --dump-config --quiet --verbose --help <LOCK>"
+            opts="-v -h --logs --out --lab-excerpt-max --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2522,7 +2522,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__mixin__subcmd__map)
-            opts="-v -h --graph-format --graph-out --no-color --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --graph-format --graph-out --no-color --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2566,7 +2566,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__check)
-            opts="-v -h --require-signature --trusted-keys --trace --facts --config --dump-config --quiet --verbose --help [PATH]"
+            opts="-v -h --require-signature --trusted-keys --trace --facts --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2592,7 +2592,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__explain)
-            opts="-v -h --rule --facts --config --dump-config --quiet --verbose --help [PACK]"
+            opts="-v -h --rule --facts --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2618,7 +2618,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__generate)
-            opts="-v -h --backend --out --config --dump-config --quiet --verbose --help [PACK]"
+            opts="-v -h --backend --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2840,7 +2840,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__sign)
-            opts="-v -h --key --out --config --dump-config --quiet --verbose --help <PACK>"
+            opts="-v -h --key --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2900,7 +2900,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__rules__subcmd__verify)
-            opts="-v -h --trusted-keys --config --dump-config --quiet --verbose --help <PACK>"
+            opts="-v -h --trusted-keys --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -2940,7 +2940,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__sbom__subcmd__export)
-            opts="-v -h --mods-dir --format --out --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --mods-dir --format --out --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3012,7 +3012,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__spark__subcmd__map)
-            opts="-v -h --spark-report --no-color --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --spark-report --no-color --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3174,7 +3174,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__vfs__subcmd__explain)
-            opts="-v -h --path --ast --resource-level --no-color --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --path --ast --resource-level --no-color --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3270,7 +3270,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__vfs__subcmd__overlay)
-            opts="-v -h --out --include-unsafe-winners --explain-plan --no-color --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --out --include-unsafe-winners --explain-plan --no-color --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -3292,7 +3292,7 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__vfs__subcmd__scan)
-            opts="-v -h --path --ast --resource-level --no-color --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --path --ast --resource-level --no-color --config --dump-config --quiet --verbose --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0

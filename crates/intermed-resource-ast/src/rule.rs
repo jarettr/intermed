@@ -26,7 +26,7 @@ impl Rule for ResourceSemanticRule {
         "resource-semantics"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let diffs: Vec<&Fact> = ctx.store.by_kind(kind::RESOURCE_SEMANTIC_DIFF).collect();
         let mut findings = Vec::new();
         // Per-path semantic overrides (recipe / loot / atlas / model / blockstate).
@@ -47,7 +47,7 @@ impl Rule for ResourceSemanticRule {
         // Dangling datapack references (loot/advancement/tag only) → internal (Warn)
         // and cross-mod (Note) groups, calibrated by who owns the missing target.
         findings.extend(dangling_reference_findings(ctx));
-        findings
+        Ok(findings)
     }
 }
 
@@ -477,7 +477,7 @@ mod tests {
         );
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = ResourceSemanticRule.evaluate(&ctx);
+        let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(findings[0].machine_tags.iter().any(|t| t == "recipe"));
@@ -502,7 +502,7 @@ mod tests {
         );
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = ResourceSemanticRule.evaluate(&ctx);
+        let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Note);
     }
@@ -519,7 +519,7 @@ mod tests {
         );
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = ResourceSemanticRule.evaluate(&ctx);
+        let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(findings[0].id.starts_with("loot-table-output-override:"));
@@ -543,7 +543,7 @@ mod tests {
         );
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = ResourceSemanticRule.evaluate(&ctx);
+        let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Note);
         assert!(findings[0].id.starts_with("model-override:"));
@@ -577,7 +577,7 @@ mod tests {
         );
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = ResourceSemanticRule.evaluate(&ctx);
+        let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         let dangling: Vec<_> = findings
             .iter()
             .filter(|f| f.id == "dangling-reference")
@@ -616,7 +616,9 @@ mod tests {
             .attr("expected_path", "y")
             .emit();
         let target = test_target();
-        let findings = ResourceSemanticRule.evaluate(&RuleCtx::for_test(&store, &target));
+        let findings = ResourceSemanticRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
         let internal = findings
             .iter()
             .find(|f| f.id == "dangling-reference-internal")
@@ -637,6 +639,6 @@ mod tests {
         let store = FactStore::new();
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
-        assert!(ResourceSemanticRule.evaluate(&ctx).is_empty());
+        assert!(ResourceSemanticRule.evaluate(&ctx).unwrap().is_empty());
     }
 }

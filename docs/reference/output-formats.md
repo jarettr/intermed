@@ -87,5 +87,6 @@ The depth of the Mixin and Resource tabs follows `--mixin-risk` and
 |------|--------|
 | `--dump-facts <FILE>` | The raw fact snapshot, before rules. Pair with `rules explain --facts`. |
 | `--profile <FILE>` | An `intermed-doctor-profile-v1` wall-clock phase profile. |
+| `--telemetry-out <FILE>` | An explicitly requested, privacy-filtered `intermed-telemetry-event-v1`; see [Telemetry and privacy](../guides/telemetry.md). |
 
 For the fact model itself, see [Facts and schema](facts.md).

@@ -83,6 +83,15 @@ pub struct RuleStat {
     pub findings: usize,
 }
 
+/// A pipeline component failed to complete. Kept separate from domain findings
+/// so `--exit-zero` cannot turn an incomplete analysis into a successful run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationalError {
+    pub stage: String,
+    pub component: String,
+    pub message: String,
+}
+
 /// A consolidated remediation item in the fix plan.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixPlanItem {
@@ -114,6 +123,8 @@ pub struct DoctorReport {
     pub fact_stats: BTreeMap<String, usize>,
     pub collectors: Vec<CollectorReport>,
     pub rules: Vec<RuleStat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub operational_errors: Vec<OperationalError>,
     pub deferred_layers: Vec<DeferredLayer>,
     /// Wall-clock phase timings and jar-cache counters (present in `--json` output).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -125,7 +136,7 @@ pub struct DoctorReport {
 impl DoctorReport {
     /// Process exit code convention: 0 healthy, 1 warnings only, 2 errors+.
     pub fn exit_code(&self) -> i32 {
-        if !self.summary.is_healthy() {
+        if !self.operational_errors.is_empty() || !self.summary.is_healthy() {
             2
         } else if self.summary.warn > 0 {
             1
@@ -138,9 +149,15 @@ impl DoctorReport {
 /// Build the [`Environment`] projection from environment-level facts.
 fn environment_from_facts(store: &FactStore) -> Environment {
     let mut env = Environment::default();
+    let mut filesystem_loader = None;
     if let Some(f) = store.by_kind(kind::ENVIRONMENT).next() {
         env.os = f.attr("os").map(str::to_string);
         env.loader = f.attr("loader").and_then(Loader::parse);
+        env.loader_source = f.attr("loader_source").map(str::to_string);
+        if env.loader_source.as_deref() == Some("filesystem-heuristic") {
+            filesystem_loader = env.loader.take();
+            env.loader_source = None;
+        }
         env.minecraft_version = f.attr("mc_version").map(str::to_string);
         env.launcher = f.attr("launcher").map(str::to_string);
         env.host_launcher = f.attr("host_launcher").map(str::to_string);
@@ -160,6 +177,15 @@ fn environment_from_facts(store: &FactStore) -> Environment {
     // version. Infer both so the report does not show "?" for facts it can derive.
     if env.loader.is_none() {
         env.loader = infer_loader_from_mods(store);
+        if env.loader.is_some() {
+            env.loader_source = Some("artifact-consensus".to_string());
+        }
+    }
+    if env.loader.is_none() {
+        env.loader = filesystem_loader;
+        if env.loader.is_some() {
+            env.loader_source = Some("filesystem-heuristic".to_string());
+        }
     }
     if env.minecraft_version.is_none() {
         env.minecraft_version = infer_minecraft_version(store);
@@ -171,24 +197,33 @@ fn environment_from_facts(store: &FactStore) -> Environment {
 /// `loader` facts). Covers both mod loaders (Fabric/Forge/NeoForge) and server
 /// plugin platforms (Bukkit/Spigot/Paper), which ship `plugin` facts, not `mod`.
 fn infer_loader_from_mods(store: &FactStore) -> Option<Loader> {
-    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut loaders = std::collections::BTreeSet::new();
     for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
         if let Some(l) = f.attr("loader") {
-            *counts.entry(l).or_default() += 1;
+            if Loader::parse(l).is_some() {
+                loaders.insert(l);
+            }
         }
     }
-    counts
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .and_then(|(l, _)| Loader::parse(l))
+    // A majority is not an instance baseline: one foreign-loader jar is exactly
+    // the situation the mixed-loader rule must expose. Infer only a unanimous
+    // loader family; otherwise keep it unknown.
+    (loaders.len() == 1)
+        .then(|| loaders.first().copied())
+        .flatten()
+        .and_then(Loader::parse)
 }
 
-/// The Minecraft version the scanned mods target, derived from their `minecraft`
-/// dependency ranges: the most common explicit patch version (`1.21.1`), falling
-/// back to the most common minor (`1.21`) when no patch is pinned.
+/// Infer Minecraft only from a cross-artifact consensus. A single malformed
+/// descriptor must not define the whole instance (legacy coremods sometimes
+/// carry copied `mods.toml` templates with the wrong game version).
 fn infer_minecraft_version(store: &FactStore) -> Option<String> {
-    let mut patch: BTreeMap<String, usize> = BTreeMap::new();
-    let mut minor: BTreeMap<String, usize> = BTreeMap::new();
+    let mut candidates_by_artifact: BTreeMap<String, std::collections::BTreeSet<String>> =
+        BTreeMap::new();
+    let mod_files: BTreeMap<&str, &str> = store
+        .by_kind(kind::MOD)
+        .filter_map(|fact| fact.attr("file").map(|file| (fact.subject.as_str(), file)))
+        .collect();
     for f in store.by_kind(kind::DEPENDENCY) {
         if f.attr("dep") != Some("minecraft") {
             continue;
@@ -196,21 +231,88 @@ fn infer_minecraft_version(store: &FactStore) -> Option<String> {
         let Some(range) = f.attr("range") else {
             continue;
         };
-        for tok in version_tokens(range) {
-            if tok.matches('.').count() >= 2 {
-                *patch.entry(tok).or_default() += 1;
-            } else {
-                *minor.entry(tok).or_default() += 1;
+        for token in version_tokens(range) {
+            if plausible_minecraft_version(&token) {
+                candidates_by_artifact
+                    .entry(
+                        mod_files
+                            .get(f.subject.as_str())
+                            .copied()
+                            .unwrap_or(f.subject.as_str())
+                            .to_string(),
+                    )
+                    .or_default()
+                    .insert(token);
             }
         }
     }
-    most_common(patch).or_else(|| most_common(minor))
+
+    // Filenames are secondary corroboration, not authority. They are useful for
+    // old Forge packs whose descriptors omit Minecraft entirely. If one mod's
+    // filename and descriptor disagree, that mod casts no vote.
+    for f in store.by_kind(kind::MOD) {
+        let Some(file) = f.attr("file") else {
+            continue;
+        };
+        for token in version_tokens(file) {
+            if plausible_minecraft_version(&token) {
+                candidates_by_artifact
+                    .entry(file.to_string())
+                    .or_default()
+                    .insert(token);
+            }
+        }
+    }
+
+    // Legacy Forge jars often have no recognized modern descriptor at all.
+    // Checksums are emitted once per scanned archive, so their subjects provide
+    // a complete filename census without counting the same jar once per alias.
+    for f in store.by_kind(kind::CHECKSUM) {
+        for token in version_tokens(&f.subject) {
+            if plausible_minecraft_version(&token) {
+                candidates_by_artifact
+                    .entry(f.subject.clone())
+                    .or_default()
+                    .insert(token);
+            }
+        }
+    }
+
+    let mut patch: BTreeMap<String, usize> = BTreeMap::new();
+    let mut minor: BTreeMap<String, usize> = BTreeMap::new();
+    for candidates in candidates_by_artifact.values() {
+        if candidates.len() != 1 {
+            continue;
+        }
+        let candidate = candidates.iter().next().expect("one candidate").clone();
+        if candidate.matches('.').count() >= 2 {
+            *patch.entry(candidate).or_default() += 1;
+        } else {
+            *minor.entry(candidate).or_default() += 1;
+        }
+    }
+    consensus_version(patch).or_else(|| consensus_version(minor))
 }
 
-/// The key with the highest count; ties break toward the higher version string
-/// (BTreeMap iterates ascending, `max_by_key` keeps the last maximum).
-fn most_common(counts: BTreeMap<String, usize>) -> Option<String> {
-    counts.into_iter().max_by_key(|(_, n)| *n).map(|(k, _)| k)
+fn plausible_minecraft_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    matches!(parts.next(), Some("1"))
+        && parts
+            .next()
+            .and_then(|minor| minor.parse::<u16>().ok())
+            .is_some_and(|minor| (7..=99).contains(&minor))
+}
+
+/// Require at least two agreeing artifacts and a unique winner. With weaker
+/// evidence, leaving the environment unknown is safer than inventing a version.
+fn consensus_version(counts: BTreeMap<String, usize>) -> Option<String> {
+    let mut ranked: Vec<_> = counts.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    let (version, support) = ranked.first()?;
+    if *support < 2 || ranked.get(1).is_some_and(|(_, next)| next == support) {
+        return None;
+    }
+    Some(version.clone())
 }
 
 /// Extract dotted version tokens (`1.21`, `1.21.1`) that the pack actually targets
@@ -436,6 +538,22 @@ fn apply_visibility_policy(findings: &mut [Finding]) {
             if f.severity < Severity::Warn {
                 f.severity = Severity::Info;
             }
+        } else if f.severity <= Severity::Note
+            && [
+                "mixin-effect-summary:",
+                "mixin-handler-intel:",
+                "mixin-interaction:",
+                "mixin-plugin:",
+                "mixin-complexity:",
+                "mixin-bloat:",
+            ]
+            .iter()
+            .any(|prefix| f.id.starts_with(prefix))
+        {
+            // Full mixin mode intentionally emits site-level evidence, but tens
+            // of thousands of informational rows must not bury errors/warnings
+            // in human reports. The records remain in JSON and explain views.
+            f.visibility = FindingVisibility::Verbose;
         }
     }
 }
@@ -472,6 +590,7 @@ pub fn assemble(
     mut findings: Vec<Finding>,
     collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
     rule_stats: Vec<RuleStat>,
+    mut operational_errors: Vec<OperationalError>,
     profile: Option<DiagnosticProfile>,
 ) -> DoctorReport {
     // 1. Collapse findings that share an id into one (unique-id contract).
@@ -517,6 +636,13 @@ pub fn assemble(
     let mut collector_reports = Vec::new();
     let mut deferred_layers = Vec::new();
     for (id, layer, outcome) in collectors {
+        if outcome.status == CollectorStatus::Failed {
+            operational_errors.push(OperationalError {
+                stage: "collector".to_string(),
+                component: id.to_string(),
+                message: outcome.message.clone(),
+            });
+        }
         if outcome.status == CollectorStatus::Deferred {
             deferred_layers.push(DeferredLayer {
                 layer_code: layer.code().to_string(),
@@ -557,6 +683,7 @@ pub fn assemble(
         fact_stats: store.stats(),
         collectors: collector_reports,
         rules: rule_stats,
+        operational_errors,
         deferred_layers,
         profile,
     }
@@ -584,14 +711,136 @@ mod tests {
     }
 
     #[test]
-    fn most_common_breaks_ties_toward_higher_version() {
-        // The neoforge_new tie (1.21.1 ×3 vs 1.21.2 ×3) must resolve to 1.21.1 once
-        // the excluded `1.21.2)` ceilings are dropped by version_tokens; here we
-        // only check the tie-break direction of most_common itself.
+    fn version_consensus_rejects_ties() {
         let mut m = BTreeMap::new();
         m.insert("1.21.1".to_string(), 2);
         m.insert("1.21.2".to_string(), 2);
-        assert_eq!(most_common(m).as_deref(), Some("1.21.2"));
+        assert_eq!(consensus_version(m), None);
+    }
+
+    #[test]
+    fn artifact_consensus_outranks_filesystem_loader_hint() {
+        let mut store = FactStore::new();
+        store
+            .fact("environment-detector", kind::ENVIRONMENT)
+            .attr("loader", "forge")
+            .attr("loader_source", "filesystem-heuristic")
+            .emit();
+        for id in ["fabric-a", "fabric-b"] {
+            store
+                .fact("metadata", kind::MOD)
+                .subject(id)
+                .attr("loader", "fabric")
+                .emit();
+        }
+        let environment = environment_from_facts(&store);
+        assert_eq!(environment.loader, Some(Loader::Fabric));
+        assert_eq!(
+            environment.loader_source.as_deref(),
+            Some("artifact-consensus")
+        );
+    }
+
+    #[test]
+    fn filesystem_loader_is_last_resort_after_ambiguous_artifacts() {
+        let mut store = FactStore::new();
+        store
+            .fact("environment-detector", kind::ENVIRONMENT)
+            .attr("loader", "forge")
+            .attr("loader_source", "filesystem-heuristic")
+            .emit();
+        for (id, loader) in [("fabric-mod", "fabric"), ("forge-mod", "forge")] {
+            store
+                .fact("metadata", kind::MOD)
+                .subject(id)
+                .attr("loader", loader)
+                .emit();
+        }
+        let environment = environment_from_facts(&store);
+        assert_eq!(environment.loader, Some(Loader::Forge));
+        assert_eq!(
+            environment.loader_source.as_deref(),
+            Some("filesystem-heuristic")
+        );
+    }
+
+    #[test]
+    fn environment_version_uses_cross_artifact_consensus() {
+        let mut store = FactStore::new();
+        for (id, file) in [
+            ("good-a", "GoodA-1.12.2-2.0.jar"),
+            ("good-b", "GoodB-mc1.12.2-3.0.jar"),
+            ("bad-a", "BadA-1.12.2-1.0.jar"),
+            ("bad-b", "BadB-1.12.2-1.0.jar"),
+        ] {
+            store
+                .fact("test", kind::MOD)
+                .subject(id)
+                .attr("file", file)
+                .emit();
+        }
+        // Copied or otherwise incorrect descriptors disagree with their own
+        // archives and therefore cannot redefine the whole instance.
+        for id in ["bad-a", "bad-b"] {
+            store
+                .fact("test", kind::DEPENDENCY)
+                .subject(id)
+                .attr("dep", "minecraft")
+                .attr("range", "[1.14.4]")
+                .emit();
+        }
+        assert_eq!(infer_minecraft_version(&store).as_deref(), Some("1.12.2"));
+    }
+
+    #[test]
+    fn one_dependency_cannot_define_an_unknown_instance() {
+        let mut store = FactStore::new();
+        store
+            .fact("test", kind::DEPENDENCY)
+            .subject("one-mod")
+            .attr("dep", "minecraft")
+            .attr("range", "[1.14.4]")
+            .emit();
+        assert_eq!(infer_minecraft_version(&store), None);
+    }
+
+    #[test]
+    fn legacy_filename_census_outvotes_copied_modern_descriptors() {
+        let mut store = FactStore::new();
+        for n in 0..12 {
+            store
+                .fact("test", kind::CHECKSUM)
+                .subject(format!("legacy-{n}-mc1.12.2-2.0.jar"))
+                .attr("sha256", format!("{n:064x}"))
+                .emit();
+        }
+        for n in 0..2 {
+            let id = format!("bad-{n}");
+            let file = format!("addon-{n}-3.0.0.jar");
+            store
+                .fact("test", kind::MOD)
+                .subject(id.clone())
+                .attr("file", file)
+                .emit();
+            store
+                .fact("test", kind::DEPENDENCY)
+                .subject(id)
+                .attr("dep", "minecraft")
+                .attr("range", "[1.14.4]")
+                .emit();
+        }
+        assert_eq!(infer_minecraft_version(&store).as_deref(), Some("1.12.2"));
+
+        let retention = intermed_facts::FactRetentionPolicy {
+            max_facts: 0,
+            ..Default::default()
+        };
+        store.compact(&retention);
+        assert_eq!(
+            infer_minecraft_version(&store).as_deref(),
+            Some("1.12.2"),
+            "environment evidence must survive full-scan compaction"
+        );
     }
 
     #[test]
@@ -648,6 +897,17 @@ mod tests {
         ];
         apply_visibility_policy(&mut other);
         assert_eq!(other[0].visibility, FindingVisibility::Default);
+    }
+
+    #[test]
+    fn informational_mixin_site_details_are_verbose_but_warnings_remain_visible() {
+        let mut findings = vec![
+            finding("mixin-risk", "mixin-effect-summary:site-a", Severity::Note),
+            finding("mixin-risk", "mixin-interaction:site-b", Severity::Warn),
+        ];
+        apply_visibility_policy(&mut findings);
+        assert_eq!(findings[0].visibility, FindingVisibility::Verbose);
+        assert_eq!(findings[1].visibility, FindingVisibility::Default);
     }
 
     #[test]

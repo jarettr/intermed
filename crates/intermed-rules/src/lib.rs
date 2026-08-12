@@ -116,9 +116,42 @@ mod logic_tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = DeclarativeRulePack::default_core().evaluate(&ctx);
+        let findings = DeclarativeRulePack::default_core().evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "duplicate-id:alpha");
+    }
+
+    #[test]
+    fn aliases_from_one_archive_are_not_known_incompatible_mods() {
+        let mut store = FactStore::new();
+        for id in ["rubidium", "embeddium"] {
+            store
+                .fact("test", kind::MOD)
+                .subject(id)
+                .attr("file", "xenon.jar")
+                .emit();
+        }
+        store
+            .fact("test", kind::MOD_RELATIONSHIP)
+            .subject("embeddium")
+            .attr("related", "rubidium")
+            .attr("type", "known_incompatible")
+            .attr("reason", "curated")
+            .attr("archive", "xenon.jar")
+            .emit();
+        let target = Target {
+            path: ".".into(),
+            kind: TargetKind::ModsDir,
+            mods_dir: None,
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let findings = DeclarativeRulePack::default_core()
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        assert!(findings.iter().all(|f| f.rule_id != "known-incompatible"));
     }
 
     #[test]
@@ -149,7 +182,7 @@ mod logic_tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = MixedLoaderPackRule.evaluate(&ctx);
+        let findings = MixedLoaderPackRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "mixed-loader-pack:mods-dir");
     }
@@ -177,7 +210,7 @@ mod logic_tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = LoaderMismatchRule.evaluate(&ctx);
+        let findings = LoaderMismatchRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "loader-mismatch:alpha");
     }
@@ -216,7 +249,7 @@ mod logic_tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = SideMismatchRule.evaluate(&ctx);
+        let findings = SideMismatchRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert!(findings[0].title.contains("client-only on a server"));
     }
@@ -257,7 +290,7 @@ mod logic_tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        let findings = DeclarativeRulePack::default_core().evaluate(&ctx);
+        let findings = DeclarativeRulePack::default_core().evaluate(&ctx).unwrap();
         assert!(
             findings
                 .iter()

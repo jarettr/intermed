@@ -87,9 +87,13 @@ pub fn scan_mods_dir_filtered(
 
     let results: Vec<_> = jars
         .par_iter()
-        .map(|jar| match cache {
-            Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || scan_jar_cached(jar)),
-            None => scan_jar_cached(jar),
+        .map(|jar| {
+            let archive = archive_name(jar);
+            let cached = match cache {
+                Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || scan_jar_cached(jar)),
+                None => scan_jar_cached(jar),
+            };
+            (archive, cached)
         })
         .collect();
 
@@ -98,7 +102,11 @@ pub fn scan_mods_dir_filtered(
     let mut failures = Vec::new();
     let mut hierarchy = HierarchyIndex::new();
     let mut target_index = crate::apply_failure::TargetClassIndex::new();
-    for result in results {
+    for (archive, mut result) in results {
+        // Cache entries are content-addressed and may have been produced from an
+        // identically-sized copy with a different filename. Locator data belongs
+        // to this scan invocation, never to the reusable payload.
+        rebind_archive(&mut result, &archive);
         match result {
             CachedMixinJar::Ok(mut partial) => {
                 configs.append(&mut partial.configs);
@@ -168,6 +176,26 @@ pub fn scan_mods_dir_filtered(
     ))
 }
 
+fn rebind_archive(cached: &mut CachedMixinJar, archive: &str) {
+    match cached {
+        CachedMixinJar::Ok(partial) => {
+            for config in &mut partial.configs {
+                config.archive = archive.to_string();
+            }
+            for class in &mut partial.classes {
+                class.archive = archive.to_string();
+            }
+            for failure in &mut partial.failures {
+                failure.archive = archive.to_string();
+            }
+        }
+        CachedMixinJar::Err {
+            archive: cached_archive,
+            ..
+        } => *cached_archive = archive.to_string(),
+    }
+}
+
 /// Ingest every class in a Minecraft client/server jar into the target index.
 /// Load a Yarn/Mojmap Tiny v2 file for global named↔intermediary bridging.
 fn load_tiny_mappings_file(path: &Path) -> Option<TinyMappings> {
@@ -183,10 +211,33 @@ fn ingest_minecraft_jar(
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("zip {}: {e}", jar.display()))?;
     let mut hierarchy = HierarchyIndex::new();
+    let mut candidate = crate::apply_failure::TargetClassIndex::new();
     // The vanilla jar is trusted; class-index caps still apply but truncation
     // reporting is not meaningful here.
-    let _ = index_jar_classes(&mut archive, &mut hierarchy, target_index);
-    Ok(())
+    let truncations = index_jar_classes(
+        &mut archive,
+        &mut hierarchy,
+        &mut candidate,
+        ClassIndexSource::Minecraft,
+    );
+    if !truncations.is_empty() {
+        Err(format!(
+            "Minecraft class index is incomplete: {}",
+            truncations.join("; ")
+        ))
+    } else if candidate.minecraft_class_namespace()
+        == crate::apply_failure::MinecraftClassNamespace::Unsupported
+    {
+        Err(
+            "Minecraft artifact uses an unsupported/obfuscated class namespace; \
+             absence checks were disabled (supply a named or intermediary jar)"
+                .to_string(),
+        )
+    } else {
+        candidate.mark_minecraft_coverage_complete();
+        target_index.merge_explicit_minecraft(&candidate);
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,7 +364,12 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
 
     let mut hierarchy = HierarchyIndex::new();
     let mut target_index = crate::apply_failure::TargetClassIndex::new();
-    let class_truncations = index_jar_classes(&mut archive, &mut hierarchy, &mut target_index);
+    let class_truncations = index_jar_classes(
+        &mut archive,
+        &mut hierarchy,
+        &mut target_index,
+        ClassIndexSource::Mod,
+    );
 
     let mut partial = JarScanPartial {
         configs: Vec::new(),
@@ -446,6 +502,7 @@ fn index_jar_classes(
     archive: &mut zip::ZipArchive<std::fs::File>,
     hierarchy: &mut HierarchyIndex,
     target_index: &mut crate::apply_failure::TargetClassIndex,
+    source: ClassIndexSource,
 ) -> Vec<String> {
     let mut truncations = Vec::new();
     let mut total: u64 = 0;
@@ -487,9 +544,18 @@ fn index_jar_classes(
         }
         total = total.saturating_add(bytes.len() as u64);
         hierarchy.ingest_class(&bytes);
-        target_index.ingest_class(&bytes);
+        match source {
+            ClassIndexSource::Mod => target_index.ingest_class(&bytes),
+            ClassIndexSource::Minecraft => target_index.ingest_minecraft_class(&bytes),
+        }
     }
     truncations
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ClassIndexSource {
+    Mod,
+    Minecraft,
 }
 
 fn discover_tiny_mappings(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<TinyMappings> {

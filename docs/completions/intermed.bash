@@ -1100,13 +1100,17 @@ _intermed() {
             return 0
             ;;
         intermed__subcmd__doctor)
-            opts="-v -h --mods-dir --mixin-risk --logic --threads --jobs --json --sarif --html --no-color --profile --exit-zero --no-cache --cache-dir --cache-remote-dir --cache-max-size --cache-max-age-days --changed-since --dump-facts --explain --performance --spark-report --perf-tick-spike-ms --perf-high-cpu-percent --perf-hot-method-floor --perf-tick-spike-warn-ms --metadata-level --resource-level --security-min-note-signals --sbom-well-identified-trust --log-parallel-line-threshold --security-corroborated-confidence --minecraft-jar --minecraft-mappings --mixin-level --no-mixin-handler-effects --mixin-handler-effects --no-mixin-recommendations --mixin-recommendations --db --db-best-effort --rule-pack --rule-pack-dir --core-rule-pack-only --rule-pack-trusted-keys --rule-pack-registry --allow-insecure-registry --allow-unsigned-rules --config --dump-config --quiet --verbose --help [TARGET]"
+            opts="-v -h --mods-dir --pack-manifest --mixin-risk --logic --threads --jobs --json --sarif --html --no-color --profile --telemetry-out --telemetry-endpoint --telemetry-include-log-excerpts --exit-zero --no-cache --cache-dir --cache-remote-dir --cache-max-size --cache-max-age-days --changed-since --dump-facts --explain --performance --spark-report --perf-tick-spike-ms --perf-high-cpu-percent --perf-hot-method-floor --perf-tick-spike-warn-ms --metadata-level --resource-level --security-min-note-signals --sbom-well-identified-trust --log-parallel-line-threshold --security-corroborated-confidence --minecraft-jar --minecraft-mappings --mixin-level --no-mixin-handler-effects --mixin-handler-effects --no-mixin-recommendations --mixin-recommendations --db --db-best-effort --rule-pack --rule-pack-dir --core-rule-pack-only --rule-pack-trusted-keys --rule-pack-registry --allow-insecure-registry --allow-unsigned-rules --config --dump-config --quiet --verbose --help [TARGET]"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
             case "${prev}" in
                 --mods-dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --pack-manifest)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
@@ -1122,11 +1126,27 @@ _intermed() {
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
+                --json)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --sarif)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --html)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;
                 --profile)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --telemetry-out)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --telemetry-endpoint)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
                     ;;

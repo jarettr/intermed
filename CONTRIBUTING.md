@@ -5,7 +5,7 @@ checked, how it is laid out, the invariants every change has to keep, and how to
 add the common kinds of analysis. It is meant to let you make a change that fits
 the grain of the codebase rather than fighting it.
 
-InterMed is `0.1.2-alpha` and moves fast; treat APIs between crates as unstable.
+InterMed is `0.1.4-alpha` and moves fast; treat APIs between crates as unstable.
 
 ## Principles
 
@@ -25,7 +25,8 @@ If you change behavior, the docs in `docs/` change in the same PR.
 ## Building and checking
 
 ```bash
-cargo build                 # debug; also writes the man page + completions (build.rs)
+cargo build                 # debug build
+INTERMED_GENERATE_CLI_DOCS=1 cargo build  # refresh man page + completions
 cargo test                  # the full suite
 cargo build --release       # use the release binary for anything performance-sensitive
 ```

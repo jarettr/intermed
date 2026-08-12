@@ -32,7 +32,8 @@ fn corrupt_jar_rule_fires_only_on_corruption() {
     let ctx = RuleCtx::for_test(&corrupt, &target);
     let findings = DeclarativeRulePack::new(pack.clone())
         .expect("declarative pack")
-        .evaluate(&ctx);
+        .evaluate(&ctx)
+        .unwrap();
     assert!(
         findings.iter().any(|f| f.id == "corrupt-jar:broken.jar"),
         "corrupt jar should be flagged, got: {:?}",
@@ -49,10 +50,40 @@ fn corrupt_jar_rule_fires_only_on_corruption() {
     let ctx = RuleCtx::for_test(&benign, &target);
     let findings = DeclarativeRulePack::new(pack)
         .expect("declarative pack")
-        .evaluate(&ctx);
+        .evaluate(&ctx)
+        .unwrap();
     assert!(
         !findings.iter().any(|f| f.id.starts_with("corrupt-jar:")),
         "library jar without manifest must not be flagged as corrupt"
+    );
+}
+
+#[test]
+fn invalid_active_descriptor_is_not_mislabeled_as_corrupt_archive() {
+    let pack = default_core_pack_v2();
+    let mut store = FactStore::new();
+    store
+        .fact("metadata-scanner", kind::INVALID_METADATA)
+        .subject("broken-metadata.jar")
+        .attr("reason", "fabric.mod.json: expected `,`")
+        .attr("manifest", "fabric.mod.json")
+        .attr("active_for_instance", true)
+        .emit();
+    let target = test_target();
+    let findings = DeclarativeRulePack::new(pack)
+        .expect("declarative pack")
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.id == "invalid-active-metadata:broken-metadata.jar")
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.id.starts_with("corrupt-jar:"))
     );
 }
 
@@ -100,7 +131,8 @@ fn rule_packs_can_consume_metadata_intelligence_predicates() {
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DeclarativeRulePack::new(pack)
         .expect("valid declarative pack")
-        .evaluate(&ctx);
+        .evaluate(&ctx)
+        .unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].id, "tick-hook:example");
 }
@@ -154,7 +186,8 @@ fn join_with_or_finds_second_branch_match() {
     let target = test_target();
     let findings = DeclarativeRulePack::new(pack)
         .expect("valid declarative pack")
-        .evaluate(&RuleCtx::for_test(&store, &target));
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
 
     assert_eq!(
         findings.len(),

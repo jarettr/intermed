@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use pubgrub::{PubGrubError, SelectedDependencies, resolve};
+use pubgrub::{DerivationTree, External, PubGrubError, SelectedDependencies, resolve};
 
 use crate::provider::ModpackProvider;
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,13 @@ pub enum ResolutionOutcome {
     Unsatisfiable {
         /// PubGrub derivation rendered for humans.
         explanation: String,
+        /// Package ids that actually participate in the PubGrub derivation.
+        /// Kept separately so findings can cite the proof, not the entire graph.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        proof_packages: Vec<String>,
+        /// Directed dependency premises present in the derivation tree.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        proof_dependencies: Vec<(String, String)>,
     },
     /// Not enough semver-parseable packages to run PubGrub safely.
     Skipped { reason: ResolutionSkipReason },
@@ -112,12 +119,46 @@ fn run_resolve(
         Ok(selection) => ResolutionOutcome::Satisfied {
             selection: selection_to_strings(&selection, graph),
         },
-        Err(PubGrubError::NoSolution(tree)) => ResolutionOutcome::Unsatisfiable {
-            explanation: format_unsat_tree(tree),
-        },
+        Err(PubGrubError::NoSolution(tree)) => {
+            let mut proof_packages = tree
+                .packages()
+                .into_iter()
+                .filter(|package| package.as_str() != MODPACK_ROOT_ID)
+                .cloned()
+                .collect::<Vec<_>>();
+            proof_packages.sort();
+            proof_packages.dedup();
+            let mut proof_dependencies = Vec::new();
+            collect_proof_dependencies(&tree, &mut proof_dependencies);
+            proof_dependencies.sort();
+            proof_dependencies.dedup();
+            ResolutionOutcome::Unsatisfiable {
+                explanation: format_unsat_tree(tree),
+                proof_packages,
+                proof_dependencies,
+            }
+        }
         Err(_other) => ResolutionOutcome::Skipped {
             reason: ResolutionSkipReason::ProviderBuildFailed,
         },
+    }
+}
+
+fn collect_proof_dependencies(
+    tree: &DerivationTree<String, crate::ranges::ModRange, String>,
+    out: &mut Vec<(String, String)>,
+) {
+    match tree {
+        DerivationTree::External(External::FromDependencyOf(from, _, to, _)) => {
+            if from != MODPACK_ROOT_ID {
+                out.push((from.clone(), to.clone()));
+            }
+        }
+        DerivationTree::Derived(derived) => {
+            collect_proof_dependencies(&derived.cause1, out);
+            collect_proof_dependencies(&derived.cause2, out);
+        }
+        DerivationTree::External(_) => {}
     }
 }
 

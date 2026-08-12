@@ -5,15 +5,94 @@
 //! false positive. Fabric space-separated AND ranges and `||` OR alternatives
 //! are normalized before parsing.
 
+use std::cmp::Ordering;
+
 use creeper_semver_pubgrub::SmallVersion;
+use serde::{Deserialize, Serialize};
+
+/// Version language declared by the metadata that owns a dependency edge.
+///
+/// Parsing a version is not enough to select comparison semantics: Cargo-style
+/// SemVer, Fabric Loader and Maven ranges intentionally disagree about
+/// prereleases and accepted range syntax.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VersionDialect {
+    FabricExtendedSemver,
+    Quilt,
+    MavenRange,
+    #[default]
+    GenericSemver,
+    Opaque,
+}
+
+impl VersionDialect {
+    pub fn from_loader(loader: &str) -> Self {
+        match loader.trim().to_ascii_lowercase().as_str() {
+            "fabric" => Self::FabricExtendedSemver,
+            "quilt" => Self::Quilt,
+            "forge" | "neoforge" => Self::MavenRange,
+            "paper" | "spigot" | "bukkit" | "vanilla" => Self::GenericSemver,
+            _ => Self::Opaque,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FabricExtendedSemver => "fabric-extended-semver",
+            Self::Quilt => "quilt",
+            Self::MavenRange => "maven-range",
+            Self::GenericSemver => "generic-semver",
+            Self::Opaque => "opaque",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "fabric-extended-semver" => Self::FabricExtendedSemver,
+            "quilt" => Self::Quilt,
+            "maven-range" => Self::MavenRange,
+            "generic-semver" => Self::GenericSemver,
+            "opaque" => Self::Opaque,
+            _ => return None,
+        })
+    }
+
+    /// Whether the loader itself defines ordering for a syntactically valid raw
+    /// version, even when InterMed's display normalizer marks its numeric groups
+    /// as ambiguous (for example `1.20-Fabric-4.0.6`).
+    pub fn orders_raw_extended_versions(self) -> bool {
+        matches!(self, Self::FabricExtendedSemver | Self::Quilt)
+    }
+}
 
 /// `Some(true)` satisfied, `Some(false)` violated, `None` when we cannot decide
 /// (non-semver version or range, wildcard edge cases). Conservative by design.
 pub fn version_in_range(version: &str, range: &str) -> Option<bool> {
+    version_in_range_with_dialect(version, range, VersionDialect::GenericSemver)
+}
+
+/// Evaluate a version using the comparison language of the declaring manifest.
+pub fn version_in_range_with_dialect(
+    version: &str,
+    range: &str,
+    dialect: VersionDialect,
+) -> Option<bool> {
     let range = range.trim();
     if range.is_empty() || range == "*" {
         return Some(true);
     }
+    match dialect {
+        VersionDialect::FabricExtendedSemver | VersionDialect::Quilt => {
+            fabric_version_in_range(version, range)
+        }
+        VersionDialect::MavenRange => maven_version_in_range(version, range),
+        VersionDialect::GenericSemver => generic_version_in_range(version, range),
+        VersionDialect::Opaque => opaque_version_in_range(version, range),
+    }
+}
+
+fn generic_version_in_range(version: &str, range: &str) -> Option<bool> {
     let ver = parse_lenient(version)?;
     let reqs = parse_version_reqs(range)?;
     if reqs.is_empty() {
@@ -22,18 +101,271 @@ pub fn version_in_range(version: &str, range: &str) -> Option<bool> {
     Some(reqs.iter().any(|req| req.matches(&ver)))
 }
 
+fn maven_version_in_range(version: &str, range: &str) -> Option<bool> {
+    // Forge/NeoForge dependency declarations are Maven intervals. A bare value
+    // is retained as a conservative exact/generic requirement for legacy facts.
+    generic_version_in_range(version, range)
+}
+
+fn opaque_version_in_range(version: &str, range: &str) -> Option<bool> {
+    let range = range.trim();
+    if range.is_empty() || range == "*" {
+        return Some(true);
+    }
+    let exact = range.strip_prefix('=').unwrap_or(range);
+    if exact.starts_with(['<', '>', '^', '~', '[', '(']) || exact.contains(char::is_whitespace) {
+        None
+    } else {
+        Some(version.trim() == exact.trim())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FabricVersion {
+    components: Vec<u64>,
+    /// `None` is a release; `Some([])` is Fabric's special earliest prerelease.
+    prerelease: Option<Vec<FabricPrereleaseId>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FabricPrereleaseId {
+    Numeric(u64),
+    Text(String),
+}
+
+impl Ord for FabricPrereleaseId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Numeric(a), Self::Numeric(b)) => a.cmp(b),
+            (Self::Numeric(_), Self::Text(_)) => Ordering::Less,
+            (Self::Text(_), Self::Numeric(_)) => Ordering::Greater,
+            (Self::Text(a), Self::Text(b)) => a.cmp(b),
+        }
+    }
+}
+
+impl PartialOrd for FabricPrereleaseId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FabricVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let width = self.components.len().max(other.components.len());
+        for index in 0..width {
+            let order = self
+                .components
+                .get(index)
+                .copied()
+                .unwrap_or(0)
+                .cmp(&other.components.get(index).copied().unwrap_or(0));
+            if order != Ordering::Equal {
+                return order;
+            }
+        }
+        match (&self.prerelease, &other.prerelease) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(a), Some(b)) => compare_prerelease(a, b),
+        }
+    }
+}
+
+impl PartialOrd for FabricVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn compare_prerelease(a: &[FabricPrereleaseId], b: &[FabricPrereleaseId]) -> Ordering {
+    for (left, right) in a.iter().zip(b) {
+        let order = left.cmp(right);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    a.len().cmp(&b.len())
+}
+
+fn parse_fabric_version(input: &str) -> Option<FabricVersion> {
+    let without_build = input.trim().split('+').next()?.trim();
+    let (core, prerelease) = match without_build.split_once('-') {
+        Some((core, prerelease)) => (core, Some(prerelease)),
+        None => (without_build, None),
+    };
+    let components: Vec<u64> = core
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect::<Option<_>>()?;
+    if components.is_empty() {
+        return None;
+    }
+    let prerelease = match prerelease {
+        None => None,
+        Some("") => Some(Vec::new()),
+        Some(raw) => Some(
+            raw.split('.')
+                .map(|part| {
+                    if part.is_empty()
+                        || !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                    {
+                        return None;
+                    }
+                    Some(match part.parse::<u64>() {
+                        Ok(value) => FabricPrereleaseId::Numeric(value),
+                        Err(_) => FabricPrereleaseId::Text(part.to_string()),
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+        ),
+    };
+    Some(FabricVersion {
+        components,
+        prerelease,
+    })
+}
+
+fn fabric_version_in_range(version: &str, range: &str) -> Option<bool> {
+    let version = parse_fabric_version(version)?;
+    let branches: Vec<&str> = range
+        .split("||")
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .collect();
+    if branches.is_empty() {
+        return None;
+    }
+    let mut saw_valid = false;
+    for branch in branches {
+        let tokens: Vec<&str> = branch.split_whitespace().collect();
+        if tokens.is_empty() {
+            return None;
+        }
+        let matches = tokens
+            .iter()
+            .map(|token| fabric_token_matches(&version, token))
+            .collect::<Option<Vec<_>>>()?;
+        saw_valid = true;
+        if matches.into_iter().all(|matched| matched) {
+            return Some(true);
+        }
+    }
+    saw_valid.then_some(false)
+}
+
+fn fabric_token_matches(version: &FabricVersion, token: &str) -> Option<bool> {
+    if token == "*" {
+        return Some(true);
+    }
+    if is_fabric_x_range(token) {
+        return fabric_x_range_matches(version, token);
+    }
+    for (prefix, predicate) in [
+        (">=", OrderingPredicate::GreaterEqual),
+        ("<=", OrderingPredicate::LessEqual),
+        (">", OrderingPredicate::Greater),
+        ("<", OrderingPredicate::Less),
+        ("=", OrderingPredicate::Equal),
+    ] {
+        if let Some(raw) = token.strip_prefix(prefix) {
+            let bound = parse_fabric_version(raw)?;
+            return Some(predicate.test(version.cmp(&bound)));
+        }
+    }
+    if let Some(raw) = token.strip_prefix('^') {
+        let lower = parse_fabric_version(raw)?;
+        let mut upper = FabricVersion {
+            components: vec![lower.components.first()?.checked_add(1)?],
+            prerelease: Some(Vec::new()),
+        };
+        upper.components.resize(lower.components.len().max(1), 0);
+        return Some(version >= &lower && version < &upper);
+    }
+    if let Some(raw) = token.strip_prefix('~') {
+        let lower = parse_fabric_version(raw)?;
+        let mut upper_components = lower.components.clone();
+        if upper_components.len() < 2 {
+            upper_components.resize(2, 0);
+        }
+        upper_components[1] = upper_components[1].checked_add(1)?;
+        upper_components
+            .iter_mut()
+            .skip(2)
+            .for_each(|part| *part = 0);
+        let upper = FabricVersion {
+            components: upper_components,
+            prerelease: Some(Vec::new()),
+        };
+        return Some(version >= &lower && version < &upper);
+    }
+    let exact = parse_fabric_version(token)?;
+    Some(version.cmp(&exact) == Ordering::Equal)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum OrderingPredicate {
+    GreaterEqual,
+    LessEqual,
+    Greater,
+    Less,
+    Equal,
+}
+
+impl OrderingPredicate {
+    fn test(self, ordering: Ordering) -> bool {
+        match self {
+            Self::GreaterEqual => ordering != Ordering::Less,
+            Self::LessEqual => ordering != Ordering::Greater,
+            Self::Greater => ordering == Ordering::Greater,
+            Self::Less => ordering == Ordering::Less,
+            Self::Equal => ordering == Ordering::Equal,
+        }
+    }
+}
+
+fn is_fabric_x_range(token: &str) -> bool {
+    token.split('.').any(|part| matches!(part, "x" | "X" | "*"))
+}
+
+fn fabric_x_range_matches(version: &FabricVersion, token: &str) -> Option<bool> {
+    let mut prefix = Vec::new();
+    for part in token.split('.') {
+        if matches!(part, "x" | "X" | "*") {
+            break;
+        }
+        prefix.push(part.parse::<u64>().ok()?);
+    }
+    if prefix.is_empty() {
+        return Some(true);
+    }
+    let lower = FabricVersion {
+        components: prefix.clone(),
+        prerelease: Some(Vec::new()),
+    };
+    let mut upper_components = prefix;
+    let last = upper_components.last_mut()?;
+    *last = last.checked_add(1)?;
+    let upper = FabricVersion {
+        components: upper_components,
+        prerelease: Some(Vec::new()),
+    };
+    Some(version >= &lower && version < &upper)
+}
+
 /// Parse a mod version string into a [`SmallVersion`] when semver rules apply.
 pub fn parse_mod_version(version: &str) -> Option<SmallVersion> {
     parse_lenient(version).map(SmallVersion::from)
 }
 
-/// Parse a metadata range into one or more semver requirements (OR-separated).
+/// Parse a generic compatibility range into one or more Cargo-semver
+/// requirements (OR-separated).
 ///
-/// Two range dialects are supported: Fabric/Quilt space-and-`||` comparator
-/// syntax, and Forge/NeoForge **Maven version intervals** (`[1.0,2.0)`, `[47,)`,
-/// `(,3.0]`, `[1.5]`). The two are disambiguated by syntax — only Maven uses
-/// brackets — so a Forge `[47,)` is now range-checked instead of dropped as
-/// undecidable.
+/// This legacy parser accepts space-and-`||` comparator syntax and Maven interval
+/// syntax (`[1.0,2.0)`, `[47,)`, `(,3.0]`, `[1.5]`). Loader metadata must use
+/// [`version_in_range_with_dialect`] instead, because converting Fabric ranges to
+/// `semver::VersionReq` would reintroduce Cargo's prerelease admission rules.
 pub fn parse_version_reqs(range: &str) -> Option<Vec<semver::VersionReq>> {
     let trimmed = range.trim();
     if trimmed.starts_with('[') || trimmed.starts_with('(') {
@@ -343,6 +675,79 @@ mod tests {
         assert_eq!(version_in_range("0.11.7", ">=0.11.6 <0.12.0"), Some(true));
         assert_eq!(version_in_range("0.12.0", ">=0.11.6 <0.12.0"), Some(false));
         assert_eq!(version_in_range("0.11.5", ">=0.11.6 <0.12.0"), Some(false));
+    }
+
+    #[test]
+    fn fabric_comparators_do_not_apply_cargo_prerelease_filtering() {
+        let dialect = VersionDialect::FabricExtendedSemver;
+        assert_eq!(
+            version_in_range_with_dialect("1.0.2-rc1+1.20", ">=1.0.0", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.0.2-rc1+1.20", ">=0.9.9", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.2.19-1.20.1", ">=1.2.6-1.20.1", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.2.19-1.20.1", ">=1.1.8", dialect),
+            Some(true)
+        );
+        // Build metadata is irrelevant, and missing numeric components are zero.
+        assert_eq!(
+            version_in_range_with_dialect("1.2+mc1", "=1.2.0+mc2", dialect),
+            Some(true)
+        );
+        // A prerelease is still lower than the release with the same core.
+        assert_eq!(
+            version_in_range_with_dialect("1.0.0-rc1", ">=1.0.0", dialect),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn fabric_extended_ranges_cover_caret_tilde_x_and_prereleases() {
+        let dialect = VersionDialect::FabricExtendedSemver;
+        assert_eq!(
+            version_in_range_with_dialect("0.9.0", "^0.8.0", dialect),
+            Some(true),
+            "Fabric caret does not special-case major zero"
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.2.9", "~1.2.3", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.0.0-beta.1", "2.x", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.0.2-rc1", ">1.0.1 <1.0.2", dialect),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn dialect_selection_changes_the_known_prerelease_case() {
+        assert_eq!(
+            version_in_range_with_dialect(
+                "1.0.2-rc1+1.20",
+                ">=1.0.0",
+                VersionDialect::FabricExtendedSemver
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect(
+                "1.0.2-rc1+1.20",
+                ">=1.0.0",
+                VersionDialect::GenericSemver
+            ),
+            Some(false)
+        );
     }
 
     #[test]

@@ -101,6 +101,6 @@ fn souffle_rule_pack_accepts_adversarial_subjects_when_available() {
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = SouffleRulePack::default().evaluate(&ctx);
+    let findings = SouffleRulePack::default().evaluate(&ctx).unwrap();
     assert!(findings.iter().any(|f| f.id.contains("duplicate-id")));
 }

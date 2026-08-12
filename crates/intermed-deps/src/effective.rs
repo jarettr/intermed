@@ -27,6 +27,7 @@ use intermed_doctor_core::evidence::{
 use intermed_doctor_core::facts::{FactId, FactStore, kind};
 
 use crate::graph::is_platform_dep;
+use crate::semver::VersionDialect;
 
 /// A declared dependency edge taken from a `dependency` fact.
 #[derive(Debug, Clone)]
@@ -36,6 +37,7 @@ pub struct DeclaredDep {
     pub range: String,
     pub relation: String,
     pub mandatory: bool,
+    pub version_dialect: VersionDialect,
     pub fact_id: FactId,
 }
 
@@ -103,6 +105,10 @@ impl EffectiveModel {
                 range: dep.attr("range").unwrap_or("*").to_string(),
                 relation: dep.attr("relation").unwrap_or("depends").to_string(),
                 mandatory: dep.attr_bool("mandatory").unwrap_or(true),
+                version_dialect: dep
+                    .attr("version_dialect")
+                    .and_then(VersionDialect::parse)
+                    .unwrap_or_default(),
                 fact_id: dep.id,
             });
         }

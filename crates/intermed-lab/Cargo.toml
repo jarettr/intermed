@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer K — Compatibility Lab: reproducible corpus locks, smoke-test ingestion/classification, and compatibility matrices (Phase 8)."
+description = "Compatibility Lab evidence: reproducible corpus locks, smoke-test classification, and compatibility matrices."
 
 [dependencies]
 intermed-doctor-core.workspace = true

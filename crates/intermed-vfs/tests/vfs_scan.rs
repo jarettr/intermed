@@ -68,6 +68,15 @@ fn scan_classifies_all_collision_classes_deterministically() {
     let scan = scan_mods_dir(&mods).unwrap();
     assert_eq!(scan.failures, Vec::new());
     assert_eq!(scan.writes.len(), 8);
+    assert!(scan.writes.iter().all(|write| write.crc32 != 0));
+    let pack_crcs: Vec<_> = scan
+        .writes
+        .iter()
+        .filter(|write| write.path == "pack.mcmeta")
+        .map(|write| write.crc32)
+        .collect();
+    assert_eq!(pack_crcs.len(), 2);
+    assert_eq!(pack_crcs[0], pack_crcs[1]);
     assert_eq!(scan.collisions.len(), 4);
 
     let classes: BTreeMap<_, _> = scan

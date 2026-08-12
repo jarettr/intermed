@@ -38,7 +38,9 @@ fn store_with(archive: &str, mod_id: &str, trust: i64, capability: &str) -> Fact
 fn low_trust_plus_dangerous_capability_correlates() {
     let store = store_with("mystery.jar", "mystery", 20, kind::USES_PROCESS_SPAWN);
     let target = dummy_target();
-    let findings = correlation_rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].id, "low-trust-capability:mystery.jar");
@@ -56,7 +58,9 @@ fn well_identified_jar_is_not_correlated() {
     // plain security rule — no supply-chain escalation.
     let store = store_with("sodium.jar", "sodium", 90, kind::USES_PROCESS_SPAWN);
     let target = dummy_target();
-    let findings = correlation_rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     assert!(findings.is_empty());
 }
 
@@ -72,7 +76,9 @@ fn low_trust_without_dangerous_capability_is_not_correlated() {
         .attr("source_class", "unidentified")
         .emit();
     let target = dummy_target();
-    let findings = correlation_rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     assert!(findings.is_empty());
 }
 
@@ -85,9 +91,43 @@ fn multiple_capabilities_are_merged_into_one_finding() {
         .attr("archive", "mystery.jar")
         .emit();
     let target = dummy_target();
-    let findings = correlation_rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
 
     assert_eq!(findings.len(), 1, "one finding per archive");
     assert!(findings[0].explanation.contains("process spawn"));
     assert!(findings[0].explanation.contains("sun.misc.Unsafe"));
+}
+
+#[test]
+fn parser_failure_does_not_amplify_security_signal() {
+    let mut store = FactStore::new();
+    store
+        .fact("sbom-generator", kind::SBOM)
+        .subject("broken-metadata.jar")
+        .attr("trust_score", 20i64)
+        .attr("identity_status", "parse-failed")
+        .attr("trust_base", 20i64)
+        .emit();
+    store
+        .fact("security-scanner", kind::USES_PROCESS_SPAWN)
+        .subject("mod")
+        .attr("archive", "broken-metadata.jar")
+        .emit();
+    let target = dummy_target();
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert_eq!(findings.len(), 1);
+    assert_eq!(
+        findings[0].severity,
+        intermed_doctor_core::evidence::Severity::Note
+    );
+    assert!(
+        findings[0]
+            .machine_tags
+            .iter()
+            .any(|tag| tag == "identity-analysis-incomplete")
+    );
 }

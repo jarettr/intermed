@@ -48,7 +48,7 @@ fn optional_and_incompatible_absent_mods_do_not_emit_missing_dependency() {
             .emit();
     }
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()
@@ -86,7 +86,7 @@ fn incompatible_mod_present_emits_error() {
         .attr("relation", "breaks")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     let conflict = findings
         .iter()
         .find(|f| f.id == "incompatible-mod:create->radium")
@@ -116,7 +116,7 @@ fn discouraged_mod_present_emits_warn_not_missing() {
         .attr("relation", "discouraged")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()
@@ -147,7 +147,7 @@ fn loadbefore_absent_target_is_not_a_missing_dependency() {
         .attr("relation", "loadbefore")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()
@@ -179,7 +179,7 @@ fn optional_wrong_version_is_warn_not_error() {
         .attr("relation", "recommends")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     let wrong = findings
         .iter()
         .find(|f| f.id == "wrong-version:create->sodium")
@@ -213,7 +213,7 @@ fn mandatory_wrong_version_stays_error() {
         .attr("relation", "depends")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     let wrong = findings
         .iter()
         .find(|f| f.id == "wrong-version:create->flywheel")
@@ -243,7 +243,7 @@ fn discouraged_out_of_range_stays_silent() {
         .attr("relation", "discouraged")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()
@@ -287,7 +287,7 @@ fn java_and_loader_platform_version_constraints_are_checked() {
         .attr("relation", "depends")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         findings
             .iter()
@@ -322,7 +322,7 @@ fn platform_constraints_silent_without_known_versions() {
         .attr("mandatory", true)
         .attr("relation", "depends")
         .emit();
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()
@@ -363,7 +363,7 @@ fn duplicate_dependency_version_check_is_lenient_and_flagged() {
         .attr("relation", "depends")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings
             .iter()

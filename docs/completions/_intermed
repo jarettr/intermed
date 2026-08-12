@@ -36,13 +36,18 @@ _intermed() {
             (doctor)
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
+'--pack-manifest=[Authoritative original pack manifest or archive. Use this when analyzing a materialized instance whose \`modrinth.index.json\`/\`manifest.json\` was not retained by the launcher or extraction pipeline]:FILE:_files' \
 '--logic=[Rule backend. The in-process columnar query engine is the default and only in-process engine; \`souffle\`/\`duckdb\` are optional external backends over the same IR (require their tool / build feature)]:LOGIC:((columnar\:"In-process columnar query engine (\`intermed-columnar\`)\: the default and only in-process engine — optimizing logical/physical planner with hash join/aggregate. Pure Rust, always available"
 souffle\:"Soufflé Datalog backend (requires the \`souffle\` binary). Same IR, external engine"
 duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Same IR"))' \
 '--jobs=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
 '--threads=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
-'(--json --sarif)--html=[Write a self-contained HTML report (\`index.html\` style)]:FILE:_files' \
+'--json=[Emit the full report as \`intermed-doctor-report-v1\` JSON]::FILE:_files' \
+'--sarif=[Emit SARIF 2.1.0 (for IDE / CI code-scanning)]::FILE:_files' \
+'--html=[Write a self-contained HTML report (\`index.html\` style)]:FILE:_files' \
 '--profile=[Write wall-clock phase profile JSON (\`intermed-doctor-profile-v1\`)]:FILE:_files' \
+'--telemetry-out=[Explicitly export a privacy-filtered telemetry event to FILE. Nothing is collected or written unless this option or \`--telemetry-endpoint\` is supplied]:FILE:_files' \
+'--telemetry-endpoint=[Explicitly send a privacy-filtered telemetry event to an HTTPS endpoint. No built-in service is contacted; the destination must be supplied here]:HTTPS_URL:_default' \
 '--cache-dir=[Override jar cache root (default\: \$XDG_CACHE_HOME/intermed or ~/.cache/intermed)]:DIR:_files' \
 '--cache-remote-dir=[Shared/remote cache tier directory (Tier 3). A scan payload written by one machine is reused by any other pointed at the same directory (e.g. a network mount or CI cache). The reference \`LocalDirRemoteTier\`; real S3/HTTP tiers implement the same \`RemoteCacheTier\` trait]:DIR:_files' \
 '--cache-max-size=[Soft cap on jar cache size in MiB; oldest entries are pruned first (default\: 512). Useful on space-constrained or CI machines]:MIB:_default' \
@@ -71,9 +76,8 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Sa
 '--rule-pack-registry=[Registry index path or URL for resolving \`--rule-pack\` ids]:FILE|URL:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--mixin-risk[Enable Layer-F Mixin risk scanning during doctor]' \
-'(--sarif --html)--json[Emit the full report as \`intermed-doctor-report-v1\` JSON]' \
-'(--json --html)--sarif[Emit SARIF 2.1.0 (for IDE / CI code-scanning)]' \
 '--no-color[Disable ANSI colour even on a TTY]' \
+'--telemetry-include-log-excerpts[Include up to 20 redacted, truncated log-signal excerpts in explicitly requested telemetry. Requires \`--telemetry-out\` or \`--telemetry-endpoint\`]' \
 '--exit-zero[Exit 0 whenever the run completes, regardless of findings]' \
 '--no-cache[Disable the on-disk jar scan cache (default\: cache enabled at XDG path)]' \
 '--performance[Enable Layer-I Spark report import during doctor]' \

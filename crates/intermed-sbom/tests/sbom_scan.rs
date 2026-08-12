@@ -1,8 +1,13 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use intermed_sbom::{DistributionPlatform, SignatureStrength, SourceClass, scan_mods_dir};
+use intermed_doctor_core::JarCache;
+use intermed_sbom::{
+    DistributionPlatform, SignatureStrength, SignatureVerification, SourceClass, scan_mods_dir,
+    scan_mods_dir_with_cache,
+};
 use zip::write::SimpleFileOptions;
 
 #[test]
@@ -25,6 +30,56 @@ fn scan_records_checksum_and_identity_for_fabric_jar() {
     assert_eq!(r.trust_score, 90);
     assert_eq!(r.signature_strength, SignatureStrength::Unsigned);
     assert!(!r.sha256.is_empty());
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn fabric_multiline_description_is_identified_consistently() {
+    let root = temp_dir("fabric-multiline");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let file = std::fs::File::create(mods.join("euphoria.jar")).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    zip.start_file(
+        "fabric.mod.json",
+        SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
+    zip.write_all(
+        b"{\"schemaVersion\":1,\"id\":\"euphoria\",\"version\":\"1.0.0\",\"description\":\"line one\nline two\"}",
+    )
+    .unwrap();
+    zip.finish().unwrap();
+
+    let scan = scan_mods_dir(&mods).unwrap();
+    let record = &scan.records[0];
+    assert_eq!(record.mod_id.as_deref(), Some("euphoria"));
+    assert_eq!(
+        record.identity_status,
+        intermed_sbom::IdentityStatus::Parsed
+    );
+    assert_eq!(record.trust_score, 90);
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn content_cache_never_reuses_the_old_archive_locator() {
+    let root = temp_dir("cache-locator");
+    let first = root.join("first");
+    let second = root.join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let original = first.join("copy-a.jar");
+    write_fabric_jar(&original, "alpha");
+    std::fs::copy(&original, second.join("examplemod.jar")).unwrap();
+    let cache = JarCache::new(true, Some(root.join("cache"))).unwrap();
+
+    let a = scan_mods_dir_with_cache(&first, Some(&cache)).unwrap();
+    let b = scan_mods_dir_with_cache(&second, Some(&cache)).unwrap();
+    assert_eq!(a.records[0].archive, "copy-a.jar");
+    assert_eq!(b.records[0].archive, "examplemod.jar");
+    assert!(cache.stats().hits >= 1);
 
     std::fs::remove_dir_all(root).ok();
 }
@@ -99,7 +154,7 @@ fn scan_detects_modrinth_platform_and_upgrades_source_class() {
 }
 
 #[test]
-fn scan_detects_certified_jar_signature() {
+fn signature_material_without_valid_crypto_is_not_trusted() {
     let root = temp_dir("signed");
     let mods = root.join("mods");
     std::fs::create_dir_all(&mods).unwrap();
@@ -110,9 +165,89 @@ fn scan_detects_certified_jar_signature() {
         scan.records[0].signature_strength,
         SignatureStrength::Certified
     );
-    assert!(scan.records[0].signed);
-    assert_eq!(scan.records[0].trust_score, 100);
+    assert_eq!(
+        scan.records[0].signature_verification,
+        SignatureVerification::Invalid
+    );
+    assert!(!scan.records[0].signed);
+    assert_eq!(scan.records[0].trust_score, 90);
 
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn valid_jar_signature_is_cryptographically_verified_when_jdk_is_available() {
+    if Command::new("jarsigner").arg("-version").output().is_err()
+        || Command::new("keytool").arg("-help").output().is_err()
+    {
+        return;
+    }
+    let root = temp_dir("valid-signature");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let jar = mods.join("signed.jar");
+    let keystore = root.join("test.p12");
+    write_fabric_jar(&jar, "signed");
+    let generated = Command::new("keytool")
+        .args([
+            "-genkeypair",
+            "-alias",
+            "test",
+            "-keyalg",
+            "RSA",
+            "-dname",
+            "CN=InterMed Test",
+            "-validity",
+            "1",
+            "-storetype",
+            "PKCS12",
+            "-storepass",
+            "changeit",
+            "-keypass",
+            "changeit",
+            "-keystore",
+        ])
+        .arg(&keystore)
+        .status()
+        .unwrap();
+    assert!(generated.success());
+    let signed = Command::new("jarsigner")
+        .args(["-keystore"])
+        .arg(&keystore)
+        .args(["-storepass", "changeit"])
+        .arg(&jar)
+        .arg("test")
+        .status()
+        .unwrap();
+    assert!(signed.success());
+
+    let scan = scan_mods_dir(&mods).unwrap();
+    assert_eq!(
+        scan.records[0].signature_verification,
+        SignatureVerification::Verified
+    );
+    assert!(scan.records[0].signed);
+    assert_eq!(scan.records[0].trust_breakdown.verified_signature, 10);
+
+    // Adding content after signing must not retain the verified classification:
+    // the new entry is outside the signed digest set.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&jar)
+        .unwrap();
+    let mut zip = zip::ZipWriter::new_append(file).unwrap();
+    zip.start_file("assets/unsigned.txt", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"added after signing").unwrap();
+    zip.finish().unwrap();
+    let scan = scan_mods_dir(&mods).unwrap();
+    assert_eq!(
+        scan.records[0].signature_verification,
+        SignatureVerification::Incomplete
+    );
+    assert!(!scan.records[0].signed);
+    assert_eq!(scan.records[0].trust_breakdown.verified_signature, 0);
     std::fs::remove_dir_all(root).ok();
 }
 

@@ -200,6 +200,7 @@ impl IntermedConfig {
             facts: FactStoreSettings::default(),
             mixin: self.mixin_settings(),
             resource: self.resource_settings(),
+            pack_manifest: None,
             minecraft_jar: None,
             minecraft_mappings: None,
         }

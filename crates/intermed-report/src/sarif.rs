@@ -78,6 +78,18 @@ pub fn to_sarif_with_facts(report: &DoctorReport, facts: &[Fact]) -> Value {
         })
         .collect();
 
+    let execution_notifications: Vec<Value> = report
+        .operational_errors
+        .iter()
+        .map(|error| {
+            json!({
+                "level": "error",
+                "message": { "text": format!("{}:{}: {}", error.stage, error.component, error.message) },
+                "descriptor": { "id": format!("{}-failed", error.component) },
+            })
+        })
+        .collect();
+
     json!({
         "version": "2.1.0",
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -90,6 +102,10 @@ pub fn to_sarif_with_facts(report: &DoctorReport, facts: &[Fact]) -> Value {
                     "rules": rules
                 }
             },
+            "invocations": [ {
+                "executionSuccessful": report.operational_errors.is_empty(),
+                "toolExecutionNotifications": execution_notifications
+            } ],
             "results": results,
             "properties": {
                 "schema": report.schema,
@@ -168,6 +184,7 @@ mod tests {
                 id: "missing-dependency".into(),
                 findings: 1,
             }],
+            vec![],
             None,
         );
 
@@ -207,7 +224,7 @@ mod tests {
             instance_type: None,
             spark_report: None,
         };
-        let report = assemble("t", &target, &store, findings, vec![], vec![], None);
+        let report = assemble("t", &target, &store, findings, vec![], vec![], vec![], None);
         let sarif = to_sarif(&report);
         let locs = &sarif["runs"][0]["results"][0]["locations"];
         assert_eq!(locs[0]["logicalLocations"][0]["name"], "modx");

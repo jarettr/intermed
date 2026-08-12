@@ -1,4 +1,4 @@
-//! Pluggable query backends (plan Phase 4.2).
+//! Pluggable query backends.
 //!
 //! The router ([`router`](crate::router)) splits a plan into single-engine stages; a
 //! [`QueryBackend`] is what actually *runs* a stage. Formalizing the seam lets new
@@ -13,9 +13,9 @@
 //!   feature-gated.
 //! - **Soufflé** — `to_datalog` + the external `souffle` binary (`intermed-rules`).
 //!
-//! Future engines (Rust Datalog `ascent`, `DataFusion`, `Polars`) plug in by
-//! implementing [`QueryBackend`] in their own crate/feature — they are *additive* and
-//! carry their own (heavy) dependencies, so they are not linked into the default build.
+//! Feature-gated implementations in this crate provide DataFusion, Polars, and
+//! Ascent-backed execution. They are additive and carry their own heavier dependencies,
+//! so they are not linked into the default build.
 
 use intermed_facts::Fact;
 
@@ -37,9 +37,8 @@ pub trait QueryBackend {
     fn run(&self, plan: &RelExpr, facts: &[Fact]) -> Result<Relation, ColumnarError>;
 }
 
-/// The in-process columnar engine as a [`QueryBackend`]. Supports every construct the
-/// executor runs (i.e. everything except the SQL-only `JoinFilter`/`GroupCountDistinct`
-/// shapes, which belong to the DuckDB backend).
+/// The in-process columnar engine as a [`QueryBackend`]. It executes every [`RelExpr`]
+/// node, including `JoinFilter` and `GroupCountDistinct`.
 pub struct InProcessBackend;
 
 impl QueryBackend for InProcessBackend {

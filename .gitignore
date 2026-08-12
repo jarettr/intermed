@@ -9,3 +9,4 @@ repomix-output.md
 *.html
 profile_*.json
 report_*.json
+dhat-heap.json

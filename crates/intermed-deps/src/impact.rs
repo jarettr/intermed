@@ -13,7 +13,7 @@ use intermed_doctor_core::facts::{FactStore, kind};
 use serde::{Deserialize, Serialize};
 
 use crate::effective::EffectiveModel;
-use crate::semver::version_in_range;
+use crate::semver::version_in_range_with_dialect;
 
 /// Resources that reference the target namespace, broken down by referencing domain.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,11 +173,14 @@ pub fn update_impact(
             range: dep.range.clone(),
             mandatory: dep.mandatory,
         };
-        match version_in_range(to, &dep.range) {
+        match version_in_range_with_dialect(to, &dep.range, dep.version_dialect) {
             Some(true) => {
                 // Accepts `to`. If it rejected `from`, the bump fixes it.
                 if let Some(from_v) = from {
-                    if matches!(version_in_range(from_v, &dep.range), Some(false)) {
+                    if matches!(
+                        version_in_range_with_dialect(from_v, &dep.range, dep.version_dialect),
+                        Some(false)
+                    ) {
                         now_satisfied.push(entry);
                     }
                 }

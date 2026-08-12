@@ -45,6 +45,7 @@ defaults to the current directory. The target kind is auto-detected.
 | Flag | Effect |
 |------|--------|
 | `--mods-dir <DIR>` | Override the detected mods directory. |
+| `--pack-manifest <FILE>` | Supply the authoritative `modrinth.index.json`, CurseForge `manifest.json`, or original `.mrpack`/`.zip` when a materialized instance no longer contains it. |
 | `--minecraft-jar <JAR>` | Index a Minecraft client/server jar, so mixin apply checks and `minecraft:` references resolve against real vanilla classes and data. |
 | `--minecraft-mappings <FILE>` | Yarn/Mojmap Tiny v2 mappings, to bridge named ↔ intermediary for the jar above. |
 
@@ -70,8 +71,14 @@ defaults to the current directory. The target kind is auto-detected.
 | `--explain <FINDING_ID>` | Print one finding with its full evidence chain, and exit. |
 | `--dump-facts <FILE>` | Write the raw fact snapshot to JSON. |
 | `--profile <FILE>` | Write a wall-clock phase profile. |
+| `--telemetry-out <FILE>` | Explicitly write one privacy-filtered `intermed-telemetry-event-v1` event. Disabled when absent. |
+| `--telemetry-endpoint <HTTPS_URL>` | Explicitly POST that event to the supplied HTTPS destination. No default endpoint exists. |
+| `--telemetry-include-log-excerpts` | Separately consent to at most 20 redacted, truncated signal excerpts; requires a telemetry destination. |
 | `--no-color` | Disable ANSI colour. |
 | `--exit-zero` | Always exit `0` on completion; a non-zero exit then means an operational error, not a finding. |
+
+See [Telemetry and privacy](../guides/telemetry.md) for the exact payload and
+redaction boundary.
 
 **Cache** (see [Caching](caching.md))
 

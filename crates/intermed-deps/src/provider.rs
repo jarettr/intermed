@@ -7,8 +7,8 @@ use pubgrub::OfflineDependencyProvider;
 use thiserror::Error;
 
 use crate::graph::{MODPACK_ROOT_ID, ModpackGraph, is_platform_dep};
-use crate::ranges::{ModRange, parse_mod_range};
-use crate::semver::parse_mod_version;
+use crate::ranges::ModRange;
+use crate::semver::{parse_mod_version, version_in_range_with_dialect};
 
 /// PubGrub provider type used for modpack resolution.
 pub type ModpackProvider = OfflineDependencyProvider<String, ModRange>;
@@ -33,6 +33,11 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
 
     let mut provider = ModpackProvider::new();
     let mut versions_by_id: HashMap<String, BTreeMap<SmallVersion, String>> = HashMap::new();
+    let installed_ids: HashSet<&str> = graph
+        .packages
+        .iter()
+        .map(|package| package.id.as_str())
+        .collect();
 
     for package in &graph.packages {
         let Some(parsed) = parse_mod_version(&package.version) else {
@@ -45,7 +50,10 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
     }
 
     for alias in &graph.provides {
-        if versions_by_id.contains_key(&alias.alias_id) {
+        // A real installed package owns its id. Otherwise retain *every*
+        // provider candidate: the first bundled copy may be out of range while
+        // a later one satisfies the dependency (common with Fabric API modules).
+        if installed_ids.contains(alias.alias_id.as_str()) {
             continue;
         }
         let Some(parsed) = parse_mod_version(&alias.provider_version) else {
@@ -57,11 +65,9 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
             .insert(parsed, alias.provider_version.clone());
     }
 
-    let package_ids: HashSet<String> = versions_by_id.keys().cloned().collect();
-
     for (package_id, versions) in &versions_by_id {
         for parsed_version in versions.keys() {
-            let deps = dependency_constraints(graph, package_id, &package_ids);
+            let deps = dependency_constraints(graph, package_id, &versions_by_id);
             provider.add_dependencies(package_id.clone(), parsed_version.clone(), deps);
         }
     }
@@ -83,7 +89,7 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
 fn dependency_constraints(
     graph: &ModpackGraph,
     from_id: &str,
-    known_packages: &HashSet<String>,
+    versions_by_id: &HashMap<String, BTreeMap<SmallVersion, String>>,
 ) -> Vec<(String, ModRange)> {
     let mut merged: HashMap<String, ModRange> = HashMap::new();
     for edge in &graph.edges {
@@ -94,13 +100,7 @@ fn dependency_constraints(
         {
             continue;
         }
-        if !known_packages.contains(&edge.to)
-            && !graph.provides.iter().any(|a| a.alias_id == edge.to)
-        {
-            // Missing packages are modeled by absence from the provider catalog;
-            // still emit the constraint so PubGrub can explain the gap.
-        }
-        let Some(range) = parse_mod_range(&edge.range) else {
+        let Some(range) = catalog_constraint(edge, versions_by_id.get(&edge.to)) else {
             continue;
         };
         merged
@@ -109,6 +109,37 @@ fn dependency_constraints(
             .or_insert(range);
     }
     merged.into_iter().collect()
+}
+
+/// Lower a loader-specific predicate to the finite installed catalog PubGrub
+/// actually solves. This avoids translating Fabric predicates through Cargo's
+/// prerelease rules: each installed raw version is checked by the authoritative
+/// dialect evaluator, then represented as an exact PubGrub singleton.
+fn catalog_constraint(
+    edge: &crate::graph::ModDependencyEdge,
+    versions: Option<&BTreeMap<SmallVersion, String>>,
+) -> Option<ModRange> {
+    let Some(versions) = versions else {
+        // Keep a valid missing dependency as a real constraint: PubGrub will see
+        // that the package catalog is absent. Invalid/opaque comparator syntax is
+        // skipped rather than turned into a false global contradiction.
+        return version_in_range_with_dialect("0.0.0", &edge.range, edge.version_dialect)
+            .map(|_| ModRange::full());
+    };
+
+    let mut allowed = ModRange::empty();
+    for (parsed, raw) in versions {
+        match version_in_range_with_dialect(raw, &edge.range, edge.version_dialect) {
+            Some(true) | None => {
+                // `None` is deliberately included. Pairwise reports it as
+                // undecidable; global resolution must not upgrade uncertainty
+                // into a hard unsat.
+                allowed = allowed.union(&ModRange::singleton(parsed.clone()));
+            }
+            Some(false) => {}
+        }
+    }
+    Some(allowed)
 }
 
 #[cfg(test)]

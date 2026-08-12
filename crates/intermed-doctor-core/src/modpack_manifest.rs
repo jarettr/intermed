@@ -165,7 +165,7 @@ impl Rule for ModpackIntegrityRule {
     fn id(&self) -> &'static str {
         "modpack-incomplete"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, crate::RuleError> {
         let mut out = Vec::new();
         for f in ctx.store.by_kind(kind::MODPACK_INCOMPLETE) {
             let referenced = f.attr_int("referenced_mods").unwrap_or(0);
@@ -214,7 +214,7 @@ impl Rule for ModpackIntegrityRule {
                 .build(),
             );
         }
-        out
+        Ok(out)
     }
 }
 
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(store.by_kind(kind::MODPACK_INCOMPLETE).count(), 1);
 
         let rctx = RuleCtx::for_test(&store, &target);
-        let findings = ModpackIntegrityRule.evaluate(&rctx);
+        let findings = ModpackIntegrityRule.evaluate(&rctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
         std::fs::remove_dir_all(root).ok();
@@ -517,7 +517,7 @@ mod tests {
         assert!(incomplete.attr_int("manifest_fact_id").is_some());
 
         let rctx = RuleCtx::for_test(&store, &target);
-        let findings = ModpackIntegrityRule.evaluate(&rctx);
+        let findings = ModpackIntegrityRule.evaluate(&rctx).unwrap();
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(findings[0].title.contains("25%"));
         std::fs::remove_dir_all(root).ok();

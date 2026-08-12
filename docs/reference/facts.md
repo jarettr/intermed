@@ -31,7 +31,7 @@ Each fact has:
 | `attributes` | Typed key/values carrying the detail. |
 | `source` | Where it was read: a locator (the jar), an optional inner path (the file inside it), and an optional line. |
 | `extractor` | Which collector produced it. |
-| `weight` | How strongly it supports a finding it is cited by. |
+| `confidence` | How certain the extractor is that the observed fact is correct. |
 
 `doctor --dump-facts <FILE>` writes the whole fact snapshot, before any rule runs.
 The predicate histogram (in the report's `fact_stats`, and the HTML Facts tab)
@@ -71,9 +71,16 @@ The JSON report is schema `intermed-doctor-report-v1`. Its fields are listed in
 |--------|-------------|
 | `intermed-doctor-report-v1` | `doctor --json` |
 | `intermed-doctor-profile-v1` | `doctor --profile` |
+| `intermed-telemetry-event-v1` | explicit `doctor --telemetry-out` / `--telemetry-endpoint` |
 | `intermed-modpack-graph-v1` | `deps graph` |
 | `intermed-deps-resolution-v1` | `deps resolve` |
 | `intermed-config-v1` | the config file and `--dump-config` |
+
+The predicate catalog is also lifecycle-checked in CI. Every built-in `kind::`
+predicate must be referenced by production code or marked `reserved = true` in
+`crates/intermed-facts/schema.toml`; a reserved predicate that becomes active
+must have that marker removed. `complete = false` instead describes an active
+predicate whose row may legitimately omit some terms.
 
 ## Rule backends
 

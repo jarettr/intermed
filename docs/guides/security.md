@@ -9,11 +9,14 @@ reason to look, not proof of anything.
 
 For a mods directory these run as part of a normal `doctor` run:
 
-- **Signature status** — whether each jar carries a `META-INF/*.SF` signature.
+- **Signature status** — whether signing material is absent, incomplete, invalid,
+  cryptographically verified, or could not be verified. File presence alone is
+  never reported as a valid signature.
   Most Fabric and Forge mods ship unsigned; this is reported as informational
   context, not a problem.
 - **Trust score** — a 0–100 score per artifact from how well it is identified
-  (known id, version, signature). Lower is less certain.
+  (known id, version, platform, verified signature). The report includes the
+  points contributed by each signal. Lower is less certain.
 - **Coremods** — Forge bytecode transformers a mod ships, which run before mixins
   and outside their model.
 - **Dangerous-API surface** — a count of classes in a jar that reference
@@ -52,8 +55,10 @@ statically references a high-risk capability — process spawning, `Unsafe` / na
 class definition, or a script engine — it raises a single
 `low-trust-capability:<jar>` finding (`warn`, security).
 
-The reasoning is explicit in the finding: unknown provenance combined with a
-dangerous capability is a stronger supply-chain signal than either alone. The fix it
+The reasoning is explicit in the finding, including the score decomposition and
+identity status. A metadata parser failure is treated as incomplete analysis and
+does not independently amplify the security signal; genuinely absent identity
+metadata can. The fix it
 suggests is to establish the jar's provenance (a known platform, a signature or a
 real manifest) before trusting a jar that spawns processes, loads native code, or
 evaluates scripts. `--explain` shows both sides of the link — the SBOM trust fact

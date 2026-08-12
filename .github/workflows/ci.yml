@@ -25,16 +25,16 @@ jobs:
         run: cargo fmt -- --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: Build (generates man pages)
-        run: cargo build
-      - name: Man page present
-        run: test -f docs/man/intermed.1
-      - name: Shell completions present
+      - name: Build and regenerate CLI docs
+        run: INTERMED_GENERATE_CLI_DOCS=1 cargo build
+      - name: Generated CLI docs are current
         run: |
+          test -f docs/man/intermed.1
           test -f docs/completions/intermed.bash
           test -f docs/completions/_intermed
           test -f docs/completions/intermed.fish
           test -f docs/completions/_intermed.ps1
+          git diff --exit-code -- docs/man docs/completions
       - name: Test
         run: cargo test
       - name: Mod-scale benchmarks (50/100/200 mods)

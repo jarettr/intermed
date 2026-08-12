@@ -49,23 +49,9 @@ impl Rule for SouffleRulePack {
         "souffle-rule-pack"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        match run_souffle(&self.pack, ctx) {
-            Ok(findings) => findings,
-            Err(e) => vec![
-                intermed_doctor_core::evidence::Finding::builder(
-                    "souffle-rule-pack",
-                    "souffle-backend-failed",
-                )
-                .severity(intermed_doctor_core::evidence::Severity::Fatal)
-                .category(intermed_doctor_core::evidence::Category::Runtime)
-                .title("Souffle backend failed")
-                .explanation(e.to_string())
-                .tag("logic")
-                .tag("souffle")
-                .build(),
-            ],
-        }
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        run_souffle(&self.pack, ctx)
+            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))
     }
 }
 

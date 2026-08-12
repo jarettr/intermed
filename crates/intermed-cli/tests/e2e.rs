@@ -135,6 +135,44 @@ fn doctor_writes_multiple_report_artifacts_in_one_run() {
 }
 
 #[test]
+fn doctor_exports_only_the_explicit_telemetry_schema() {
+    let fixture = Fixture::new("doctor-telemetry");
+    fixture.write_safe_merge_mods();
+    let telemetry = fixture.root.join("telemetry.json");
+
+    let output = run([
+        "doctor",
+        fixture.mods_str(),
+        "--telemetry-out",
+        telemetry.to_str().unwrap(),
+        "--exit-zero",
+    ]);
+    assert_success(&output);
+
+    let text = std::fs::read_to_string(telemetry).unwrap();
+    let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(event["schema"], "intermed-telemetry-event-v1");
+    assert_eq!(event["consent"]["outcome_metrics"], true);
+    assert_eq!(event["consent"]["log_excerpts"], false);
+    assert!(!text.contains(fixture.root.to_str().unwrap()));
+    assert!(event.get("target").is_none());
+    assert!(event.get("findings").is_none());
+}
+
+#[test]
+fn doctor_rejects_log_telemetry_consent_without_destination_before_scan() {
+    let output = run([
+        "doctor",
+        "/definitely/not/an/intermed/target",
+        "--telemetry-include-log-excerpts",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requires --telemetry-out or --telemetry-endpoint"));
+    assert!(!stderr.contains("target does not exist"));
+}
+
+#[test]
 fn doctor_rejects_two_stdout_report_formats() {
     let fixture = Fixture::new("doctor-double-stdout");
     fixture.write_safe_merge_mods();
@@ -717,7 +755,8 @@ fn doctor_html_report_writes_self_contained_page() {
     let html = std::fs::read_to_string(&html_path).unwrap();
     assert!(html.starts_with("<!DOCTYPE html>"));
     assert!(html.contains("InterMed Doctor Report"));
-    assert!(html.contains("resource-conflict"));
+    assert!(html.contains("detailed/explain-only finding(s) are retained"));
+    assert!(!html.contains("resource-conflict:safe-crdt-merge"));
 }
 
 #[test]

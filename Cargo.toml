@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    # ── Phase 0/1: working core ───────────────────────────────────────────
+    # ── Core analysis and product surface ─────────────────────────────────
     "crates/intermed-facts",
     "crates/intermed-evidence",
     "crates/intermed-report",
@@ -12,24 +12,24 @@ members = [
     "crates/intermed-deps",
     "crates/intermed-rules",
     "crates/intermed-cli",
-    # ── Later phases: structured stubs (real Collector/Rule contracts) ─────
+    # ── Domain and execution layers ────────────────────────────────────────
     "crates/intermed-resource-identity",# Canonical resource identity (Layer E + M)
-    "crates/intermed-vfs",              # Layer E  — Phase 3
+    "crates/intermed-vfs",              # Layer E  — virtual resource filesystem
     "crates/intermed-resource-ast",     # Layer M  — resource/data semantics (AST)
-    "crates/intermed-packops",          # Layer E  — Phase 3
+    "crates/intermed-packops",          # Layer E  — transactional pack operations
     "crates/intermed-dynamics",         # Layer E  — script-engine dynamics sensors
-    "crates/intermed-mixin-intel",      # Layer F  — Phase 4
-    "crates/intermed-security-audit",   # Layer G  — Phase 6
-    "crates/intermed-sbom",             # Layer H  — Phase 6
-    "crates/intermed-spark-bridge",     # Layer I  — Phase 7
-    "crates/intermed-lab",              # Layer K  — Phase 8
+    "crates/intermed-mixin-intel",      # Layer F  — Mixin analysis
+    "crates/intermed-security-audit",   # Layer G  — static security analysis
+    "crates/intermed-sbom",             # Layer H  — SBOM and provenance
+    "crates/intermed-spark-bridge",     # Layer I  — Spark evidence bridge
+    "crates/intermed-lab",              # Layer K  — compatibility lab evidence
     "crates/intermed-duckdb",           # Layer J  — DuckDB SQL backend (feature-gated)
     "crates/intermed-columnar",         # In-process columnar (Arrow) query engine — the default rule backend
     "crates/intermed-query-bridge",     # Test-time equivalence guard: RuleSpec → IR lowering + engine/interpreter parity
 ]
 
 [workspace.package]
-version = "0.1.3-alpha"
+version = "0.1.4-alpha"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -94,3 +94,9 @@ intermed-duckdb = { path = "crates/intermed-duckdb" }
 [profile.release]
 lto = "thin"
 strip = true
+
+# Full-workspace tests link the CLI, Arrow and (when requested) embedded DuckDB.
+# Line tables retain useful backtraces while avoiding the very large DWARF graph
+# that made the final test link exceed 16 GiB on development machines.
+[profile.test]
+debug = 1

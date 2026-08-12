@@ -7,10 +7,10 @@
 #[cfg(feature = "duckdb")]
 use std::collections::BTreeMap;
 
-use intermed_doctor_core::evidence::{Category, Finding, Severity};
+use intermed_doctor_core::evidence::Finding;
 #[cfg(feature = "duckdb")]
 use intermed_doctor_core::facts::{Fact, FactId};
-use intermed_doctor_core::{Rule, RuleCtx};
+use intermed_doctor_core::{Rule, RuleCtx, RuleError};
 
 #[cfg(feature = "duckdb")]
 use intermed_rules::evaluate_pack;
@@ -48,32 +48,18 @@ impl Rule for DuckdbRulePack {
     }
 
     #[allow(unused_variables)]
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleError> {
         #[cfg(feature = "duckdb")]
         {
-            match run_duckdb_rules(&self.pack, ctx) {
-                Ok(findings) => findings,
-                Err(e) => vec![backend_failed_finding(e)],
-            }
+            run_duckdb_rules(&self.pack, ctx).map_err(RuleError::new)
         }
         #[cfg(not(feature = "duckdb"))]
         {
-            vec![backend_failed_finding(
-                "DuckDB backend is not compiled in; rebuild with --features duckdb".into(),
-            )]
+            Err(RuleError::new(
+                "DuckDB backend is not compiled in; rebuild with --features duckdb",
+            ))
         }
     }
-}
-
-fn backend_failed_finding(message: String) -> Finding {
-    Finding::builder("duckdb-rule-pack", "duckdb-backend-failed")
-        .severity(Severity::Fatal)
-        .category(Category::Runtime)
-        .title("DuckDB backend failed")
-        .explanation(message)
-        .tag("logic")
-        .tag("duckdb")
-        .build()
 }
 
 #[cfg(feature = "duckdb")]
@@ -84,7 +70,17 @@ fn run_duckdb_rules(
     use crate::schema::EVAL_RUN_ID;
     use crate::store::DuckStore;
 
-    let facts: Vec<Fact> = ctx.store.all().to_vec();
+    // SQL is currently used only for the security aggregation below; all other
+    // declarative findings use the shared interpreter. Materializing millions of
+    // unrelated mixin/resource facts here doubled the fact graph and exhausted
+    // memory on realistic packs. Keep the SQL working set exact and bounded.
+    let facts: Vec<Fact> = ctx
+        .store
+        .all()
+        .iter()
+        .filter(|fact| intermed_security_audit::signal_for_fact_kind(&fact.kind).is_some())
+        .cloned()
+        .collect();
     let store = DuckStore::open_in_memory().map_err(|e| e.to_string())?;
     store
         .materialize_facts(EVAL_RUN_ID, &facts)

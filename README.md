@@ -9,16 +9,17 @@ It explains; it does not change anything. A run never edits your pack, downloads
 mods, or starts the game. Output is a report you read in a terminal, or JSON /
 SARIF / HTML for tools and CI.
 
-This is `0.1.3-alpha`. The analysis runs and is tested; commands, flags, and
-output shapes may still change. The [roadmap](docs/ROADMAP.md) tracks what is
-planned and what is out of scope.
+This is `0.1.4-alpha`. The analysis runs and is tested; commands, flags, and
+output shapes may still change. The [project status](docs/PROJECT_STATUS.md)
+states the validated scope and known limits; the [roadmap](docs/ROADMAP.md)
+tracks what comes next.
 
 ```
 intermed doctor ./mods
 ```
 
 ```
-InterMed Doctor v0.1.3-alpha
+InterMed Doctor v0.1.4-alpha
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 
@@ -111,6 +112,8 @@ cargo install --path crates/intermed-cli   # installs `intermed` into ~/.cargo/b
   [mixins](docs/guides/mixins.md) ·
   [security & SBOM](docs/guides/security.md) ·
   [performance](docs/guides/performance.md)
+- **Privacy** — [explicit outcome telemetry](docs/guides/telemetry.md), disabled
+  unless requested for a specific run.
 - **Reference** — complete and exhaustive:
   [commands & flags](docs/reference/commands.md) ·
   [output formats](docs/reference/output-formats.md) ·

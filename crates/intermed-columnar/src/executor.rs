@@ -891,6 +891,7 @@ fn group_count_distinct<'a>(
 /// way the old nested-loop `==` did. `Float` is keyed by bit pattern so it is `Eq`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum HashKey {
+    Null,
     Str(String),
     Int(i64),
     Bool(bool),
@@ -1073,18 +1074,20 @@ pub(crate) fn eval_cmp(lhs: &Value, op: CmpOp, rhs: &Value) -> bool {
     }
 }
 
-/// Group key for aggregation. Uses the display string (matching the prior executor),
-/// so e.g. numeric/string forms of a group value collapse together as before.
-fn group_key(tuple: &Tuple, positions: &[Option<usize>]) -> String {
+/// Type-safe composite group key. Non-null cells retain the declarative engine's
+/// display-string equality (so `Int(2)` and `Str("2")` still group together), but
+/// the vector shape and explicit null cell avoid delimiter collisions and the
+/// allocation-heavy `join` previously used here.
+fn group_key(tuple: &Tuple, positions: &[Option<usize>]) -> Vec<HashKey> {
     positions
         .iter()
         .map(|p| {
             p.and_then(|i| tuple.get(i))
-                .map(Value::to_display)
-                .unwrap_or_default()
+                .filter(|value| !value.is_null())
+                .map(|value| HashKey::Str(value.to_display()))
+                .unwrap_or(HashKey::Null)
         })
-        .collect::<Vec<_>>()
-        .join("\u{1}")
+        .collect()
 }
 
 /// Hash aggregation. Groups are accumulated in a hash table keyed by the group
@@ -1104,7 +1107,7 @@ fn hash_aggregate<'a>(
         .collect();
 
     // Group key → slot in `order`, so output is first-seen order.
-    let mut index: AHashMap<String, usize> = AHashMap::new();
+    let mut index: AHashMap<Vec<HashKey>, usize> = AHashMap::new();
     let mut order: Vec<Vec<Tuple>> = Vec::new();
     for tuple in inner.iter {
         let key = group_key(&tuple, &group_pos);
@@ -1184,7 +1187,7 @@ fn compute_window(
     functions: &[WindowFunction],
 ) -> Result<Vec<Tuple>, ColumnarError> {
     // Partition rows by the partition-by key (first-seen order).
-    let mut index: AHashMap<String, usize> = AHashMap::new();
+    let mut index: AHashMap<Vec<HashKey>, usize> = AHashMap::new();
     let mut parts: Vec<Vec<Tuple>> = Vec::new();
     for row in rows {
         let key = group_key(&row, ppos);
@@ -1446,6 +1449,41 @@ mod tests {
             })
             .unwrap();
         assert_eq!(foo.get("n"), Some(&Value::Int(2)));
+    }
+
+    #[test]
+    fn aggregate_composite_key_has_no_delimiter_collision() {
+        let mut facts = FactStore::new();
+        facts
+            .fact("test", "pair")
+            .subject("left")
+            .attr("a", "x\u{1}y")
+            .attr("b", "z")
+            .emit();
+        facts
+            .fact("test", "pair")
+            .subject("right")
+            .attr("a", "x")
+            .attr("b", "y\u{1}z")
+            .emit();
+        let store = ColumnarStore::from_facts(facts.all());
+        let plan = RelExpr::scan("pair").aggregate(
+            vec!["a".into(), "b".into()],
+            vec![Aggregate {
+                func: AggFunc::Count,
+                column: String::new(),
+                alias: "n".into(),
+            }],
+        );
+
+        let result = execute(&plan, &store).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(
+            result
+                .rows
+                .iter()
+                .all(|row| row.get("n") == Some(&Value::Int(1)))
+        );
     }
 
     #[test]

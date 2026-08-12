@@ -26,7 +26,7 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
         RULE_ID
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = Vec::new();
         let hot_methods = collect_hot_methods(ctx);
 
@@ -211,7 +211,7 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
             );
         }
 
-        out
+        Ok(out)
     }
 }
 

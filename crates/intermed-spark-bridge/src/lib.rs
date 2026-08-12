@@ -54,11 +54,11 @@ impl Rule for PerformanceRules {
         "performance"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = PerformanceCorrelationRule {
             thresholds: self.thresholds,
         }
-        .evaluate(ctx);
+        .evaluate(ctx)?;
         out.extend(perf_tick_mixin_hotpath_findings(ctx));
         out.extend(perf_hot_mod_resource_findings(ctx));
         out.extend(perf_resource_category_hotspot_findings(ctx));
@@ -68,7 +68,7 @@ impl Rule for PerformanceRules {
         out.extend(perf_log_correlation_findings(ctx));
         out.extend(perf_tick_log_correlation_findings(ctx));
         out.extend(perf_tick_heavy_handler_findings(ctx));
-        out
+        Ok(out)
     }
 }
 
@@ -722,7 +722,7 @@ impl Rule for PerformanceCorrelationRule {
         "performance-correlation"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let index = MixinIndex::build(ctx.store);
         let mut out = Vec::new();
 
@@ -891,7 +891,7 @@ impl Rule for PerformanceCorrelationRule {
             );
         }
 
-        out
+        Ok(out)
     }
 }
 
@@ -1486,9 +1486,11 @@ pub fn import_file(path: &Path) -> Result<SparkReport, SparkImportError> {
 fn discover_report_paths(target: &Target) -> impl Iterator<Item = PathBuf> + '_ {
     let mut paths = Vec::new();
     if let Some(explicit) = &target.spark_report {
-        if explicit.is_file() {
-            paths.push(explicit.clone());
-        }
+        // An explicit source is an isolation boundary. Do not silently merge
+        // unrelated auto-discovered profiles (including malformed leftovers)
+        // into the requested analysis.
+        paths.push(explicit.clone());
+        return paths.into_iter();
     }
     for sub in ["spark", "profiler"] {
         let dir = target.path.join(sub);
@@ -1550,6 +1552,34 @@ mod tests {
         std::fs::remove_dir_all(root).ok();
     }
 
+    #[test]
+    fn explicit_report_excludes_auto_discovered_files() {
+        let root =
+            std::env::temp_dir().join(format!("intermed-spark-explicit-{}", std::process::id()));
+        let spark = root.join("spark");
+        std::fs::create_dir_all(&spark).unwrap();
+        std::fs::write(spark.join("bad.json"), "not json").unwrap();
+        let explicit = root.join("chosen.json");
+        std::fs::write(
+            &explicit,
+            r#"{"schema":"intermed-spark-report-v1","tick_spikes_ms":[90]}"#,
+        )
+        .unwrap();
+        let target = Target {
+            path: root.clone(),
+            kind: TargetKind::Server,
+            mods_dir: None,
+            game_root: None,
+            layout: None,
+            instance_type: None,
+            spark_report: Some(explicit),
+        };
+        let import = import_target(&target).unwrap();
+        assert_eq!(import.reports.len(), 1);
+        assert!(import.failures.is_empty());
+        std::fs::remove_dir_all(root).ok();
+    }
+
     // ── Correlation rule ───────────────────────────────────────────────────
 
     use intermed_doctor_core::facts::FactStore;
@@ -1569,7 +1599,7 @@ mod tests {
     fn evaluate(store: &FactStore) -> Vec<Finding> {
         let target = dummy_target();
         let ctx = RuleCtx::for_test(store, &target);
-        rule().evaluate(&ctx)
+        rule().evaluate(&ctx).unwrap()
     }
 
     /// Emit a `HOT_METHOD` fact like the spark importer does (numeric percent).

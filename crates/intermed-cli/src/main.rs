@@ -25,6 +25,7 @@ use intermed_cli::command::{
 use intermed_cli::command::DbCommand;
 #[cfg(feature = "duckdb")]
 use intermed_cli::command::{HistoryCommand, TrendsCommand};
+use intermed_cli::telemetry::{self, TelemetryOptions};
 use intermed_cli::{detail, info};
 use intermed_config::{ConfigError, IntermedConfig};
 use intermed_doctor_core::evidence::Finding;
@@ -146,7 +147,9 @@ fn findings_exit_code(
     report: &intermed_doctor_core::report::DoctorReport,
     exit_zero: bool,
 ) -> ExitCode {
-    if exit_zero {
+    if !report.operational_errors.is_empty() {
+        ExitCode::from(2)
+    } else if exit_zero {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(report.exit_code() as u8)
@@ -170,7 +173,9 @@ fn write_report_artifact(
 ) -> AnyhowResult<()> {
     let rendered = intermed_report::render_with_facts(report, facts, format);
     write_atomic(path, rendered.as_bytes())
-        .with_context(|| format!("could not write {label} report to {}", path.display()))
+        .with_context(|| format!("could not write {label} report to {}", path.display()))?;
+    info!("wrote {label} report to {}", path.display());
+    Ok(())
 }
 
 fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
@@ -188,8 +193,22 @@ fn run_doctor(args: Box<DoctorArgs>, config_path: Option<&Path>) -> ExitCode {
 }
 
 fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> AnyhowResult<ExitCode> {
+    let telemetry_options = TelemetryOptions {
+        out: args.output.telemetry_out.as_deref(),
+        endpoint: args.output.telemetry_endpoint.as_deref(),
+        include_log_excerpts: args.output.telemetry_include_log_excerpts,
+    };
+    telemetry::validate(telemetry_options)?;
     if !args.target.exists() {
         anyhow::bail!("target does not exist: {}", args.target.display());
+    }
+    if let Some(path) = &args.pack_manifest {
+        if !path.is_file() {
+            anyhow::bail!(
+                "pack manifest does not exist or is not a file: {}",
+                path.display()
+            );
+        }
     }
     if stdout_artifact_count(&args.output) > 1 {
         anyhow::bail!(
@@ -269,7 +288,12 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
     } else {
         None
     };
-    let settings = diagnosis_settings_from_config(&cfg, &args.tuning, changed_since);
+    let settings = diagnosis_settings_from_config(
+        &cfg,
+        &args.tuning,
+        changed_since,
+        args.pack_manifest.as_deref(),
+    );
     let rule_pack_selection = rule_pack_selection_from(&cfg, &args);
     // `without_mixin`: when Layer-F mixin-risk runs (any logic mode), drop the
     // lighter declarative mixin rules from the pack so the two don't double-report.
@@ -301,6 +325,14 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         run.report.findings.len(),
         run.report.collectors.len()
     );
+
+    telemetry::deliver(&run, telemetry_options)?;
+    if let Some(path) = &args.output.telemetry_out {
+        info!(
+            "wrote privacy-filtered telemetry event to {}",
+            path.display()
+        );
+    }
 
     if let Some(path) = &args.output.profile {
         persistence::write_profile(path, &run.profile)
@@ -334,6 +366,7 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         let html = intermed_report::render_html_with_facts(&run.report, &run.facts);
         write_atomic(path, html.as_bytes())
             .with_context(|| format!("could not write HTML report to {}", path.display()))?;
+        info!("wrote HTML report to {}", path.display());
     }
 
     let mut wrote_artifact = args.output.html.is_some();
@@ -510,6 +543,7 @@ fn diagnosis_settings_from_config(
     cfg: &IntermedConfig,
     tuning: &DoctorTuningArgs,
     changed_since: Option<std::time::SystemTime>,
+    pack_manifest: Option<&std::path::Path>,
 ) -> DiagnosisSettings {
     let mut settings = cfg.diagnosis_settings();
     if let Some(n) = tuning.security_min_note_signals {
@@ -531,6 +565,7 @@ fn diagnosis_settings_from_config(
         settings.minecraft_mappings = Some(mappings.clone());
     }
     settings.scan.changed_since = changed_since;
+    settings.pack_manifest = pack_manifest.map(std::path::Path::to_path_buf);
     settings
 }
 
@@ -2863,7 +2898,12 @@ fn print_mixin_scan(scan: &intermed_mixin_intel::MixinScan) {
 #[cfg(test)]
 mod explain_tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use chrono::Utc;
     use intermed_doctor_core::evidence::{Finding, Severity};
+    use intermed_doctor_core::report::{OperationalError, Summary, TargetView};
+    use intermed_doctor_core::{DoctorReport, Environment, TargetKind};
 
     fn finding(id: &str, sev: Severity) -> Finding {
         Finding::builder("rule", id)
@@ -2954,6 +2994,34 @@ mod explain_tests {
             ExplainResolution::Listing(l) => assert!(l.is_empty()),
             _ => panic!("expected empty listing"),
         }
+    }
+
+    #[test]
+    fn exit_zero_never_masks_operational_failure() {
+        let report = DoctorReport {
+            schema: "test".into(),
+            tool_version: "test".into(),
+            generated_at: Utc::now(),
+            target: TargetView {
+                path: ".".into(),
+                kind: TargetKind::ModsDir,
+            },
+            environment: Environment::default(),
+            summary: Summary::default(),
+            findings: Vec::new(),
+            fix_plan: Vec::new(),
+            fact_stats: BTreeMap::new(),
+            collectors: Vec::new(),
+            rules: Vec::new(),
+            operational_errors: vec![OperationalError {
+                stage: "rule".into(),
+                component: "duckdb-rule-pack".into(),
+                message: "out of memory".into(),
+            }],
+            deferred_layers: Vec::new(),
+            profile: None,
+        };
+        assert_eq!(findings_exit_code(&report, true), ExitCode::from(2));
     }
 
     fn matches_name(r: &ExplainResolution<'_>) -> &'static str {

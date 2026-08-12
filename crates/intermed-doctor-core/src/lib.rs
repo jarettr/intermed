@@ -19,6 +19,7 @@
 pub mod bounded_zip;
 pub mod collector;
 pub mod engine;
+pub mod fabric_json;
 pub mod instance_layout;
 pub mod io_util;
 pub mod jar_cache;
@@ -49,8 +50,8 @@ pub use layer::Layer;
 pub use modpack::{ModpackError, ModpackMount, materialize_modpack_archive};
 pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
 pub use profile::{DiagnosticProfile, PROFILE_SCHEMA, PhaseTiming};
-pub use report::{DoctorReport, REPORT_SCHEMA};
-pub use rule::{Rule, RuleCtx};
+pub use report::{DoctorReport, OperationalError, REPORT_SCHEMA};
+pub use rule::{Rule, RuleCtx, RuleError};
 pub use scan_filter::{filter_jar_paths, list_jar_archives, parse_changed_since, should_scan_path};
 pub use settings::{
     DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel, MetadataSettings, MixinLevel,
@@ -96,8 +97,9 @@ mod tests {
         fn id(&self) -> &'static str {
             "dummy-rule"
         }
-        fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-            ctx.store
+        fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleError> {
+            Ok(ctx
+                .store
                 .by_kind(facts::kind::MOD)
                 .map(|m| {
                     Finding::builder("dummy-rule", format!("seen:{}", m.subject))
@@ -106,7 +108,33 @@ mod tests {
                         .title(format!("Saw mod {}", m.subject))
                         .build()
                 })
-                .collect()
+                .collect())
+        }
+    }
+
+    struct FailingCollector;
+    impl Collector for FailingCollector {
+        fn id(&self) -> &'static str {
+            "failing-collector"
+        }
+        fn layer(&self) -> Layer {
+            Layer::Metadata
+        }
+        fn applies(&self, _t: &Target) -> bool {
+            true
+        }
+        fn collect(&self, _ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+            CollectorOutcome::failed("collector exploded")
+        }
+    }
+
+    struct FailingRule;
+    impl Rule for FailingRule {
+        fn id(&self) -> &'static str {
+            "failing-rule"
+        }
+        fn evaluate(&self, _ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleError> {
+            Err(RuleError::new("backend exploded"))
         }
     }
 
@@ -146,5 +174,31 @@ mod tests {
             .map(|p| p.duration_ms)
             .sum();
         assert!(run.profile.total_ms >= phase_sum);
+    }
+
+    #[test]
+    fn operational_failures_are_not_domain_findings() {
+        let engine = DiagnosticEngine::builder()
+            .collector(FailingCollector)
+            .rule(FailingRule)
+            .build();
+        let target = Target::with_kind(".", TargetKind::ModsDir);
+        let report = engine.diagnose(&target);
+
+        assert!(report.findings.is_empty());
+        assert_eq!(report.summary.total, 0);
+        assert_eq!(report.operational_errors.len(), 2);
+        assert!(
+            report.operational_errors.iter().any(|error| {
+                error.stage == "collector" && error.component == "failing-collector"
+            })
+        );
+        assert!(
+            report
+                .operational_errors
+                .iter()
+                .any(|error| error.stage == "rule" && error.component == "failing-rule")
+        );
+        assert_eq!(report.exit_code(), 2);
     }
 }

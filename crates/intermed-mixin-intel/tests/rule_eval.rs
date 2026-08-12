@@ -61,7 +61,9 @@ fn overwrite_finding_attaches_inject_recommendation_via_site_key() {
     );
     assert!(store.by_kind(kind::MIXIN_RECOMMENDATION).count() >= 1);
 
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let overwrite = findings
         .iter()
         .find(|f| f.id.starts_with("mixin-overwrite-effect:"))
@@ -126,7 +128,9 @@ fn mixin_effect_summary_includes_recommendations_and_historical_boost() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let summary = findings
         .iter()
         .find(|f| f.id == "mixin-effect-summary:m0()V@HEAD")
@@ -172,7 +176,9 @@ fn overwrite_effect_does_not_duplicate_as_effect_summary() {
     };
     collector().collect(&mut ctx);
 
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     assert!(
         findings
             .iter()
@@ -206,7 +212,9 @@ fn risk_score_spark_boost_names_hot_methods() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let risk = findings
         .iter()
         .find(|f| f.id == "mixin-risk:net.minecraft.client.render.WorldRenderer")
@@ -233,7 +241,9 @@ fn risk_finding_includes_involved_mod_capabilities() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let risk = findings
         .iter()
         .find(|f| f.id == "mixin-risk:net.minecraft.client.render.WorldRenderer")
@@ -277,7 +287,9 @@ fn risk_cluster_fact_becomes_a_finding_citing_failing_sites() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let cluster = findings
         .iter()
         .find(|f| f.id == "mixin-cluster:cluster-net.example.Foo")
@@ -321,7 +333,9 @@ fn mixin_runtime_mutation_correlates_with_layer_m_static_conflict() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let f = findings
         .iter()
         .find(|f| f.id == "mixin-resource-override:recipe")
@@ -357,7 +371,9 @@ fn mixin_and_script_both_mutating_recipes_correlate() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let f = findings
         .iter()
         .find(|f| f.id == "mixin-script-resource:recipe")
@@ -390,7 +406,9 @@ fn runtime_log_confirms_a_static_site() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let f = findings
         .iter()
         .find(|f| f.id.starts_with("mixin-runtime-confirmed:"))
@@ -422,7 +440,9 @@ fn mixin_security_surface_elevates_with_layer_g_capability() {
         .emit();
 
     let target = mods_target(std::path::Path::new("."));
-    let findings = rule().evaluate(&RuleCtx::for_test(&store, &target));
+    let findings = rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
     let f = findings
         .iter()
         .find(|f| f.id == "mixin-security:sketchymod:networking")
@@ -450,6 +470,7 @@ fn mixin_security_surface_alone_is_a_note() {
     let target = mods_target(std::path::Path::new("."));
     let f = rule()
         .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap()
         .into_iter()
         .find(|f| f.id == "mixin-security:netmod:networking")
         .expect("security note");
@@ -475,6 +496,7 @@ fn worldgen_resource_plus_worldgen_mixin_is_flagged() {
     let target = mods_target(std::path::Path::new("."));
     let f = rule()
         .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap()
         .into_iter()
         .find(|f| f.id == "worldgen-resource-plus-worldgen-mixin-risk:wgmod")
         .expect("cluster-D worldgen finding");
@@ -503,6 +525,7 @@ fn worldgen_resource_without_worldgen_mixin_is_not_flagged() {
     assert!(
         rule()
             .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap()
             .into_iter()
             .all(|f| !f
                 .id
@@ -536,6 +559,7 @@ fn reloadable_data_loader_hook_stays_in_the_existing_bridge_path() {
     assert!(
         rule()
             .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap()
             .into_iter()
             .all(|f| !f.id.starts_with("resource-reload-mixin-risk"))
     );

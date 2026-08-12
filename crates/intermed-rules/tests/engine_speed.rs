@@ -159,7 +159,7 @@ fn columnar_engine_vs_interpreter() {
             .map(|_| {
                 let ctx = RuleCtx::for_test(&store, &t);
                 let start = Instant::now();
-                let _ = ColumnarRulePack::default().evaluate(&ctx);
+                let _ = ColumnarRulePack::default().evaluate(&ctx).unwrap();
                 start.elapsed().as_secs_f64() * 1000.0
             })
             .collect(),
@@ -168,7 +168,7 @@ fn columnar_engine_vs_interpreter() {
     // Equivalence: same findings either way.
     let ctx = RuleCtx::for_test(&store, &t);
     let interp_ids = ids(evaluate_pack(&default_core_pack_v2(), &ctx));
-    let columnar_ids = ids(ColumnarRulePack::default().evaluate(&ctx));
+    let columnar_ids = ids(ColumnarRulePack::default().evaluate(&ctx).unwrap());
     assert_eq!(
         interp_ids, columnar_ids,
         "columnar and interpreter findings differ"

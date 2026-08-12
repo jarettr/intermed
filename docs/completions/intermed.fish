@@ -46,12 +46,17 @@ complete -c intermed -n "__fish_intermed_needs_command" -f -a "sbom" -d 'SBOM ex
 complete -c intermed -n "__fish_intermed_needs_command" -f -a "demo" -d 'Presentation demo: aggregate a small real-mod run into launcher-facing reports'
 complete -c intermed -n "__fish_intermed_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l pack-manifest -d 'Authoritative original pack manifest or archive. Use this when analyzing a materialized instance whose `modrinth.index.json`/`manifest.json` was not retained by the launcher or extraction pipeline' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l logic -d 'Rule backend. The in-process columnar query engine is the default and only in-process engine; `souffle`/`duckdb` are optional external backends over the same IR (require their tool / build feature)' -r -f -a "columnar\t'In-process columnar query engine (`intermed-columnar`): the default and only in-process engine — optimizing logical/physical planner with hash join/aggregate. Pure Rust, always available'
 souffle\t'Soufflé Datalog backend (requires the `souffle` binary). Same IR, external engine'
 duckdb\t'In-process DuckDB SQL rule backend (requires `--features duckdb`). Same IR'"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l jobs -l threads -d 'Cap the worker thread count for parallel jar/log scanning. Unset or `0` uses all available cores; lower it on weak machines or shared CI runners' -r
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l json -d 'Emit the full report as `intermed-doctor-report-v1` JSON' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l sarif -d 'Emit SARIF 2.1.0 (for IDE / CI code-scanning)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l html -d 'Write a self-contained HTML report (`index.html` style)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l profile -d 'Write wall-clock phase profile JSON (`intermed-doctor-profile-v1`)' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l telemetry-out -d 'Explicitly export a privacy-filtered telemetry event to FILE. Nothing is collected or written unless this option or `--telemetry-endpoint` is supplied' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l telemetry-endpoint -d 'Explicitly send a privacy-filtered telemetry event to an HTTPS endpoint. No built-in service is contacted; the destination must be supplied here' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l cache-dir -d 'Override jar cache root (default: $XDG_CACHE_HOME/intermed or ~/.cache/intermed)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l cache-remote-dir -d 'Shared/remote cache tier directory (Tier 3). A scan payload written by one machine is reused by any other pointed at the same directory (e.g. a network mount or CI cache). The reference `LocalDirRemoteTier`; real S3/HTTP tiers implement the same `RemoteCacheTier` trait' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l cache-max-size -d 'Soft cap on jar cache size in MiB; oldest entries are pruned first (default: 512). Useful on space-constrained or CI machines' -r
@@ -86,9 +91,8 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack-t
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack-registry -d 'Registry index path or URL for resolving `--rule-pack` ids' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mixin-risk -d 'Enable Layer-F Mixin risk scanning during doctor'
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l json -d 'Emit the full report as `intermed-doctor-report-v1` JSON'
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l sarif -d 'Emit SARIF 2.1.0 (for IDE / CI code-scanning)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l no-color -d 'Disable ANSI colour even on a TTY'
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l telemetry-include-log-excerpts -d 'Include up to 20 redacted, truncated log-signal excerpts in explicitly requested telemetry. Requires `--telemetry-out` or `--telemetry-endpoint`'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l exit-zero -d 'Exit 0 whenever the run completes, regardless of findings'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l no-cache -d 'Disable the on-disk jar scan cache (default: cache enabled at XDG path)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l performance -d 'Enable Layer-I Spark report import during doctor'

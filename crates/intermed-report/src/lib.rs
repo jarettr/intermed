@@ -107,6 +107,7 @@ mod tests {
                 id: "missing-dependency".into(),
                 findings: 1,
             }],
+            vec![],
             None,
         )
     }

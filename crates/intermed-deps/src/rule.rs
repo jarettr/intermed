@@ -1,5 +1,7 @@
 //! Layer-C doctor rule: pairwise semver checks plus PubGrub global resolution.
 
+use std::collections::BTreeSet;
+
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{Rule, RuleCtx};
@@ -18,7 +20,7 @@ impl Rule for DependencyRule {
         "dependency"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = pairwise_findings(ctx, self.id());
         out.extend(ordering_findings(ctx, self.id()));
         out.extend(implicit_findings(ctx, self.id()));
@@ -26,24 +28,18 @@ impl Rule for DependencyRule {
         if let Some(finding) = resolution_finding(ctx, self.id(), &out) {
             out.push(finding);
         }
-        out
+        Ok(out)
     }
 }
 
 /// Suppress the global PubGrub unsat when pairwise checks already surfaced a
-/// plain `missing-dependency` root cause. Version-range conflicts still emit the
-/// global tree because it explains the joint unsat better than a single edge.
+/// plain `missing-dependency` root cause. PubGrub may choose that missing edge as
+/// its derivation even when unrelated optional version warnings exist; emitting
+/// both would duplicate the error and imply a false causal link.
 fn should_emit_pubgrub_unsat(pairwise: &[Finding]) -> bool {
-    let has_missing = pairwise
+    !pairwise
         .iter()
-        .any(|f| f.id.starts_with("missing-dependency:"));
-    let has_version = pairwise
-        .iter()
-        .any(|f| f.id.starts_with("wrong-version:") || f.id.starts_with("wrong-mc-version:"));
-    if has_version {
-        return true;
-    }
-    !has_missing
+        .any(|finding| finding.id.starts_with("missing-dependency:"))
 }
 
 /// Translate the global PubGrub resolution outcome into at most one finding.
@@ -61,10 +57,18 @@ fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) ->
     };
 
     match outcome {
-        ResolutionOutcome::Unsatisfiable { explanation }
-            if should_emit_pubgrub_unsat(pairwise) && !explanation.trim().is_empty() =>
-        {
-            Some(pubgrub_unsat_finding(ctx, rule_id, explanation))
+        ResolutionOutcome::Unsatisfiable {
+            explanation,
+            proof_packages,
+            proof_dependencies,
+        } if should_emit_pubgrub_unsat(pairwise) && !explanation.trim().is_empty() => {
+            Some(pubgrub_unsat_finding(
+                ctx,
+                rule_id,
+                explanation,
+                &proof_packages,
+                &proof_dependencies,
+            ))
         }
         // Pairwise checks already named a concrete missing dependency; the global
         // tree would be redundant. The graph *was* evaluated, so no skip note.
@@ -88,7 +92,13 @@ fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) ->
     }
 }
 
-fn pubgrub_unsat_finding(ctx: &RuleCtx<'_>, rule_id: &str, explanation: String) -> Finding {
+fn pubgrub_unsat_finding(
+    ctx: &RuleCtx<'_>,
+    rule_id: &str,
+    explanation: String,
+    proof_packages: &[String],
+    proof_dependencies: &[(String, String)],
+) -> Finding {
     let mut builder = Finding::builder(rule_id, "dependency-unsat:global")
         .severity(Severity::Error)
         .category(Category::Dependency)
@@ -101,8 +111,29 @@ fn pubgrub_unsat_finding(ctx: &RuleCtx<'_>, rule_id: &str, explanation: String) 
         .tag("pubgrub")
         .tag("unsat");
 
+    let proof = proof_packages
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let proof_edges = proof_dependencies
+        .iter()
+        .map(|(from, to)| (from.as_str(), to.as_str()))
+        .collect::<BTreeSet<_>>();
+
+    // A global graph may contain thousands of unrelated declarations. Cite only
+    // dependency edges represented by the derivation, plus the participating
+    // package/version facts that make those constraints concrete.
     for dep in ctx.store.by_kind(kind::DEPENDENCY) {
-        builder = builder.evidence(EvidenceEdge::supports(dep.id));
+        let from = dep.subject.as_str();
+        let to = dep.attr("dep").unwrap_or("");
+        if proof_edges.contains(&(from, to)) {
+            builder = builder.evidence(EvidenceEdge::supports(dep.id));
+        }
+    }
+    for package in ctx.store.by_kind(kind::MOD) {
+        if proof.contains(package.subject.as_str()) {
+            builder = builder.evidence(EvidenceEdge::supports(package.id));
+        }
     }
 
     builder.build()
@@ -169,7 +200,9 @@ mod tests {
             .attr("mandatory", true)
             .emit();
         let target = target();
-        let findings = DependencyRule.evaluate(&RuleCtx::for_test(&store, &target));
+        let findings = DependencyRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
         assert!(
             findings
                 .iter()
@@ -189,7 +222,9 @@ mod tests {
             .attr("version", "not-a-version")
             .emit();
         let target = target();
-        let findings = DependencyRule.evaluate(&RuleCtx::for_test(&store, &target));
+        let findings = DependencyRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
         assert!(
             !findings
                 .iter()
@@ -218,7 +253,9 @@ mod tests {
             .attr("mandatory", true)
             .emit();
         let target = target();
-        let findings = DependencyRule.evaluate(&RuleCtx::for_test(&store, &target));
+        let findings = DependencyRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
         assert!(
             !findings.iter().any(|f| {
                 f.id == "dependency-resolution-skipped" || f.id == "dependency-unsat:global"
@@ -226,5 +263,48 @@ mod tests {
             "a satisfiable graph should emit neither, got: {:?}",
             findings.iter().map(|f| &f.id).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn unsat_evidence_is_limited_to_derivation_packages() {
+        let mut store = FactStore::new();
+        for (id, version) in [
+            ("alpha", "1.0.0"),
+            ("beta", "1.0.0"),
+            ("unrelated", "1.0.0"),
+            ("also-unrelated", "1.0.0"),
+        ] {
+            store
+                .fact("meta", kind::MOD)
+                .subject(id)
+                .attr("version", version)
+                .emit();
+        }
+        let relevant = store
+            .fact("meta", kind::DEPENDENCY)
+            .subject("alpha")
+            .attr("dep", "beta")
+            .attr("range", ">=2.0.0")
+            .attr("mandatory", true)
+            .emit();
+        let unrelated = store
+            .fact("meta", kind::DEPENDENCY)
+            .subject("unrelated")
+            .attr("dep", "also-unrelated")
+            .attr("range", ">=1.0.0")
+            .attr("mandatory", true)
+            .emit();
+
+        let target = target();
+        let findings = DependencyRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        let unsat = findings
+            .iter()
+            .find(|finding| finding.id == "dependency-unsat:global")
+            .expect("expected global unsat");
+        assert!(unsat.evidence.iter().any(|edge| edge.fact == relevant));
+        assert!(!unsat.evidence.iter().any(|edge| edge.fact == unrelated));
+        assert!(unsat.evidence.len() <= 3, "evidence: {:?}", unsat.evidence);
     }
 }

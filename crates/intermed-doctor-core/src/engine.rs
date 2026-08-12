@@ -11,7 +11,7 @@ use intermed_facts::{Fact, FactStore};
 use crate::collector::{CollectCtx, Collector};
 use crate::jar_cache::JarCache;
 use crate::profile::{DiagnosticProfile, PhaseTiming};
-use crate::report::{self, DoctorReport, RuleStat};
+use crate::report::{self, DoctorReport, OperationalError, RuleStat};
 use crate::rule::{Rule, RuleCtx};
 use crate::settings::DiagnosisSettings;
 use crate::target::Target;
@@ -90,13 +90,25 @@ impl DiagnosticEngine {
         let mut findings: Vec<Finding> = Vec::new();
         let mut rule_stats: Vec<RuleStat> = Vec::with_capacity(self.rules.len());
         let mut rule_timings = Vec::with_capacity(self.rules.len());
+        let mut operational_errors = Vec::new();
         for r in &self.rules {
             let phase_start = Instant::now();
-            let produced = r.evaluate(&rctx);
+            let result = r.evaluate(&rctx);
             rule_timings.push(PhaseTiming {
                 id: r.id().to_string(),
                 duration_ms: phase_start.elapsed().as_millis() as u64,
             });
+            let produced = match result {
+                Ok(findings) => findings,
+                Err(error) => {
+                    operational_errors.push(OperationalError {
+                        stage: "rule".to_string(),
+                        component: r.id().to_string(),
+                        message: error.to_string(),
+                    });
+                    Vec::new()
+                }
+            };
             rule_stats.push(RuleStat {
                 id: r.id().to_string(),
                 findings: produced.len(),
@@ -156,6 +168,7 @@ impl DiagnosticEngine {
             findings,
             collector_outcomes,
             rule_stats,
+            operational_errors,
             Some(profile.clone()),
         );
         DiagnosticRun {

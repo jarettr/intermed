@@ -1,19 +1,20 @@
 //! Pairwise dependency checks (Phase 1 semantics) over fact snapshots.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
 use intermed_doctor_core::facts::{FactId, kind};
 
 use crate::graph::{is_platform_dep, platform_loader_family};
-use crate::semver::version_in_range;
+use crate::semver::{VersionDialect, version_in_range_with_dialect};
 
 /// A dependency `provides` declaration (e.g. a Jar-in-Jar bundled library, or a
 /// mod that advertises an alias id), carrying the declared version when known so
 /// the resolver can range-check it instead of treating any provider as a match.
 struct ProviderEntry {
     version: Option<String>,
+    version_ambiguous: bool,
     fact: FactId,
     /// Visibility scope: `classpath` (Jar-in-Jar), `metadata-alias` (a declared
     /// `provides` id), or `global` (default). Recorded for explanation; in
@@ -35,15 +36,23 @@ enum ProviderStatus {
     Absent,
 }
 
-fn provider_status(providers: Option<&Vec<ProviderEntry>>, range: &str) -> ProviderStatus {
+fn provider_status(
+    providers: Option<&Vec<ProviderEntry>>,
+    range: &str,
+    dialect: VersionDialect,
+) -> ProviderStatus {
     let Some(providers) = providers.filter(|p| !p.is_empty()) else {
         return ProviderStatus::Absent;
     };
     let mut unknown: Option<&ProviderEntry> = None;
     let mut out_of_range: Option<&ProviderEntry> = None;
     for p in providers {
+        if p.version_ambiguous && !dialect.orders_raw_extended_versions() {
+            unknown.get_or_insert(p);
+            continue;
+        }
         match &p.version {
-            Some(v) => match version_in_range(v, range) {
+            Some(v) => match version_in_range_with_dialect(v, range, dialect) {
                 Some(true) => return ProviderStatus::Satisfied,
                 Some(false) => {
                     out_of_range.get_or_insert(p);
@@ -82,13 +91,21 @@ enum RangeStatus {
 /// it does, dependency reasoning here is intentionally lenient — *any* installed
 /// version satisfying the range counts, so a version check never adds a second,
 /// derived error on top of an already-ambiguous install state.
-fn range_status(versions: &[String], range: &str) -> RangeStatus {
+fn range_status(
+    versions: &[String],
+    range: &str,
+    version_ambiguous: bool,
+    dialect: VersionDialect,
+) -> RangeStatus {
     if versions.is_empty() {
         return RangeStatus::Absent;
     }
+    if version_ambiguous && !dialect.orders_raw_extended_versions() {
+        return RangeStatus::Undecidable;
+    }
     let mut any_undecidable = false;
     for v in versions {
-        match version_in_range(v, range) {
+        match version_in_range_with_dialect(v, range, dialect) {
             Some(true) => return RangeStatus::InRange,
             Some(false) => {}
             None => any_undecidable = true,
@@ -124,6 +141,19 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             .or_default()
             .push(f.attr("version").unwrap_or("0").to_string());
     }
+    let ambiguous_versions: HashSet<String> = store
+        .by_kind(kind::MOD_METADATA)
+        .filter(|fact| fact.attr_bool("version_ambiguous").unwrap_or(false))
+        .map(|fact| fact.subject.clone())
+        .collect();
+    let loader_by_mod: HashMap<String, String> = store
+        .by_kind(kind::MOD)
+        .chain(store.by_kind(kind::PLUGIN))
+        .filter_map(|fact| {
+            fact.attr("loader")
+                .map(|loader| (fact.subject.clone(), loader.to_string()))
+        })
+        .collect();
     let installed_versions = |id: &str| installed.get(id).map(Vec::as_slice).unwrap_or(&[]);
     let is_duplicated = |id: &str| installed.get(id).is_some_and(|v| v.len() > 1);
     // Providers are version-aware: a bundled/aliased `provides` only satisfies a
@@ -140,6 +170,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 .or_default()
                 .push(ProviderEntry {
                     version,
+                    version_ambiguous: ambiguous_versions.contains(&f.subject),
                     fact: f.id,
                     scope: f.attr("scope").unwrap_or("global").to_string(),
                 });
@@ -162,6 +193,15 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         let range = dep.attr("range").unwrap_or("*");
         let mandatory = dep.attr_bool("mandatory").unwrap_or(true);
         let relation = dep.attr("relation").unwrap_or("depends");
+        let dialect = dep
+            .attr("version_dialect")
+            .and_then(VersionDialect::parse)
+            .or_else(|| {
+                loader_by_mod
+                    .get(modid)
+                    .map(|loader| VersionDialect::from_loader(loader))
+            })
+            .unwrap_or(VersionDialect::GenericSemver);
 
         // Ordering hints are never requirements — handled by the ordering rule.
         if is_ordering_relation(relation) {
@@ -174,7 +214,12 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             }
             let versions = installed_versions(dep_id);
             let installed_desc = versions.join(", ");
-            match range_status(versions, range) {
+            match range_status(
+                versions,
+                range,
+                ambiguous_versions.contains(dep_id),
+                dialect,
+            ) {
                 // Absent / out of the break range: compatible, stay silent.
                 RangeStatus::Absent | RangeStatus::OutOfRange => {}
                 // An installed version really falls inside the declared break
@@ -234,7 +279,12 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             }
             let versions = installed_versions(dep_id);
             let installed_desc = versions.join(", ");
-            let (severity, confidence, undecidable) = match range_status(versions, range) {
+            let (severity, confidence, undecidable) = match range_status(
+                versions,
+                range,
+                ambiguous_versions.contains(dep_id),
+                dialect,
+            ) {
                 // Not installed or outside the discouraged range: stay silent.
                 RangeStatus::Absent | RangeStatus::OutOfRange => continue,
                 RangeStatus::InRange => (Severity::Warn, 0.9, false),
@@ -273,7 +323,10 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
 
         if dep_id == "minecraft" {
             if let Some(mc) = &mc_version {
-                if matches!(version_in_range(mc, range), Some(false)) {
+                if matches!(
+                    version_in_range_with_dialect(mc, range, dialect),
+                    Some(false)
+                ) {
                     out.push(
                         Finding::builder(rule_id, format!("wrong-mc-version:{modid}"))
                             .severity(Severity::Warn)
@@ -296,7 +349,10 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         // Java runtime constraint (`depends java >=21`).
         if dep_id == "java" {
             if let Some(java) = &java_version {
-                if matches!(version_in_range(java, range), Some(false)) {
+                if matches!(
+                    version_in_range_with_dialect(java, range, dialect),
+                    Some(false)
+                ) {
                     out.push(
                         Finding::builder(rule_id, format!("wrong-java-version:{modid}"))
                             .severity(Severity::Warn)
@@ -322,7 +378,12 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         // *family* mismatch is the `loader-mismatch` rule's job, not a version one).
         if let Some(family) = platform_loader_family(dep_id) {
             if let (Some(env_fam), Some(loader_ver)) = (&env_loader, &env_loader_version) {
-                if env_fam == family && matches!(version_in_range(loader_ver, range), Some(false)) {
+                if env_fam == family
+                    && matches!(
+                        version_in_range_with_dialect(loader_ver, range, dialect),
+                        Some(false)
+                    )
+                {
                     out.push(
                         Finding::builder(rule_id, format!("wrong-loader-version:{modid}->{dep_id}"))
                             .severity(Severity::Warn)
@@ -346,9 +407,14 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             continue;
         }
 
-        let provider = provider_status(provided.get(dep_id), range);
+        let provider = provider_status(provided.get(dep_id), range, dialect);
         let versions = installed_versions(dep_id);
-        match range_status(versions, range) {
+        match range_status(
+            versions,
+            range,
+            ambiguous_versions.contains(dep_id),
+            dialect,
+        ) {
             // A copy in range satisfies the requirement; nothing to report.
             RangeStatus::InRange => {}
             // Installed copies all fall outside the range. For a mandatory dep this
@@ -359,27 +425,47 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 if !matches!(provider, ProviderStatus::Satisfied) =>
             {
                 let installed_desc = versions.join(", ");
-                let undecidable = matches!(range_status(versions, range), RangeStatus::Undecidable);
+                let undecidable = matches!(
+                    range_status(
+                        versions,
+                        range,
+                        ambiguous_versions.contains(dep_id),
+                        dialect,
+                    ),
+                    RangeStatus::Undecidable
+                );
                 if undecidable {
+                    let ambiguous = ambiguous_versions.contains(dep_id);
                     // Could not parse — never assert a hard mismatch.
-                    out.push(
+                    let mut builder =
                         Finding::builder(rule_id, format!("version-undecidable:{modid}->{dep_id}"))
                             .severity(Severity::Note)
                             .confidence(0.4)
                             .category(Category::Dependency)
                             .title(format!("Cannot verify {dep_id} version"))
-                            .explanation(format!(
-                                "{modid} requires {dep_id} {range}; installed version is \
-                                 {installed_desc}, but the range could not be parsed."
-                            ))
+                            .explanation(if ambiguous {
+                                format!(
+                                    "{modid} requires {dep_id} {range}; installed version \
+                                     `{installed_desc}` contains both a Minecraft-version prefix \
+                                     and a mod-version component, so generic SemVer comparison is \
+                                     not authoritative."
+                                )
+                            } else {
+                                format!(
+                                    "{modid} requires {dep_id} {range}; installed version is \
+                                     {installed_desc}, but the range or version could not be parsed."
+                                )
+                            })
                             .evidence(EvidenceEdge::subject(dep.id))
                             .affects(modid)
                             .affects(dep_id)
                             .tag("dependency")
                             .tag("version-mismatch")
-                            .tag("undecidable-range")
-                            .build(),
-                    );
+                            .tag("undecidable-range");
+                    if ambiguous {
+                        builder = builder.tag("ambiguous-version");
+                    }
+                    out.push(builder.build());
                 } else {
                     let dup = is_duplicated(dep_id);
                     let mut b = Finding::builder(rule_id, format!("wrong-version:{modid}->{dep_id}"))

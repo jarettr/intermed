@@ -18,10 +18,10 @@
 //!   tags a plan with the engines it requires (in-process Datalog / DuckDB / Souffle
 //!   / WASM) for the query router.
 //!
-//! Not yet built: collectors emitting Arrow builders directly, live DuckDB
-//! `arrow_scan` ingestion, and the `ascent`/`wasmtime` engines (additive backends
-//! behind their own features). The DuckDB and Souffle backends already run over the
-//! same IR, via `intermed-duckdb` and `intermed-rules`.
+//! DataFusion, Polars, Ascent, and Wasmtime integrations are available behind
+//! additive crate features. DuckDB and Souffle execute the same IR through
+//! `intermed-duckdb` and `intermed-rules`. Collectors still project their row-oriented
+//! facts into Arrow rather than emitting Arrow builders directly.
 //!
 //! [`RecordBatch`]: arrow::record_batch::RecordBatch
 //! [`RelExpr`]: ir::RelExpr

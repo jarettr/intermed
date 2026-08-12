@@ -56,7 +56,10 @@ pub use resolver::{
     ResolutionOutcome, ResolutionSkipReason, ResolverError, resolve_graph, resolve_store,
 };
 pub use rule::DependencyRule;
-pub use semver::{parse_lenient, parse_mod_version, parse_version_reqs, version_in_range};
+pub use semver::{
+    VersionDialect, parse_lenient, parse_mod_version, parse_version_reqs, version_in_range,
+    version_in_range_with_dialect,
+};
 
 /// Implementation status string for CLI help and deferred-layer listings.
 pub const STATUS: &str = "active: pairwise semver + PubGrub global resolver";

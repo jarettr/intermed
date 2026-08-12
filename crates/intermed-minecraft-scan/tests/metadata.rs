@@ -27,6 +27,7 @@ fn fabric_dep_space_and_range_emits_dependency_fact() {
         .find(|f| f.kind == kind::DEPENDENCY && f.subject == "alpha")
         .expect("dependency fact");
     assert_eq!(dep.attr("range"), Some(">=0.11.6 <0.12.0"));
+    assert_eq!(dep.attr("version_dialect"), Some("fabric-extended-semver"));
 }
 
 #[test]
@@ -862,6 +863,7 @@ versionRange="[19,)"
         .expect("required flywheel dep");
     assert_eq!(flywheel.attr_bool("mandatory"), Some(true));
     assert_eq!(flywheel.attr("relation"), Some("depends"));
+    assert_eq!(flywheel.attr("version_dialect"), Some("maven-range"));
 
     let jei = facts
         .iter()

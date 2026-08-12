@@ -6,6 +6,8 @@
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -27,7 +29,7 @@ const EXTRACTOR: &str = "sbom-generator";
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r5");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r7");
 const CORPUS_LOCK_SCHEMA: &str = "intermed-corpus-lock-v1";
 
 /// Implementation status for help text.
@@ -107,7 +109,8 @@ pub enum SignatureStrength {
     Unsigned,
     /// `.SF` present without a PKCS block (`.RSA` / `.DSA` / `.EC`).
     ManifestOnly,
-    /// `.SF` plus a certificate block — full JAR signature structure.
+    /// `.SF` plus a certificate block. This describes material presence only;
+    /// it does not imply that the signature has verified.
     Certified,
 }
 
@@ -119,10 +122,72 @@ impl SignatureStrength {
             SignatureStrength::Certified => "certified",
         }
     }
+}
 
-    /// Legacy boolean: any signing material was found.
-    pub fn is_signed(self) -> bool {
-        !matches!(self, SignatureStrength::Unsigned)
+/// Result of cryptographically verifying the JAR signature and entry digests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SignatureVerification {
+    Unsigned,
+    Incomplete,
+    Verified,
+    Invalid,
+    Unavailable,
+}
+
+impl SignatureVerification {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unsigned => "unsigned",
+            Self::Incomplete => "incomplete",
+            Self::Verified => "verified",
+            Self::Invalid => "invalid",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IdentityStatus {
+    Parsed,
+    ParseFailed,
+    NoRecognizableManifest,
+}
+
+impl IdentityStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Parsed => "parsed",
+            Self::ParseFailed => "parse-failed",
+            Self::NoRecognizableManifest => "no-recognizable-manifest",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrustScoreBreakdown {
+    pub base: u8,
+    pub mod_id: u8,
+    pub version: u8,
+    pub loader: u8,
+    pub platform: u8,
+    pub contact: u8,
+    pub corpus_lock: u8,
+    pub verified_signature: u8,
+}
+
+impl TrustScoreBreakdown {
+    fn total(&self) -> u8 {
+        self.base
+            .saturating_add(self.mod_id)
+            .saturating_add(self.version)
+            .saturating_add(self.loader)
+            .saturating_add(self.platform)
+            .saturating_add(self.contact)
+            .saturating_add(self.corpus_lock)
+            .saturating_add(self.verified_signature)
+            .min(100)
     }
 }
 
@@ -144,6 +209,9 @@ pub struct JarSbomRecord {
     pub sha256: String,
     pub signed: bool,
     pub signature_strength: SignatureStrength,
+    pub signature_verification: SignatureVerification,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature_detail: Option<String>,
     /// Modrinth / CurseForge hint when declared in manifest metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<DistributionPlatform>,
@@ -154,6 +222,10 @@ pub struct JarSbomRecord {
     /// what it *is*, not a safety verdict. See [`compute_trust_score`] for the
     /// exact weighting.
     pub trust_score: u8,
+    pub trust_breakdown: TrustScoreBreakdown,
+    pub identity_status: IdentityStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_detail: Option<String>,
     /// Graded provenance classification (replaces the old `unknown_source` bool).
     #[serde(default = "default_source_class")]
     pub source_class: SourceClass,
@@ -251,7 +323,8 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SbomScan) -> usize {
         ctx.store
             .fact(EXTRACTOR, kind::SIGNATURE_STATUS)
             .subject(r.archive.clone())
-            .attr("status", r.signature_strength.as_str())
+            .attr("status", r.signature_verification.as_str())
+            .attr("material", r.signature_strength.as_str())
             .attr("jar_signed", r.signed)
             .source(SourceRef::file(r.archive.clone()))
             .emit();
@@ -280,7 +353,7 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SbomScan) -> usize {
         // Only a *fully* unidentified jar warrants the provenance warning; a
         // partially-identified one (manifest present, id missing) is recorded on
         // the SBOM fact below but does not raise a finding.
-        if r.is_unidentified() {
+        if r.identity_status == IdentityStatus::NoRecognizableManifest {
             ctx.store
                 .fact(EXTRACTOR, kind::UNKNOWN_SOURCE)
                 .subject(r.archive.clone())
@@ -303,10 +376,29 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SbomScan) -> usize {
             .attr("sha256", r.sha256.clone())
             .attr("signed", r.signed)
             .attr("signature_strength", r.signature_strength.as_str())
+            .attr("signature_verification", r.signature_verification.as_str())
             .attr("source_class", r.source_class.as_str())
             .attr("trust_score", r.trust_score as i64)
+            .attr("identity_status", r.identity_status.as_str())
+            .attr("trust_base", r.trust_breakdown.base as i64)
+            .attr("trust_mod_id", r.trust_breakdown.mod_id as i64)
+            .attr("trust_version", r.trust_breakdown.version as i64)
+            .attr("trust_loader", r.trust_breakdown.loader as i64)
+            .attr("trust_platform", r.trust_breakdown.platform as i64)
+            .attr("trust_contact", r.trust_breakdown.contact as i64)
+            .attr("trust_corpus_lock", r.trust_breakdown.corpus_lock as i64)
+            .attr(
+                "trust_verified_signature",
+                r.trust_breakdown.verified_signature as i64,
+            )
             .attr("in_corpus_lock", r.in_corpus_lock)
             .source(SourceRef::file(r.archive.clone()));
+        if let Some(detail) = &r.identity_detail {
+            sbom = sbom.attr("identity_detail", detail.clone());
+        }
+        if let Some(detail) = &r.signature_detail {
+            sbom = sbom.attr("signature_detail", detail.clone());
+        }
         if let Some(platform) = &r.platform {
             sbom = sbom.attr(
                 "platform",
@@ -342,7 +434,7 @@ impl Rule for SbomProvenanceRule {
         "sbom-provenance"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = Vec::new();
         for f in ctx.store.by_kind(kind::UNKNOWN_SOURCE) {
             let archive = f.subject.as_str();
@@ -367,23 +459,51 @@ impl Rule for SbomProvenanceRule {
         }
 
         for f in ctx.store.by_kind(kind::SIGNATURE_STATUS) {
-            if f.attr("status") != Some("unsigned") {
+            let status = f.attr("status").unwrap_or("unavailable");
+            if status == "verified" {
                 continue;
             }
             let archive = f.subject.as_str();
+            let (severity, title, explanation) = match status {
+                "unsigned" => (
+                    Severity::Note,
+                    format!("Jar is not JAR-signed: {archive}"),
+                    "No META-INF/*.SF signature manifest was found. Most Fabric/Forge mods ship \
+                     unsigned; this is informational only."
+                        .to_string(),
+                ),
+                "incomplete" => (
+                    Severity::Warn,
+                    format!("Incomplete JAR signature material: {archive}"),
+                    "A signature manifest exists without a matching PKCS signature block; no \
+                     cryptographic trust is assigned."
+                        .to_string(),
+                ),
+                "invalid" => (
+                    Severity::Warn,
+                    format!("JAR signature verification failed: {archive}"),
+                    "The JDK verifier rejected the signature or a signed entry digest; the JAR is \
+                     not treated as signed."
+                        .to_string(),
+                ),
+                _ => (
+                    Severity::Note,
+                    format!("JAR signature could not be verified: {archive}"),
+                    "Signature material exists, but a cryptographic verifier was unavailable; no \
+                     trust points are assigned."
+                        .to_string(),
+                ),
+            };
             out.push(
                 Finding::builder(
                     self.id(),
-                    format!("artifact-signature-status:unsigned:{archive}"),
+                    format!("artifact-signature-status:{status}:{archive}"),
                 )
-                .severity(Severity::Note)
+                .severity(severity)
                 .category(Category::Security)
                 .confidence(0.95)
-                .title(format!("Jar is not JAR-signed: {archive}"))
-                .explanation(
-                    "No META-INF/*.SF signature manifest was found. \
-                         Most Fabric/Forge mods ship unsigned; this is informational only.",
-                )
+                .title(title)
+                .explanation(explanation)
                 .evidence(EvidenceEdge::subject(f.id))
                 .affects(archive)
                 .fix(FixCandidate::advice(
@@ -394,7 +514,7 @@ impl Rule for SbomProvenanceRule {
                 .build(),
             );
         }
-        out
+        Ok(out)
     }
 }
 
@@ -420,14 +540,36 @@ impl Rule for SbomSecurityCorrelationRule {
         "sbom-security-correlation"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         use std::collections::BTreeMap;
 
-        // archive -> trust_score, from the SBOM facts (subject is the archive).
-        let mut trust_by_archive: BTreeMap<&str, i64> = BTreeMap::new();
+        // archive -> score, identity status, score decomposition, SBOM evidence.
+        let mut trust_by_archive: BTreeMap<&str, (i64, &str, String, _)> = BTreeMap::new();
         for f in ctx.store.by_kind(kind::SBOM) {
             if let Some(score) = f.attr_int("trust_score") {
-                trust_by_archive.insert(f.subject.as_str(), score);
+                let components = [
+                    ("base", f.attr_int("trust_base")),
+                    ("mod id", f.attr_int("trust_mod_id")),
+                    ("version", f.attr_int("trust_version")),
+                    ("loader", f.attr_int("trust_loader")),
+                    ("platform", f.attr_int("trust_platform")),
+                    ("contact", f.attr_int("trust_contact")),
+                    ("corpus lock", f.attr_int("trust_corpus_lock")),
+                    ("verified signature", f.attr_int("trust_verified_signature")),
+                ]
+                .into_iter()
+                .filter_map(|(label, value)| value.map(|value| format!("{label} +{value}")))
+                .collect::<Vec<_>>()
+                .join(", ");
+                trust_by_archive.insert(
+                    f.subject.as_str(),
+                    (
+                        score,
+                        f.attr("identity_status").unwrap_or("unknown"),
+                        components,
+                        f.id,
+                    ),
+                );
             }
         }
 
@@ -451,27 +593,44 @@ impl Rule for SbomSecurityCorrelationRule {
         for (archive, (mut labels, evidence)) in risky {
             // Only correlate when provenance is weak: a well-identified jar with
             // a dangerous capability is already covered by the security rule.
-            let trust = trust_by_archive.get(archive.as_str()).copied().unwrap_or(0);
+            let (trust, identity_status, decomposition, sbom_evidence) = trust_by_archive
+                .get(archive.as_str())
+                .map(|(score, status, decomposition, evidence)| {
+                    (*score, *status, decomposition.as_str(), Some(*evidence))
+                })
+                .unwrap_or((0, "missing-sbom", "no SBOM identity fact", None));
             if trust >= ctx.settings.sbom.well_identified_trust {
                 continue;
             }
             labels.sort_unstable();
             labels.dedup();
 
-            out.push(
-                Finding::builder(self.id(), format!("low-trust-capability:{archive}"))
-                    .severity(Severity::Warn)
+            let parse_failed = identity_status == "parse-failed";
+            let mut builder = Finding::builder(
+                self.id(),
+                format!("low-trust-capability:{archive}"),
+            )
+                    .severity(if parse_failed { Severity::Note } else { Severity::Warn })
+                    .confidence(if parse_failed { 0.45 } else { 0.8 })
                     .category(Category::Security)
-                    .title(format!(
-                        "Low-provenance jar `{archive}` exercises high-risk capability"
-                    ))
+                    .title(if parse_failed {
+                        format!("Identity analysis incomplete for high-risk jar `{archive}`")
+                    } else {
+                        format!("Low-provenance jar `{archive}` exercises high-risk capability")
+                    })
                     .explanation(format!(
-                        "`{archive}` could not be confidently identified (trust score {trust}/100, \
-                         below {}) yet statically references high-risk \
-                         capability/capabilities: {}. Unknown provenance combined with a dangerous \
-                         capability is a stronger supply-chain concern than either signal alone.",
+                        "`{archive}` has identity status `{identity_status}` and trust score \
+                         {trust}/100 (components: {decomposition}), below {}. It statically \
+                         references: {}. {}",
                         ctx.settings.sbom.well_identified_trust,
-                        labels.join(", ")
+                        labels.join(", "),
+                        if parse_failed {
+                            "Because the low score comes from an identity parse failure, it is not \
+                             treated as independent evidence of suspicious provenance."
+                        } else {
+                            "Weak provenance combined with a dangerous capability is a stronger \
+                             supply-chain concern than either signal alone."
+                        }
                     ))
                     .evidence(EvidenceEdge::subject(evidence))
                     .affects(&archive)
@@ -481,11 +640,16 @@ impl Rule for SbomSecurityCorrelationRule {
                     ))
                     .tag("sbom")
                     .tag("security")
-                    .tag("supply-chain")
-                    .build(),
-            );
+                    .tag("supply-chain");
+            if let Some(sbom_evidence) = sbom_evidence {
+                builder = builder.evidence(EvidenceEdge::supports(sbom_evidence));
+            }
+            if parse_failed {
+                builder = builder.tag("identity-analysis-incomplete");
+            }
+            out.push(builder.build());
         }
-        out
+        Ok(out)
     }
 }
 
@@ -561,7 +725,12 @@ fn scan_mods_dir_inner(
     let mut failures = Vec::new();
     for (archive, cached) in scanned {
         match cached {
-            CachedSbomJar::Ok(record) => records.push(record),
+            CachedSbomJar::Ok(mut record) => {
+                // The payload is shared by content hash; the locator is specific
+                // to the current pack and must not leak from the first cache fill.
+                record.archive = archive;
+                records.push(record);
+            }
             CachedSbomJar::Err(reason) => failures.push(SbomScanFailure { archive, reason }),
         }
     }
@@ -605,15 +774,18 @@ fn scan_jar(
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| SbomScanError(format!("zip {}: {e}", jar.display())))?;
 
-    let identity = detect_identity(&mut zip);
+    let identity_detection = detect_identity(&mut zip);
+    let identity = identity_detection.identity;
     let signature_strength = jar_signature_strength(&mut zip);
-    let signed = signature_strength.is_signed();
+    let (signature_verification, signature_detail) = verify_jar_signature(jar, signature_strength);
+    let signed = signature_verification == SignatureVerification::Verified;
     let in_corpus_lock = identity
         .mod_id
         .as_ref()
         .is_some_and(|id| corpus_mod_ids.is_some_and(|set| set.contains(id)));
     let source_class = SourceClass::of(&identity);
-    let trust_score = compute_trust_score(&identity, signature_strength, in_corpus_lock);
+    let trust_breakdown = compute_trust_score(&identity, signature_verification, in_corpus_lock);
+    let trust_score = trust_breakdown.total();
 
     Ok(JarSbomRecord {
         archive,
@@ -623,9 +795,14 @@ fn scan_jar(
         sha256,
         signed,
         signature_strength,
+        signature_verification,
+        signature_detail,
         platform: identity.platform,
         in_corpus_lock,
         trust_score,
+        trust_breakdown,
+        identity_status: identity_detection.status,
+        identity_detail: identity_detection.detail,
         source_class,
     })
 }
@@ -637,6 +814,22 @@ struct JarIdentity {
     loader: Option<String>,
     platform: Option<DistributionPlatform>,
     has_contact: bool,
+}
+
+struct IdentityDetection {
+    identity: JarIdentity,
+    status: IdentityStatus,
+    detail: Option<String>,
+}
+
+impl IdentityDetection {
+    fn parsed(identity: JarIdentity) -> Self {
+        Self {
+            identity,
+            status: IdentityStatus::Parsed,
+            detail: None,
+        }
+    }
 }
 
 /// Extract the primary mod identity from Forge/NeoForge `mods.toml` (`[[mods]]`).
@@ -657,28 +850,35 @@ fn forge_identity_from_toml(v: &toml::Value, loader: &str) -> Option<JarIdentity
     })
 }
 
-fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> JarIdentity {
+fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> IdentityDetection {
+    let mut parse_failure = None;
     if let Some(text) = read_zip_text(archive, "fabric.mod.json") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            return json_loader_identity(&v, "fabric");
+        match intermed_doctor_core::fabric_json::parse_value(&text) {
+            Ok(v) => return IdentityDetection::parsed(json_loader_identity(&v, "fabric")),
+            Err(error) => parse_failure = Some(format!("fabric.mod.json: {error}")),
         }
     }
     if let Some(text) = read_zip_text(archive, "quilt.mod.json") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            return json_loader_identity(&v, "quilt");
+        match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(v) => return IdentityDetection::parsed(json_loader_identity(&v, "quilt")),
+            Err(error) => {
+                parse_failure.get_or_insert_with(|| format!("quilt.mod.json: {error}"));
+            }
         }
     }
     if let Some(text) = read_zip_text(archive, "META-INF/mods.toml") {
         if let Ok(v) = toml::from_str::<toml::Value>(&text) {
             if let Some(mut identity) = forge_identity_from_toml(&v, "forge") {
                 resolve_jar_version_placeholder(archive, &mut identity);
-                return identity;
+                return IdentityDetection::parsed(identity);
             }
+        } else if let Err(error) = toml::from_str::<toml::Value>(&text) {
+            parse_failure.get_or_insert_with(|| format!("META-INF/mods.toml: {error}"));
         }
     }
     if let Some(text) = read_zip_text(archive, "plugin.yml") {
         if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
-            return JarIdentity {
+            return IdentityDetection::parsed(JarIdentity {
                 mod_id: v.get("name").and_then(|x| x.as_str()).map(str::to_string),
                 version: v
                     .get("version")
@@ -687,12 +887,14 @@ fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> JarIdentity 
                 loader: Some("bukkit".into()),
                 platform: None,
                 has_contact: false,
-            };
+            });
+        } else if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+            parse_failure.get_or_insert_with(|| format!("plugin.yml: {error}"));
         }
     }
     if let Some(text) = read_zip_text(archive, "paper-plugin.yml") {
         if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
-            return JarIdentity {
+            return IdentityDetection::parsed(JarIdentity {
                 mod_id: v.get("name").and_then(|x| x.as_str()).map(str::to_string),
                 version: v
                     .get("version")
@@ -701,18 +903,30 @@ fn detect_identity(archive: &mut zip::ZipArchive<std::fs::File>) -> JarIdentity 
                 loader: Some("paper".into()),
                 platform: None,
                 has_contact: false,
-            };
+            });
+        } else if let Err(error) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+            parse_failure.get_or_insert_with(|| format!("paper-plugin.yml: {error}"));
         }
     }
     if let Some(text) = read_zip_text(archive, "META-INF/neoforge.mods.toml") {
         if let Ok(v) = toml::from_str::<toml::Value>(&text) {
             if let Some(mut identity) = forge_identity_from_toml(&v, "neoforge") {
                 resolve_jar_version_placeholder(archive, &mut identity);
-                return identity;
+                return IdentityDetection::parsed(identity);
             }
+        } else if let Err(error) = toml::from_str::<toml::Value>(&text) {
+            parse_failure.get_or_insert_with(|| format!("META-INF/neoforge.mods.toml: {error}"));
         }
     }
-    JarIdentity::default()
+    IdentityDetection {
+        identity: JarIdentity::default(),
+        status: if parse_failure.is_some() {
+            IdentityStatus::ParseFailed
+        } else {
+            IdentityStatus::NoRecognizableManifest
+        },
+        detail: parse_failure,
+    }
 }
 
 /// Resolve Forge's `${file.jarVersion}` placeholder on a parsed identity, using
@@ -749,6 +963,120 @@ fn jar_signature_strength(archive: &mut zip::ZipArchive<std::fs::File>) -> Signa
         (true, false) => SignatureStrength::ManifestOnly,
         (true, true) => SignatureStrength::Certified,
     }
+}
+
+/// Verify signature integrity with the JDK verifier. This is deliberately run
+/// only when a complete `.SF` + signature-block structure exists. `-strict` is
+/// used to distinguish unsigned entries and certificate-policy warnings;
+/// certificate-policy failures do not by themselves imply broken signature
+/// integrity.
+fn verify_jar_signature(
+    jar: &Path,
+    material: SignatureStrength,
+) -> (SignatureVerification, Option<String>) {
+    match material {
+        SignatureStrength::Unsigned => return (SignatureVerification::Unsigned, None),
+        SignatureStrength::ManifestOnly => {
+            return (
+                SignatureVerification::Incomplete,
+                Some("signature manifest exists without a PKCS signature block".to_string()),
+            );
+        }
+        SignatureStrength::Certified => {}
+    }
+
+    // Each `jarsigner` is a JVM. Keep verification serialized even when the JAR
+    // scan uses a large Rayon pool, otherwise a signed pack could multiply JVM
+    // heaps and trigger host OOM.
+    let _permit = SignatureVerifierPermit::acquire();
+
+    let output = Command::new("jarsigner")
+        // Bound each verifier JVM; scans already parallelize at the jar level.
+        .arg("-J-Xmx128m")
+        .arg("-J-Duser.language=en")
+        .arg("-J-Duser.country=US")
+        .arg("-verify")
+        .arg("-strict")
+        .arg("-verbose:summary")
+        .arg(jar)
+        .output();
+    match output {
+        Ok(output) => {
+            let code = output.status.code().unwrap_or(1);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let combined = format!("{stdout}\n{stderr}");
+            if code & 16 != 0 {
+                return (
+                    SignatureVerification::Incomplete,
+                    Some(
+                        "valid signature material, but one or more archive entries are unsigned"
+                            .to_string(),
+                    ),
+                );
+            }
+            if code != 1 && combined.contains("jar verified") {
+                let detail = (code != 0).then(|| {
+                    format!(
+                        "signature integrity verified; certificate-policy warnings (jarsigner strict code {code})"
+                    )
+                });
+                return (SignatureVerification::Verified, detail);
+            }
+            let detail = stderr
+                .lines()
+                .chain(stdout.lines())
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("jarsigner rejected the signature")
+                .trim()
+                .chars()
+                .take(512)
+                .collect();
+            (SignatureVerification::Invalid, Some(detail))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            SignatureVerification::Unavailable,
+            Some("jarsigner is not available in PATH".to_string()),
+        ),
+        Err(error) => (
+            SignatureVerification::Unavailable,
+            Some(format!("could not run jarsigner: {error}")),
+        ),
+    }
+}
+
+struct SignatureVerifierPermit;
+
+impl SignatureVerifierPermit {
+    fn acquire() -> Self {
+        let (busy, ready) = signature_verifier_state();
+        let mut busy = busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *busy {
+            busy = ready
+                .wait(busy)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        *busy = true;
+        Self
+    }
+}
+
+impl Drop for SignatureVerifierPermit {
+    fn drop(&mut self) {
+        release_signature_verifier();
+    }
+}
+
+fn signature_verifier_state() -> &'static (Mutex<bool>, Condvar) {
+    static STATE: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
+    STATE.get_or_init(|| (Mutex::new(false), Condvar::new()))
+}
+
+fn release_signature_verifier() {
+    let (busy, ready) = signature_verifier_state();
+    let mut busy = busy.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *busy = false;
+    ready.notify_one();
 }
 
 /// Parse Fabric/Quilt `*.mod.json` identity plus platform hints from `custom.*`
@@ -846,16 +1174,15 @@ fn load_corpus_mod_ids(instance_root: Option<&Path>) -> Option<BTreeSet<String>>
 /// | Platform listed (Modrinth/CF)  |      8 | explicit distribution metadata.               |
 /// | Contact / homepage present     |      5 | author-linked provenance.                   |
 /// | In sibling `corpus.lock`       |      7 | pinned by a popular-pack lab corpus.        |
-/// | Manifest-only sign (`.SF`)     |      5 | partial JAR signature material.             |
-/// | Certified sign (`.SF`+PKCS)    |     +5 | full certificate block present.             |
+/// | Cryptographically verified JAR |     10 | signature and signed entry digests verified.|
 ///
-/// So a fully-described, platform-listed, certified mod can reach `100`; a bare
+/// So a fully-described, platform-listed, verified mod can reach `100`; a bare
 /// jar with no manifest metadata floors at `20`.
 fn compute_trust_score(
     identity: &JarIdentity,
-    signature: SignatureStrength,
+    signature: SignatureVerification,
     in_corpus_lock: bool,
-) -> u8 {
+) -> TrustScoreBreakdown {
     const BASE: u8 = 20;
     const MOD_ID: u8 = 40;
     const VERSION: u8 = 20;
@@ -863,39 +1190,30 @@ fn compute_trust_score(
     const PLATFORM: u8 = 8;
     const CONTACT: u8 = 5;
     const CORPUS: u8 = 7;
-    const MANIFEST_SIGN: u8 = 5;
-    const CERT_SIGN: u8 = 5;
+    const VERIFIED_SIGNATURE: u8 = 10;
 
-    let mut score = BASE;
-    if identity.mod_id.is_some() {
-        score = score.saturating_add(MOD_ID);
+    TrustScoreBreakdown {
+        base: BASE,
+        mod_id: if identity.mod_id.is_some() { MOD_ID } else { 0 },
+        version: if identity.version.is_some() {
+            VERSION
+        } else {
+            0
+        },
+        loader: if identity.loader.is_some() { LOADER } else { 0 },
+        platform: if identity.platform.is_some() {
+            PLATFORM
+        } else {
+            0
+        },
+        contact: if identity.has_contact { CONTACT } else { 0 },
+        corpus_lock: if in_corpus_lock { CORPUS } else { 0 },
+        verified_signature: if signature == SignatureVerification::Verified {
+            VERIFIED_SIGNATURE
+        } else {
+            0
+        },
     }
-    if identity.version.is_some() {
-        score = score.saturating_add(VERSION);
-    }
-    if identity.loader.is_some() {
-        score = score.saturating_add(LOADER);
-    }
-    if identity.platform.is_some() {
-        score = score.saturating_add(PLATFORM);
-    }
-    if identity.has_contact {
-        score = score.saturating_add(CONTACT);
-    }
-    if in_corpus_lock {
-        score = score.saturating_add(CORPUS);
-    }
-    match signature {
-        SignatureStrength::Unsigned => {}
-        SignatureStrength::ManifestOnly => {
-            score = score.saturating_add(MANIFEST_SIGN);
-        }
-        SignatureStrength::Certified => {
-            score = score.saturating_add(MANIFEST_SIGN);
-            score = score.saturating_add(CERT_SIGN);
-        }
-    }
-    score.min(100)
 }
 
 fn sha256_file(path: &Path) -> Result<String, SbomScanError> {
@@ -952,11 +1270,16 @@ mod tests {
             has_contact: false,
         };
         assert_eq!(
-            compute_trust_score(&full, SignatureStrength::Certified, false),
+            compute_trust_score(&full, SignatureVerification::Verified, false).total(),
             100
         );
         assert_eq!(
-            compute_trust_score(&JarIdentity::default(), SignatureStrength::Unsigned, false),
+            compute_trust_score(
+                &JarIdentity::default(),
+                SignatureVerification::Unsigned,
+                false
+            )
+            .total(),
             20
         );
     }

@@ -532,7 +532,7 @@ impl intermed_doctor_core::Rule for LogSignalRule {
     fn id(&self) -> &'static str {
         "log-signal"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = Vec::new();
         for fact in ctx.store.by_kind(kind::LOG_SIGNAL) {
             let sig = fact.subject.as_str();
@@ -556,7 +556,7 @@ impl intermed_doctor_core::Rule for LogSignalRule {
         }
         out.extend(mod_mention_findings(ctx));
         out.extend(crash_blame_findings(ctx));
-        out
+        Ok(out)
     }
 }
 

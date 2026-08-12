@@ -93,19 +93,31 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     }
     out.push('\n');
 
+    if !report.operational_errors.is_empty() {
+        let _ = writeln!(out, "{}", p.paint("1;41", "OPERATIONAL FAILURE"));
+        for error in &report.operational_errors {
+            let _ = writeln!(
+                out,
+                "  [{}:{}] {}",
+                error.stage, error.component, error.message
+            );
+        }
+        out.push('\n');
+    }
+
     // Findings. "Normal state" findings (safe merges, pack.mcmeta overrides) are
     // collapsed to a one-line summary; the rest are grouped by family so a pack
     // with many similar findings prints one stanza per family, not per finding.
     let mut safe_merges = 0usize;
     let mut overlay_only = 0usize;
+    let mut verbose_only = 0usize;
     let mut visible_findings: Vec<&intermed_evidence::Finding> = Vec::new();
     for f in &report.findings {
         match f.visibility {
             FindingVisibility::ExplainOnly => safe_merges += 1,
             FindingVisibility::OverlayOnly => overlay_only += 1,
-            // `Verbose` is reserved for a future --verbose gate; until then it is
-            // shown like a default finding rather than silently dropped.
-            FindingVisibility::Default | FindingVisibility::Verbose => visible_findings.push(f),
+            FindingVisibility::Verbose => verbose_only += 1,
+            FindingVisibility::Default => visible_findings.push(f),
         }
     }
 
@@ -143,6 +155,14 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
             p.dim("Use --vfs-explain-safe to inspect them.")
         );
     }
+    if verbose_only > 0 {
+        let _ = writeln!(
+            out,
+            "{} {} detailed finding(s) are retained in JSON/explain output.",
+            p.dim("note:"),
+            p.bold(&verbose_only.to_string())
+        );
+    }
     if safe_merges > 0 || overlay_only > 0 {
         out.push('\n');
     }
@@ -170,7 +190,9 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
 
     // Summary
     let s = &report.summary;
-    let verdict = if s.is_healthy() && s.warn == 0 {
+    let verdict = if !report.operational_errors.is_empty() {
+        p.paint("1;41", "INCOMPLETE")
+    } else if s.is_healthy() && s.warn == 0 {
         p.paint("1;32", "HEALTHY")
     } else if s.is_healthy() {
         p.paint("1;33", "WARNINGS")

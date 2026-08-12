@@ -25,7 +25,7 @@ fn grouped_finding_emits_one_entry_per_mod_with_warn_for_process_spawn() {
 
     let target = dummy_target();
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = rule().evaluate(&ctx);
+    let findings = rule().evaluate(&ctx).unwrap();
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].id, "security-api-risk:risky");
@@ -48,7 +48,7 @@ fn single_note_signal_does_not_emit_finding() {
 
     let target = dummy_target();
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = rule().evaluate(&ctx);
+    let findings = rule().evaluate(&ctx).unwrap();
 
     assert!(findings.is_empty());
 }
@@ -69,7 +69,7 @@ fn two_note_signals_emit_grouped_note_finding() {
 
     let target = dummy_target();
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = rule().evaluate(&ctx);
+    let findings = rule().evaluate(&ctx).unwrap();
 
     assert_eq!(findings.len(), 1);
     assert_eq!(findings[0].id, "security-api-risk:netty");
@@ -100,7 +100,7 @@ fn corroborated_process_spawn_surfaces_as_warn_and_is_marked_inferred() {
 
     let target = dummy_target();
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = rule().evaluate(&ctx);
+    let findings = rule().evaluate(&ctx).unwrap();
 
     assert_eq!(findings.len(), 1);
     let finding = &findings[0];

@@ -850,6 +850,25 @@ pub fn emit_scan_with_settings(
         emitted += 1;
     }
 
+    for failure in &scan.failures {
+        let mut source = intermed_doctor_core::facts::SourceRef::file(failure.archive.clone());
+        if let Some(path) = &failure.path {
+            source = intermed_doctor_core::facts::SourceRef::inside(
+                failure.archive.clone(),
+                path.clone(),
+            );
+        }
+        ctx.store
+            .fact(extractor, kind::SCAN_TRUNCATED)
+            .subject(failure.archive.clone())
+            .attr("layer", "mixin")
+            .attr("reason", failure.reason.clone())
+            .source(source)
+            .confidence(1.0)
+            .emit();
+        emitted += 1;
+    }
+
     for af in &scan.apply_failures {
         ctx.store
             .fact(extractor, af.kind.as_str())

@@ -126,9 +126,29 @@ struct ClassMembers {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetClassIndex {
     classes: BTreeMap<String, ClassMembers>,
-    /// Whether any indexed class lives in a Minecraft package (so MC-class
-    /// absence is meaningful — we have MC coverage, e.g. via `--minecraft-jar`).
-    has_minecraft_coverage: bool,
+    /// Class names indexed from ordinary mod jars. Provenance matters: a coremod
+    /// may legitimately ship a handful of `net/minecraft/*` replacement classes,
+    /// but that does not make absence from the rest of Minecraft conclusive.
+    mod_classes: BTreeSet<String>,
+    /// Class names indexed from an explicitly supplied Minecraft jar.
+    minecraft_classes: BTreeSet<String>,
+    /// True only after an explicit Minecraft artifact was indexed completely.
+    /// Never infer coverage from a class package name.
+    minecraft_coverage_complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClassIndexSource {
+    Mod,
+    Minecraft,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MinecraftClassNamespace {
+    Named,
+    Intermediary,
+    /// Official/obfuscated, bundled, or otherwise not comparable to mixin names.
+    Unsupported,
 }
 
 impl TargetClassIndex {
@@ -139,6 +159,15 @@ impl TargetClassIndex {
     /// Parse a `.class` file (with bytecode) and record its members + per-method
     /// call-site histogram (for ordinal-out-of-range checks).
     pub fn ingest_class(&mut self, bytes: &[u8]) {
+        self.ingest_class_from(bytes, ClassIndexSource::Mod);
+    }
+
+    /// Index a class whose provenance is an explicit Minecraft artifact.
+    pub(crate) fn ingest_minecraft_class(&mut self, bytes: &[u8]) {
+        self.ingest_class_from(bytes, ClassIndexSource::Minecraft);
+    }
+
+    fn ingest_class_from(&mut self, bytes: &[u8], source: ClassIndexSource) {
         if bytes.len() < 4 || bytes[..4] != [0xCA, 0xFE, 0xBA, 0xBE] {
             return;
         }
@@ -171,10 +200,60 @@ impl TargetClassIndex {
                 .fields
                 .insert((f.name.to_string(), f.descriptor.to_string()));
         }
-        if is_minecraft_class(&name) {
-            self.has_minecraft_coverage = true;
+        match source {
+            ClassIndexSource::Mod => {
+                self.mod_classes.insert(name.clone());
+            }
+            ClassIndexSource::Minecraft => {
+                self.minecraft_classes.insert(name.clone());
+            }
         }
         self.classes.insert(name, members);
+    }
+
+    /// Mark the explicit Minecraft scope complete after its archive was fully
+    /// traversed without a class-index truncation.
+    pub(crate) fn mark_minecraft_coverage_complete(&mut self) {
+        self.minecraft_coverage_complete = !self.minecraft_classes.is_empty();
+    }
+
+    /// Class-name namespace represented by the explicitly supplied artifact.
+    /// Absence is conclusive only for a namespace the analyzer can actually
+    /// compare with mixin targets. Official obfuscated client jars (`a`, `bqf`, …)
+    /// and bundler jars deliberately stay unsupported instead of causing an
+    /// all-pack missing-target storm.
+    pub(crate) fn minecraft_class_namespace(&self) -> MinecraftClassNamespace {
+        let intermediary = self
+            .minecraft_classes
+            .iter()
+            .filter(|name| name.starts_with("net/minecraft/class_"))
+            .count();
+        let named = self
+            .minecraft_classes
+            .iter()
+            .filter(|name| {
+                name.starts_with("net/minecraft/") && !name.starts_with("net/minecraft/class_")
+            })
+            .count();
+        let total = self.minecraft_classes.len();
+        // Require both a meaningful population and namespace dominance. Official
+        // Mojang jars retain a small set of readable bootstrap/API classes under
+        // `net/minecraft` while the overwhelming majority are short obfuscated
+        // names; counting the readable exceptions alone misclassified that jar as
+        // a complete named namespace.
+        const MIN_NAMESPACE_CLASSES: usize = 32;
+        const MIN_NAMESPACE_PERCENT: usize = 70;
+        let intermediary_dominates =
+            intermediary.saturating_mul(100) >= total.saturating_mul(MIN_NAMESPACE_PERCENT);
+        let named_dominates =
+            named.saturating_mul(100) >= total.saturating_mul(MIN_NAMESPACE_PERCENT);
+        if intermediary >= MIN_NAMESPACE_CLASSES && intermediary > named && intermediary_dominates {
+            MinecraftClassNamespace::Intermediary
+        } else if named >= MIN_NAMESPACE_CLASSES && named > intermediary && named_dominates {
+            MinecraftClassNamespace::Named
+        } else {
+            MinecraftClassNamespace::Unsupported
+        }
     }
 
     /// Count of call sites in `method` matching the simple name `member_simple`.
@@ -189,7 +268,25 @@ impl TargetClassIndex {
         for (k, v) in &other.classes {
             self.classes.entry(k.clone()).or_insert_with(|| v.clone());
         }
-        self.has_minecraft_coverage |= other.has_minecraft_coverage;
+        self.mod_classes.extend(other.mod_classes.iter().cloned());
+        self.minecraft_classes
+            .extend(other.minecraft_classes.iter().cloned());
+        self.minecraft_coverage_complete |= other.minecraft_coverage_complete;
+    }
+
+    /// Merge a validated explicit Minecraft index. For overlapping
+    /// `net/minecraft/*` names, the explicit game artifact is the authoritative
+    /// baseline; a same-named class bundled by a mod must not shadow its members
+    /// and manufacture a missing-method verdict.
+    pub(crate) fn merge_explicit_minecraft(&mut self, other: &Self) {
+        for name in &other.minecraft_classes {
+            if let Some(members) = other.classes.get(name) {
+                self.classes.insert(name.clone(), members.clone());
+            }
+        }
+        self.minecraft_classes
+            .extend(other.minecraft_classes.iter().cloned());
+        self.minecraft_coverage_complete |= other.minecraft_coverage_complete;
     }
 
     fn contains_class(&self, slash: &str) -> bool {
@@ -199,18 +296,13 @@ impl TargetClassIndex {
     /// `true` when a Minecraft index is present (e.g. via `--minecraft-jar`), so
     /// the absence of a Minecraft class is meaningful (plan Phase 4).
     pub fn has_minecraft_coverage(&self) -> bool {
-        self.has_minecraft_coverage
+        self.minecraft_coverage_complete
     }
 
     /// `(minecraft_classes, non_minecraft_classes)` indexed — drives the runtime
     /// classpath coverage model (plan Phase 4).
     pub fn class_scope_counts(&self) -> (usize, usize) {
-        let mc = self
-            .classes
-            .keys()
-            .filter(|k| is_minecraft_class(k))
-            .count();
-        (mc, self.classes.len() - mc)
+        (self.minecraft_classes.len(), self.mod_classes.len())
     }
 
     /// Resolve whether method `name` exists on `slash` **or any superclass**.
@@ -262,7 +354,7 @@ impl TargetClassIndex {
         let Some(members) = self.classes.get(&slash) else {
             // Class not indexed: only conclusive for a Minecraft class under MC
             // coverage; otherwise the absence is just a coverage gap.
-            return if is_minecraft_class(&slash) && self.has_minecraft_coverage {
+            return if is_minecraft_class(&slash) && self.has_minecraft_coverage() {
                 TargetResolution::MissingClass
             } else {
                 TargetResolution::Unchecked
@@ -666,7 +758,7 @@ fn detect_for_class(
                     confirmed: require,
                 });
             }
-        } else if is_minecraft_class(&slash) && index.has_minecraft_coverage {
+        } else if is_minecraft_class(&slash) && index.has_minecraft_coverage() {
             // We have a Minecraft index (`--minecraft-jar`) yet the class is
             // absent — a real missing target.
             out.push(ApplyFailure {
@@ -1008,6 +1100,115 @@ mod tests {
             failures
                 .iter()
                 .all(|f| f.kind != ApplyFailureKind::TargetMethodMissing)
+        );
+    }
+
+    #[test]
+    fn minecraft_named_class_from_mod_does_not_prove_minecraft_coverage() {
+        let mut index = TargetClassIndex::new();
+        index.ingest_class(&fixtures::class_with_method(
+            "net/minecraft/InjectedPatch",
+            "patch",
+            "()V",
+        ));
+        assert!(!index.has_minecraft_coverage());
+        assert_eq!(index.class_scope_counts(), (0, 1));
+
+        let rec = record_targeting("legacy-coremod", "net.minecraft.client.Minecraft", "run()V");
+        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        assert!(
+            failures
+                .iter()
+                .all(|f| f.kind != ApplyFailureKind::TargetClassMissing),
+            "a partial net/minecraft namespace shipped by a mod is not Minecraft coverage"
+        );
+    }
+
+    #[test]
+    fn official_obfuscated_minecraft_names_are_not_complete_coverage() {
+        let mut index = TargetClassIndex::new();
+        for n in 0..100 {
+            index.minecraft_classes.insert(format!("{n:x}"));
+        }
+        // Readable bootstrap classes are exceptions, not proof that the whole jar
+        // is in a comparable namespace.
+        for n in 0..40 {
+            index
+                .minecraft_classes
+                .insert(format!("net/minecraft/client/bootstrap/Named{n}"));
+        }
+        assert_eq!(
+            index.minecraft_class_namespace(),
+            MinecraftClassNamespace::Unsupported
+        );
+    }
+
+    #[test]
+    fn substantial_named_and_intermediary_indexes_are_recognized() {
+        let mut named = TargetClassIndex::new();
+        for n in 0..40 {
+            named
+                .minecraft_classes
+                .insert(format!("net/minecraft/world/Named{n}"));
+        }
+        assert_eq!(
+            named.minecraft_class_namespace(),
+            MinecraftClassNamespace::Named
+        );
+
+        let mut intermediary = TargetClassIndex::new();
+        for n in 0..40 {
+            intermediary
+                .minecraft_classes
+                .insert(format!("net/minecraft/class_{n}"));
+        }
+        assert_eq!(
+            intermediary.minecraft_class_namespace(),
+            MinecraftClassNamespace::Intermediary
+        );
+    }
+
+    #[test]
+    fn complete_explicit_minecraft_scope_makes_class_absence_conclusive() {
+        let mut index = TargetClassIndex::new();
+        index.ingest_minecraft_class(&fixtures::class_with_method(
+            "net/minecraft/Present",
+            "present",
+            "()V",
+        ));
+        index.mark_minecraft_coverage_complete();
+        assert!(index.has_minecraft_coverage());
+        assert_eq!(index.class_scope_counts(), (1, 0));
+
+        let rec = record_targeting("alpha", "net.minecraft.client.Minecraft", "run()V");
+        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.kind == ApplyFailureKind::TargetClassMissing)
+        );
+    }
+
+    #[test]
+    fn explicit_minecraft_members_override_same_named_mod_class() {
+        let mut combined = TargetClassIndex::new();
+        combined.ingest_class(&fixtures::class_with_method(
+            "net/minecraft/Shared",
+            "modOnly",
+            "()V",
+        ));
+        let mut minecraft = TargetClassIndex::new();
+        minecraft.ingest_minecraft_class(&fixtures::class_with_method(
+            "net/minecraft/Shared",
+            "gameMethod",
+            "()V",
+        ));
+        minecraft.mark_minecraft_coverage_complete();
+        combined.merge_explicit_minecraft(&minecraft);
+
+        assert_eq!(
+            combined.resolve_method("net.minecraft.Shared", "gameMethod", Some("()V"), None),
+            crate::target_res::TargetResolution::ExactMatch
         );
     }
 

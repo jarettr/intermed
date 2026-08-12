@@ -90,6 +90,12 @@ pub struct DoctorArgs {
     #[arg(long = "mods-dir")]
     pub mods_dir: Option<PathBuf>,
 
+    /// Authoritative original pack manifest or archive. Use this when analyzing
+    /// a materialized instance whose `modrinth.index.json`/`manifest.json` was
+    /// not retained by the launcher or extraction pipeline.
+    #[arg(long = "pack-manifest", value_name = "FILE")]
+    pub pack_manifest: Option<PathBuf>,
+
     /// Enable Layer-F Mixin risk scanning during doctor.
     #[arg(long = "mixin-risk")]
     pub mixin_risk: bool,
@@ -190,6 +196,22 @@ pub struct DoctorOutputArgs {
     /// Write wall-clock phase profile JSON (`intermed-doctor-profile-v1`).
     #[arg(long = "profile", value_name = "FILE")]
     pub profile: Option<PathBuf>,
+
+    /// Explicitly export a privacy-filtered telemetry event to FILE.
+    /// Nothing is collected or written unless this option or
+    /// `--telemetry-endpoint` is supplied.
+    #[arg(long = "telemetry-out", value_name = "FILE")]
+    pub telemetry_out: Option<PathBuf>,
+
+    /// Explicitly send a privacy-filtered telemetry event to an HTTPS endpoint.
+    /// No built-in service is contacted; the destination must be supplied here.
+    #[arg(long = "telemetry-endpoint", value_name = "HTTPS_URL")]
+    pub telemetry_endpoint: Option<String>,
+
+    /// Include up to 20 redacted, truncated log-signal excerpts in explicitly
+    /// requested telemetry. Requires `--telemetry-out` or `--telemetry-endpoint`.
+    #[arg(long = "telemetry-include-log-excerpts")]
+    pub telemetry_include_log_excerpts: bool,
 
     /// Exit 0 whenever the run completes, regardless of findings.
     ///

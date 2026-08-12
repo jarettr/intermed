@@ -225,6 +225,11 @@ pub struct Environment {
     /// Mod loader family (`fabric`, `forge`, `paper`, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loader: Option<Loader>,
+    /// Authority that established `loader` (`explicit-pack-manifest`,
+    /// `pack-manifest`, `launcher-manifest`, `filesystem-heuristic`, or
+    /// `artifact-consensus`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loader_source: Option<String>,
     /// Precise loader component id from pack metadata (`fabric-loader`, `forge-47.2.0`, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launcher: Option<String>,

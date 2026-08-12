@@ -7,6 +7,7 @@
 
 use intermed_evidence::Finding;
 use intermed_facts::FactStore;
+use thiserror::Error;
 
 use crate::settings::DiagnosisSettings;
 use crate::target::Target;
@@ -40,6 +41,38 @@ pub trait Rule: Send + Sync {
     /// Stable id, e.g. `missing-dependency`.
     fn id(&self) -> &'static str;
 
-    /// Evaluate against the fact store and return any findings.
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding>;
+    /// Evaluate against the fact store and return domain findings.
+    ///
+    /// Infrastructure/backend failures belong in the error channel. Turning
+    /// them into a `Fatal` finding would let `--exit-zero` mask an incomplete
+    /// analysis as success.
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleError>;
+}
+
+/// An operational failure that prevented a rule from completing.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct RuleError {
+    pub message: String,
+}
+
+impl RuleError {
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for RuleError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for RuleError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
 }

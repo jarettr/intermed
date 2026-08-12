@@ -40,8 +40,8 @@ impl Rule for DeclarativeRulePack {
         "datalog-rule-pack"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        dedupe_by_subject(evaluate_pack(&self.pack, ctx))
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        Ok(dedupe_by_subject(evaluate_pack(&self.pack, ctx)))
     }
 }
 

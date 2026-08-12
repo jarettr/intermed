@@ -8,6 +8,8 @@
 //!    schema entry names a non-existent kind;
 //! 3. the runtime typed-attribute table (`schema::constrained_attrs`) only names
 //!    real kinds, and agrees with the static contract for `complete` kinds.
+//! 4. every predicate is either referenced by production code or explicitly
+//!    marked `reserved`; stale reservations fail as soon as code starts using them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -180,6 +182,58 @@ fn source_before_tests(src: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+fn production_kind_references() -> BTreeSet<String> {
+    let root = workspace_root();
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root.join("crates")).expect("read workspace crates") {
+        let entry = entry.expect("read crate entry");
+        if entry.file_name() == "intermed-facts" {
+            continue;
+        }
+        let src = entry.path().join("src");
+        if src.is_dir() {
+            rust_sources(&src, &mut files);
+        }
+    }
+
+    let consts = declared_kind_const_map();
+    let mut referenced = BTreeSet::new();
+    for path in files {
+        let src = source_before_tests(&fs::read_to_string(&path).expect("read Rust source"));
+        for (name, value) in &consts {
+            if src.contains(&format!("kind::{name}")) {
+                referenced.insert(value.clone());
+            }
+        }
+    }
+    referenced
+}
+
+#[test]
+fn every_kind_is_active_or_explicitly_reserved() {
+    let contract = schema_contract::contract();
+    let referenced = production_kind_references();
+    let mut inactive = Vec::new();
+    let mut stale_reservations = Vec::new();
+
+    for (name, schema) in &contract.kinds {
+        match (referenced.contains(name), schema.reserved) {
+            (false, false) => inactive.push(name.clone()),
+            (true, true) => stale_reservations.push(name.clone()),
+            _ => {}
+        }
+    }
+
+    assert!(
+        inactive.is_empty(),
+        "fact kinds have no production emitter/reader and are not reserved: {inactive:?}"
+    );
+    assert!(
+        stale_reservations.is_empty(),
+        "reserved fact kinds are now used by production code; remove `reserved = true`: {stale_reservations:?}"
+    );
 }
 
 fn quoted_literals_after(line: &str, marker: &str) -> Vec<String> {

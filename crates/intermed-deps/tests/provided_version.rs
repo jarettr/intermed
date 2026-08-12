@@ -51,7 +51,7 @@ fn provider_with_out_of_range_version_is_flagged() {
         .attr("bundled", true)
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     let f = findings
         .iter()
         .find(|f| f.id == "provided-version-mismatch:moda->libfoo")
@@ -89,7 +89,7 @@ fn provider_with_in_range_version_satisfies() {
         .attr("version", "2.3.0")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings.iter().any(|f| f.id.contains("libfoo")),
         "in-range provider should satisfy the dependency: {:?}",
@@ -127,7 +127,7 @@ fn metadata_alias_inherits_provider_mod_version() {
         .attr("scope", "metadata-alias")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         !findings.iter().any(|f| f.id.contains("fabric")),
         "metadata alias should inherit provider mod version: {:?}",
@@ -158,7 +158,7 @@ fn provider_with_unknown_version_is_a_soft_warning() {
         .attr("provides", "libfoo")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     let f = findings
         .iter()
         .find(|f| f.id == "provided-version-unknown:moda->libfoo")
@@ -193,7 +193,7 @@ fn absent_provider_still_missing() {
         .attr("relation", "depends")
         .emit();
 
-    let findings = DependencyRule.evaluate(&ctx_from(&store));
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
     assert!(
         findings
             .iter()

@@ -16,6 +16,10 @@ pub struct DiagnosisSettings {
     pub facts: FactStoreSettings,
     pub mixin: MixinSettings,
     pub resource: ResourceSettings,
+    /// Authoritative original pack manifest (`modrinth.index.json`, CurseForge
+    /// `manifest.json`, or the containing `.mrpack`/`.zip`). Useful when a
+    /// launcher/materializer produced only the instance files.
+    pub pack_manifest: Option<PathBuf>,
     /// Optional Minecraft client/server jar, used to broaden the mixin
     /// apply-failure target index to vanilla classes (`--minecraft-jar`).
     pub minecraft_jar: Option<PathBuf>,

@@ -20,11 +20,11 @@ impl Rule for DuplicateIdRule {
     fn id(&self) -> &'static str {
         "duplicate-id"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        evaluate_pack(&default_core_pack_v2(), ctx)
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
             .into_iter()
             .filter(|f| f.rule_id == "duplicate-id")
-            .collect()
+            .collect())
     }
 }
 
@@ -35,11 +35,11 @@ impl Rule for LoaderMismatchRule {
     fn id(&self) -> &'static str {
         "loader-mismatch"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        evaluate_pack(&default_core_pack_v2(), ctx)
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
             .into_iter()
             .filter(|f| f.rule_id == "loader-mismatch")
-            .collect()
+            .collect())
     }
 }
 
@@ -51,14 +51,14 @@ impl Rule for MixedLoaderPackRule {
         "mixed-loader-pack"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let env_loader = ctx
             .store
             .by_kind(kind::ENVIRONMENT)
             .find_map(|f| f.attr("loader"))
             .filter(|l| is_mod_loader(l));
         if env_loader.is_some() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let mut loaders = BTreeSet::new();
@@ -70,11 +70,11 @@ impl Rule for MixedLoaderPackRule {
             }
         }
         if loaders.len() < 2 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let list: Vec<&str> = loaders.iter().map(String::as_str).collect();
-        vec![
+        Ok(vec![
             Finding::builder(self.id(), "mixed-loader-pack:mods-dir")
                 .severity(Severity::Warn)
                 .category(Category::Loader)
@@ -92,7 +92,7 @@ impl Rule for MixedLoaderPackRule {
                 .tag("loader")
                 .tag("mixed-pack")
                 .build(),
-        ]
+        ])
     }
 }
 
@@ -107,11 +107,11 @@ impl Rule for SideMismatchRule {
     fn id(&self) -> &'static str {
         "side-mismatch"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        evaluate_pack(&default_core_pack_v2(), ctx)
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
             .into_iter()
             .filter(|f| f.id.starts_with("side-mismatch:"))
-            .collect()
+            .collect())
     }
 }
 

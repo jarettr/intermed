@@ -446,9 +446,12 @@ impl Rule for SecurityApiRule {
         "security-api-risk"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let drafts = aggregate_security_drafts(ctx);
-        security_findings_from_drafts(drafts, ctx.settings.security.min_note_signals)
+        Ok(security_findings_from_drafts(
+            drafts,
+            ctx.settings.security.min_note_signals,
+        ))
     }
 }
 

@@ -6,8 +6,7 @@ use creeper_semver_pubgrub::SmallVersion;
 use intermed_doctor_core::facts::{FactId, FactStore, kind};
 use serde::{Deserialize, Serialize};
 
-use crate::ranges::ModRange;
-use crate::semver;
+use crate::semver::{self, VersionDialect};
 
 /// Pseudo-dependencies that name the platform, not an installable mod.
 pub const PLATFORM_IDS: &[&str] = &[
@@ -56,6 +55,8 @@ pub struct ModDependencyEdge {
     pub mandatory: bool,
     /// Manifest relation: `depends`, `breaks`, `suggests`, `recommends`, `loadbefore`.
     pub relation: String,
+    #[serde(default)]
+    pub version_dialect: VersionDialect,
     pub fact_id: FactId,
 }
 
@@ -80,6 +81,7 @@ pub struct SkippedPackage {
 #[serde(rename_all = "kebab-case")]
 pub enum SkipReason {
     UnparseableVersion,
+    AmbiguousVersion,
 }
 
 /// Snapshot of the modpack dependency graph used by the resolver and CLI export.
@@ -106,33 +108,41 @@ impl ModpackGraph {
             .and_then(|p| p.parsed_version.as_ref())
             .and_then(|v| semver::parse_mod_version(v))
     }
-
-    /// Outgoing semver-resolvable edges for `from`, keyed by target id.
-    pub fn resolved_edges_from(&self, from: &str) -> HashMap<String, ModRange> {
-        let mut out = HashMap::new();
-        for edge in &self.edges {
-            if edge.from != from || !edge.mandatory || edge.relation != "depends" {
-                continue;
-            }
-            if is_platform_dep(&edge.to) {
-                continue;
-            }
-            if let Some(range) = crate::ranges::parse_mod_range(&edge.range) {
-                out.insert(edge.to.clone(), range);
-            }
-        }
-        out
-    }
 }
 
 /// Materialize a [`ModpackGraph`] from a collected [`FactStore`].
 pub fn build_graph(store: &FactStore) -> ModpackGraph {
     let mut packages = Vec::new();
     let mut skipped = Vec::new();
+    let ambiguous_versions: std::collections::HashSet<String> = store
+        .by_kind(kind::MOD_METADATA)
+        .filter(|fact| fact.attr_bool("version_ambiguous").unwrap_or(false))
+        .map(|fact| fact.subject.clone())
+        .collect();
+    let loader_by_mod: HashMap<String, String> = store
+        .by_kind(kind::MOD)
+        .chain(store.by_kind(kind::PLUGIN))
+        .filter_map(|fact| {
+            fact.attr("loader")
+                .map(|loader| (fact.subject.clone(), loader.to_string()))
+        })
+        .collect();
 
     for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
         let version = f.attr("version").unwrap_or("0").to_string();
-        let parsed = semver::parse_mod_version(&version).map(|v| v.to_string());
+        // `version_ambiguous` describes the generic display normalizer, not the
+        // loader's comparison language. Fabric/Quilt order valid raw extended
+        // versions directly, so strings such as `1.20-Fabric-4.0.6` must remain
+        // in the finite PubGrub catalog.
+        let dialect = f
+            .attr("loader")
+            .map(VersionDialect::from_loader)
+            .unwrap_or_default();
+        let ambiguous =
+            ambiguous_versions.contains(&f.subject) && !dialect.orders_raw_extended_versions();
+        let parsed = (!ambiguous)
+            .then(|| semver::parse_mod_version(&version).map(|v| v.to_string()))
+            .flatten();
         if parsed.is_some() {
             packages.push(ModPackage {
                 id: f.subject.clone(),
@@ -143,7 +153,11 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
             skipped.push(SkippedPackage {
                 id: f.subject.clone(),
                 version,
-                reason: SkipReason::UnparseableVersion,
+                reason: if ambiguous {
+                    SkipReason::AmbiguousVersion
+                } else {
+                    SkipReason::UnparseableVersion
+                },
             });
         }
     }
@@ -178,6 +192,15 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
             range: dep.attr("range").unwrap_or("*").to_string(),
             mandatory: dep.attr_bool("mandatory").unwrap_or(true),
             relation: dep.attr("relation").unwrap_or("depends").to_string(),
+            version_dialect: dep
+                .attr("version_dialect")
+                .and_then(VersionDialect::parse)
+                .or_else(|| {
+                    loader_by_mod
+                        .get(&dep.subject)
+                        .map(|loader| VersionDialect::from_loader(loader))
+                })
+                .unwrap_or_default(),
             fact_id: dep.id,
         });
     }
@@ -185,6 +208,16 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
     let mut provides = Vec::new();
     for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
         if let Some(alias) = f.attr("provides") {
+            let provider_dialect = loader_by_mod
+                .get(&f.subject)
+                .map(|loader| VersionDialect::from_loader(loader))
+                .unwrap_or_default();
+            if f.attr("version").is_none()
+                && ambiguous_versions.contains(&f.subject)
+                && !provider_dialect.orders_raw_extended_versions()
+            {
+                continue;
+            }
             // A bundled (Jar-in-Jar) module carries its own version on the fact;
             // a plain `provides` alias inherits the provider mod's version.
             let provider_version = f

@@ -118,6 +118,19 @@ fn summary_section(report: &DoctorReport) -> String {
     }
     out.push_str("</table>");
 
+    if !report.operational_errors.is_empty() {
+        out.push_str("<h3>Operational failures</h3><div class=\"finding sev-fatal\"><ul>");
+        for error in &report.operational_errors {
+            out.push_str(&format!(
+                "<li><strong>{}:{}</strong> — {}</li>",
+                escape(&error.stage),
+                escape(&error.component),
+                escape(&error.message),
+            ));
+        }
+        out.push_str("</ul></div>");
+    }
+
     out.push_str("<h3>Collectors</h3><table><thead><tr><th>Collector</th><th>Layer</th><th>Status</th><th>Facts</th></tr></thead><tbody>");
     for c in &report.collectors {
         out.push_str(&format!(
@@ -146,8 +159,12 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
     if report.findings.is_empty() {
         return "<p class=\"empty\">No findings — the pack looks healthy.</p>".into();
     }
-    let mut categories: Vec<String> = report
+    let displayed: Vec<_> = report
         .findings
+        .iter()
+        .filter(|f| f.visibility.shown_by_default())
+        .collect();
+    let mut categories: Vec<String> = displayed
         .iter()
         .map(|f| format!("{:?}", f.category))
         .collect();
@@ -155,6 +172,12 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
     categories.dedup();
 
     let mut out = group_overview_html(report);
+    let hidden = report.findings.len().saturating_sub(displayed.len());
+    if hidden > 0 {
+        out.push_str(&format!(
+            "<p class=\"muted\">{hidden} detailed/explain-only finding(s) are retained in the JSON report.</p>"
+        ));
+    }
 
     out.push_str("<div class=\"filters\"><strong>Severity:</strong> ");
     for sev in ["fatal", "error", "warn", "note", "info"] {
@@ -172,7 +195,7 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
     out.push_str("</div>");
 
     out.push_str("<table id=\"findings\"><thead><tr><th></th><th>Severity</th><th>Category</th><th>Id</th><th>Title</th></tr></thead><tbody>");
-    for (i, f) in report.findings.iter().enumerate() {
+    for (i, f) in displayed.iter().enumerate() {
         let sev = format!("{:?}", f.severity).to_lowercase();
         let cat = format!("{:?}", f.category);
         out.push_str(&format!(
@@ -936,18 +959,19 @@ const SHELL: &str = r##"<!DOCTYPE html>
 <style>
   :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--fg:#e6e6e6;--muted:#8a93a6}
   *{box-sizing:border-box}
+  html,body{max-width:100%;overflow-x:hidden}
   body{margin:0;font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg)}
   header{padding:14px 20px;background:var(--panel);border-bottom:1px solid var(--line)}
   header h1{margin:0;font-size:17px}
   header .meta{color:var(--muted);font-size:12px;margin-top:4px}
-  nav{display:flex;gap:2px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--line)}
+  nav{display:flex;gap:2px;padding:0 12px;background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto}
   nav button{background:none;border:0;color:var(--muted);padding:10px 16px;cursor:pointer;font-size:13px;border-bottom:2px solid transparent}
   nav button.active{color:var(--fg);border-bottom-color:#6ea8fe}
-  main{padding:20px;max-width:1200px}
+  main{padding:20px;max-width:1200px;min-width:0}
   section{display:none} section.active{display:block}
   h3{margin:22px 0 8px;font-size:14px;color:#b9c2d6}
-  table{border-collapse:collapse;width:100%;margin:8px 0;font-size:13px}
-  th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}
+  table{border-collapse:collapse;width:100%;max-width:100%;margin:8px 0;font-size:13px;table-layout:fixed}
+  th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top;overflow-wrap:anywhere;word-break:break-word}
   th{background:#1f242e}
   code{color:#9ecbff}
   .src{color:var(--muted);font-size:12px}
@@ -967,6 +991,13 @@ const SHELL: &str = r##"<!DOCTYPE html>
   .heatmap{display:flex;flex-wrap:wrap;gap:6px}
   .hcell{border-radius:5px;padding:8px;min-width:120px;color:#fff;cursor:help}
   .hcell .score{font-size:18px;font-weight:700} .hcell .htarget{font-size:11px;opacity:.9;word-break:break-all}
+  @media(max-width:600px){
+    header{padding:12px} main{padding:10px} nav{padding:0 4px}
+    nav button{padding:9px 10px;white-space:nowrap}
+    .card{min-width:calc(50% - 5px);padding:9px}.cards .sep{display:none}
+    table{font-size:11px}th,td{padding:5px}
+    table.kv th{width:34%}
+  }
 </style></head><body>
 <header><h1>InterMed Doctor Report</h1>
 <div class="meta">Target <strong>__TARGET__</strong> · tool __VERSION__ · generated __GENERATED__</div></header>
@@ -1066,6 +1097,7 @@ mod tests {
                 id: "test".into(),
                 findings: 1,
             }],
+            vec![],
             None,
         );
         (report, facts)

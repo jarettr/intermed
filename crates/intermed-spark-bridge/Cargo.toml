@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer I — spark / performance evidence bridge (Phase 7)."
+description = "Spark performance-evidence ingestion and correlation bridge."
 
 [dependencies]
 intermed-doctor-core.workspace = true

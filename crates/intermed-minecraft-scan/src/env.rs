@@ -37,7 +37,13 @@ impl Collector for EnvironmentCollector {
             .instance_type
             .or_else(|| Some(detect_instance_type_fallback(ctx.target)));
 
-        let loader_info = detect_loader(game_root, surface, ctx.target);
+        let (loader_info, loader_source) = ctx
+            .settings
+            .pack_manifest
+            .as_deref()
+            .and_then(loader_from_manifest_locator)
+            .map(|info| (info, "explicit-pack-manifest"))
+            .unwrap_or_else(|| detect_loader_with_source(game_root, surface, ctx.target));
         let host_launcher = detect_host_launcher(surface, layout);
         let mc = detect_mc_version(surface, game_root, layout);
 
@@ -52,6 +58,7 @@ impl Collector for EnvironmentCollector {
 
         if let Some(l) = loader_info.loader {
             b = b.attr("loader", l.as_str());
+            b = b.attr("loader_source", loader_source);
         }
         if let Some(component) = &loader_info.component {
             b = b.attr("launcher", component.as_str());
@@ -106,6 +113,14 @@ fn detect_instance_type_fallback(target: &Target) -> InstanceType {
 }
 
 fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
+    detect_loader_with_source(root, surface, target).0
+}
+
+fn detect_loader_with_source(
+    root: &Path,
+    surface: &Path,
+    target: &Target,
+) -> (LoaderInfo, &'static str) {
     if let Some(from_pack) = loader_from_pack_metadata(surface, root) {
         return from_pack;
     }
@@ -117,32 +132,44 @@ fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
         || check_roots("fabric-server-launch.jar")
         || check_roots(".fabric")
     {
-        return LoaderInfo {
-            loader: Some(Loader::Fabric),
-            component: Some("fabric-loader".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Fabric),
+                component: Some("fabric-loader".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     if check_roots("libraries/org/quiltmc") || check_roots("quilt-server-launch.jar") {
-        return LoaderInfo {
-            loader: Some(Loader::Quilt),
-            component: Some("quilt-loader".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Quilt),
+                component: Some("quilt-loader".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     if check_roots("libraries/net/neoforged") {
-        return LoaderInfo {
-            loader: Some(Loader::NeoForge),
-            component: Some("neoforge".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::NeoForge),
+                component: Some("neoforge".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     if check_roots("libraries/net/minecraftforge") || dir_has_prefixed_jar(root, "forge-") {
-        return LoaderInfo {
-            loader: Some(Loader::Forge),
-            component: Some("forge".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Forge),
+                component: Some("forge".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     // Most specific fork first: a Paper server ships Spigot/Bukkit compatibility
     // files too, so checking Spigot first would misclassify Paper as Spigot.
@@ -151,48 +178,81 @@ fn detect_loader(root: &Path, surface: &Path, target: &Target) -> LoaderInfo {
             || check_roots("config/paper-global.yml")
             || dir_has_prefixed_jar(root, "paper"))
     {
-        return LoaderInfo {
-            loader: Some(Loader::Paper),
-            component: Some("paper".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Paper),
+                component: Some("paper".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     if check_roots("plugins") && (check_roots("spigot.yml") || dir_has_prefixed_jar(root, "spigot"))
     {
-        return LoaderInfo {
-            loader: Some(Loader::Spigot),
-            component: Some("spigot".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Spigot),
+                component: Some("spigot".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
     if check_roots("plugins") && check_roots("bukkit.yml") {
-        return LoaderInfo {
-            loader: Some(Loader::Bukkit),
-            component: Some("bukkit".to_string()),
-            version: None,
-        };
+        return (
+            LoaderInfo {
+                loader: Some(Loader::Bukkit),
+                component: Some("bukkit".to_string()),
+                version: None,
+            },
+            "filesystem-heuristic",
+        );
     }
 
     let _ = target;
-    LoaderInfo {
-        loader: None,
-        component: None,
-        version: None,
-    }
+    (
+        LoaderInfo {
+            loader: None,
+            component: None,
+            version: None,
+        },
+        "undecidable",
+    )
 }
 
-fn loader_from_pack_metadata(surface: &Path, game_root: &Path) -> Option<LoaderInfo> {
-    if let Some(info) = loader_from_mmc_pack(&surface.join("mmc-pack.json")) {
-        return Some(info);
-    }
-    if let Some(info) = loader_from_mmc_pack(&game_root.join("mmc-pack.json")) {
-        return Some(info);
-    }
+/// Resolve the loader family from instance/pack evidence without running the
+/// collector. Metadata scanning uses the same resolver to select the descriptor
+/// that is active for this instance; duplicating a different heuristic there
+/// would make Layer A and Layer B disagree.
+pub(crate) fn loader_for_target(target: &Target) -> Option<Loader> {
+    let surface = &target.path;
+    let game_root = target.game_root.as_deref().unwrap_or(surface.as_path());
+    detect_loader(game_root, surface, target).loader
+}
+
+fn loader_from_pack_metadata(
+    surface: &Path,
+    game_root: &Path,
+) -> Option<(LoaderInfo, &'static str)> {
+    // Pack declarations are authoritative configuration and outrank launcher
+    // components. A cross-loader artifact remains a separate mismatch fact.
     if let Some(info) = loader_from_modrinth_index(&surface.join("modrinth.index.json")) {
-        return Some(info);
+        return Some((info, "pack-manifest"));
+    }
+    if let Some(info) = loader_from_modrinth_index(&game_root.join("modrinth.index.json")) {
+        return Some((info, "pack-manifest"));
     }
     if let Some(info) = loader_from_curseforge_manifest(&surface.join("manifest.json")) {
-        return Some(info);
+        return Some((info, "pack-manifest"));
+    }
+    if let Some(info) = loader_from_curseforge_manifest(&game_root.join("manifest.json")) {
+        return Some((info, "pack-manifest"));
+    }
+    if let Some(info) = loader_from_mmc_pack(&surface.join("mmc-pack.json")) {
+        return Some((info, "launcher-manifest"));
+    }
+    if let Some(info) = loader_from_mmc_pack(&game_root.join("mmc-pack.json")) {
+        return Some((info, "launcher-manifest"));
     }
     None
 }
@@ -216,7 +276,11 @@ fn loader_from_mmc_pack(path: &Path) -> Option<LoaderInfo> {
 
 fn loader_from_modrinth_index(path: &Path) -> Option<LoaderInfo> {
     let text = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    loader_from_modrinth_text(&text)
+}
+
+fn loader_from_modrinth_text(text: &str) -> Option<LoaderInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let deps = v.get("dependencies")?.as_object()?;
     for (key, value) in deps {
         let version = value.as_str().unwrap_or("");
@@ -229,7 +293,11 @@ fn loader_from_modrinth_index(path: &Path) -> Option<LoaderInfo> {
 
 fn loader_from_curseforge_manifest(path: &Path) -> Option<LoaderInfo> {
     let text = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    loader_from_curseforge_text(&text)
+}
+
+fn loader_from_curseforge_text(text: &str) -> Option<LoaderInfo> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let loaders = v
         .pointer("/minecraft/modLoaders")
         .and_then(|x| x.as_array())?;
@@ -240,6 +308,36 @@ fn loader_from_curseforge_manifest(path: &Path) -> Option<LoaderInfo> {
         }
     }
     None
+}
+
+/// Read an explicitly supplied manifest either directly or from its original
+/// pack archive. This preserves authoritative loader provenance even when an
+/// external materializer retained only `overrides/` and downloaded jars.
+fn loader_from_manifest_locator(path: &Path) -> Option<LoaderInfo> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("modrinth.index.json") {
+        return loader_from_modrinth_index(path);
+    }
+    if path.file_name().and_then(|name| name.to_str()) == Some("manifest.json") {
+        return loader_from_curseforge_manifest(path);
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    if let Some(text) = intermed_doctor_core::bounded_zip::read_zip_text_opt(
+        &mut archive,
+        "modrinth.index.json",
+        intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+    ) {
+        if let Some(info) = loader_from_modrinth_text(&text) {
+            return Some(info);
+        }
+    }
+    let text = intermed_doctor_core::bounded_zip::read_zip_text_opt(
+        &mut archive,
+        "manifest.json",
+        intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+    )?;
+    loader_from_curseforge_text(&text)
 }
 
 fn loader_from_component_uid(uid: &str, version: &str) -> Option<LoaderInfo> {
@@ -552,6 +650,50 @@ mod tests {
         );
         let info = loader_from_modrinth_index(&root.join("modrinth.index.json")).expect("loader");
         assert_eq!(info.loader, Some(Loader::NeoForge));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn pack_manifest_outranks_launcher_manifest() {
+        let root = temp("pack-priority");
+        touch(
+            &root.join("modrinth.index.json"),
+            br#"{"dependencies":{"minecraft":"1.20.1","fabric-loader":"0.15.0"}}"#,
+        );
+        touch(
+            &root.join("mmc-pack.json"),
+            br#"{"components":[{"uid":"net.neoforged.neoforge","version":"20.4.0"}]}"#,
+        );
+        let (info, source) = loader_from_pack_metadata(&root, &root).expect("loader");
+        assert_eq!(info.loader, Some(Loader::Fabric));
+        assert_eq!(source, "pack-manifest");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn explicit_mrpack_archive_retains_loader_provenance() {
+        use std::io::Write as _;
+
+        let root = temp("explicit-mrpack");
+        let archive_path = root.join("pack.mrpack");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(
+                br#"{"formatVersion":1,"dependencies":{"minecraft":"1.21.1","neoforge":"21.1.0"}}"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let info = loader_from_manifest_locator(&archive_path).expect("loader");
+        assert_eq!(info.loader, Some(Loader::NeoForge));
+        assert_eq!(info.version.as_deref(), Some("21.1.0"));
         fs::remove_dir_all(root).ok();
     }
 

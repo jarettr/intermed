@@ -42,8 +42,7 @@ CREATE TABLE IF NOT EXISTS facts (
     extractor       VARCHAR NOT NULL,
     source_locator  VARCHAR NOT NULL,
     source_line     INTEGER,
-    source_inner    VARCHAR,
-    PRIMARY KEY (run_id, fact_id)
+    source_inner    VARCHAR
 );
 
 CREATE TABLE IF NOT EXISTS fact_attributes (
@@ -54,8 +53,7 @@ CREATE TABLE IF NOT EXISTS fact_attributes (
     val_str         VARCHAR,
     val_int         BIGINT,
     val_float       DOUBLE,
-    val_bool        BOOLEAN,
-    PRIMARY KEY (run_id, fact_id, key)
+    val_bool        BOOLEAN
 );
 
 CREATE TABLE IF NOT EXISTS findings (
@@ -729,6 +727,7 @@ mod tests {
             fact_stats: store.stats(),
             collectors: Vec::new(),
             rules: Vec::new(),
+            operational_errors: Vec::new(),
             deferred_layers: Vec::new(),
             profile: None,
         };

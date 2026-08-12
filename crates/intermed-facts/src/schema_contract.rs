@@ -14,6 +14,9 @@
 //! non-existent kind, and that the declared types are well-formed. `complete`
 //! kinds are the audited surface a future per-attribute rule gate can rely on;
 //! `complete = false` is the explicit opt-out until a kind is pinned down.
+//! `reserved = true` is different: it records a predicate name intentionally kept
+//! for wire/schema compatibility even though production code neither emits nor
+//! consumes it.
 
 use std::collections::BTreeMap;
 
@@ -64,6 +67,8 @@ pub struct KindSchema {
     pub subject: String,
     /// Whether the attribute set is exhaustive (and thus enforceable).
     pub complete: bool,
+    /// Intentionally inactive predicate retained for schema compatibility.
+    pub reserved: bool,
     /// Declared attributes by name.
     pub attrs: BTreeMap<String, AttrType>,
 }
@@ -106,6 +111,7 @@ pub fn parse_schema(toml_src: &str) -> Result<FactSchema, String> {
             KindSchema {
                 subject: raw_kind.subject,
                 complete: raw_kind.complete,
+                reserved: raw_kind.reserved,
                 attrs,
             },
         );
@@ -128,6 +134,8 @@ struct RawKind {
     subject: String,
     #[serde(default)]
     complete: bool,
+    #[serde(default)]
+    reserved: bool,
     #[serde(default)]
     attrs: BTreeMap<String, RawAttr>,
 }
@@ -153,6 +161,7 @@ mod tests {
         assert_eq!(s.schema_version, "intermed-fact-schema-v1");
         let mod_kind = s.kind("mod").expect("mod kind");
         assert!(mod_kind.complete);
+        assert!(!mod_kind.reserved);
         assert_eq!(mod_kind.attrs.get("version"), Some(&AttrType::String));
     }
 
@@ -172,5 +181,19 @@ mod tests {
             s.kind("x").unwrap().attrs.get("relation"),
             Some(&AttrType::Enum(vec!["a".to_string(), "b".to_string()]))
         );
+    }
+
+    #[test]
+    fn reserved_kind_parses() {
+        let s = parse_schema(
+            r#"
+            schema_version = "t"
+            [kind.legacy]
+            subject = "legacy"
+            reserved = true
+            "#,
+        )
+        .expect("parse");
+        assert!(s.kind("legacy").unwrap().reserved);
     }
 }

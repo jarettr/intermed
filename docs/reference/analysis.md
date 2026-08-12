@@ -27,6 +27,8 @@ it says less rather than guessing.
 `neoforge.mods.toml`, `plugin.yml` / `paper-plugin.yml`, and the JAR manifest.
 For jars with no readable metadata, it reads the `@Mod` annotation and entrypoint
 classes from bytecode.
+Fabric descriptors are accepted with the same quoted-string control-character
+tolerance as Fabric Loader; unrelated structural JSON errors remain invalid.
 
 **Concludes:** the mod id, version, loader, and side of each mod; the
 dependencies it declares; capability fingerprints (does it register content, add
@@ -67,13 +69,22 @@ graph.
 
 **Concludes:** missing dependencies; version ranges too narrow or too wide;
 undisclosed dependencies a mod uses without declaring; the resolution of the whole
-graph. Pairwise semver checks give the precise per-edge findings
+graph. Pairwise loader-dialect checks give the precise per-edge findings
 (`missing-dependency`, `wrong-version`, `wrong-mc-version`); a PubGrub global
 resolver adds joint satisfiability — when the installed catalog is inconsistent in
 a way no single pair shows, it raises `dependency-unsat:global` with a
 human-readable derivation tree. A bundled library satisfies the dependency it
 provides. Loader and runtime pseudo-dependencies (`minecraft`, `java`, the loader)
 are never reported missing.
+
+Version predicates retain the language of their declaring manifest. Fabric uses
+Loader's extended SemVer comparison (including direct prerelease comparison and
+ignored build metadata), Forge and NeoForge use Maven interval syntax, Quilt is
+kept as a distinct dialect, and generic or opaque metadata is evaluated
+conservatively. The pairwise checker, update-impact analysis, and global resolver
+all use the same dialect decision. If a predicate cannot be decided, global
+resolution includes the installed candidate rather than turning uncertainty into
+a hard contradiction.
 
 An implicit dependency is only *required* when its reference is unconditioned: a
 tag entry with `"required": false`, or a recipe gated on a mod being loaded, is
@@ -187,17 +198,23 @@ whose id is computed at runtime produces no fact rather than a guess.
 
 ## Security & SBOM
 
-**Reads:** the JAR signature manifest, the constant pool of each class (for
+**Reads:** JAR signature material and cryptographic verification result, the constant pool of each class (for
 sensitive-API references), Forge coremod declarations, and the metadata that
 identifies each artifact.
 
-**Concludes:** signature status per jar; a trust score from how well an artifact
+**Concludes:** signature status per jar (verified, invalid, incomplete,
+unavailable, or unsigned); an explicitly decomposed trust score from how well an artifact
 is identified; the dangerous-API surface — counts of classes referencing process
 spawning, sockets, reflection, `Unsafe`, `System.exit`, method handles; shipped
 coremods; and an SBOM (SPDX or CycloneDX). A grouped security finding is raised
 only once a jar crosses a signal threshold.
 
-**Stops at:** this is preflight, from the constant pool. It reports that a class
+Signature structure alone is not trusted: `.SF` plus `.RSA`/`.DSA`/`.EC` earns
+signature points only after `jarsigner -verify -strict` validates the signature
+and all content entries are covered by signed digests. Certificate-chain policy
+and revocation are separate concerns.
+
+**Stops at:** API analysis is preflight, from the constant pool. It reports that a class
 *references* an API, not that it calls it, and never that a jar is malicious. It
 tells you where to spend manual review.
 

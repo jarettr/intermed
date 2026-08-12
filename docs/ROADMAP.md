@@ -47,23 +47,24 @@ it looks.
 Goal: ship a 0.1.x worth trusting, and quietly start the clock on the one thing
 that compounds with time (data).
 
-- **Keep correctness parity covered.** (The three latent parser panics from the
+- [x] **Keep correctness parity covered.** (The three latent parser panics from the
   bug hunt are already fixed and fuzz-guarded.) Nullable join-key behavior is
   covered by in-process/DuckDB parity tests; continue monitoring future lowering
   changes so backend null semantics cannot silently diverge.
-- **Project Status / maturity statement** in the docs: this is an alpha, validated
-  against the packs we ran, not yet widely exercised; here is what is deferred.
-- **Schema honesty as a CI gate**: a test asserting every `kind::` predicate is
+- [x] **Project Status / maturity statement**: [the status page](PROJECT_STATUS.md)
+  records the corpus actually run, the alpha boundary, and deferred work.
+- [x] **Schema honesty as a CI gate**: a test asserts every `kind::` predicate is
   either emitted/read or explicitly reserved — phantom predicates become
   impossible by construction.
-- **Perf micro-levers (optional, low-risk):** ancestor-set cache in `related()`
+- [x] **Perf micro-levers:** ancestor-set cache in `related()`
   (the last few percent of mixin time); `group_key` via the type-safe `HashKey`;
   zip central-directory CRC32 in VFS pass 1 (the remaining ~47% of VFS, if
   revisited).
-- **Begin consented telemetry**: opt-in collection of run outcomes and logs. This
-  is time-sensitive — every un-logged run is a training example lost forever — and
-  it is the dependency that makes the Far/AI horizon possible at all.
-- **Release 0.1.x publicly.**
+- [x] **Begin consented telemetry**: per-run outcome export/HTTPS delivery is
+  disabled by default; logs require a second explicit flag and are bounded and
+  redacted. No default project endpoint or stable user/install id exists.
+- [x] **Release 0.1.x publicly.** Release archives, checksums, man pages,
+  and completions are available from the public releases page.
 
 ### Near — Trust, product, and a gradual engine restructure · *currency: usefulness*
 

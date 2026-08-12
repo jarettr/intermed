@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer J (Phase 1, imperative) — cross-cutting rules over metadata facts. Datalog backend lands in Phase 5 behind the same Rule trait."
+description = "Cross-cutting rules over metadata facts, with imperative, declarative, columnar, DuckDB, and Datalog execution paths."
 
 [dependencies]
 intermed-doctor-core.workspace = true

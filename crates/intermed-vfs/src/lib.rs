@@ -26,7 +26,8 @@ const EXTRACTOR: &str = "vfs-scanner";
 // only collision paths), so old `-r3` entries with blobs are invalidated.
 // `-r5`: mods.toml writer-id parse scoped to `[[mods]]` + comment/quote-safe, so
 // cached writer names from the old parse (e.g. `x" # mandatory`) are invalidated.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r5");
+// `-r6`: pass 1 records central-directory size/CRC without inflating every resource.
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r6");
 
 /// Implementation status for help text.
 pub const STATUS: &str = "active: Phase 3";
@@ -350,6 +351,10 @@ pub struct ResourceWrite {
     pub writer: String,
     pub archive: String,
     pub size: u64,
+    /// ZIP central-directory CRC32. Used as a cheap content fingerprint; byte
+    /// equality is still verified from pass-2 blobs before declaring `identical`.
+    #[serde(default)]
+    pub crc32: u32,
     pub json: bool,
 }
 
@@ -592,7 +597,7 @@ impl Rule for ResourceConflictRule {
         "resource-conflict"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         // Evaluate *only* the resource-conflict rules, not the whole core pack.
         // The declarative core pack is the single source of truth for the
         // resource-conflict logic, but this layer must not silently run unrelated
@@ -600,7 +605,7 @@ impl Rule for ResourceConflictRule {
         // engine also registers the full declarative pack, surface the other
         // layers' findings a second time under this rule's id.
         let pack = resource_conflict_pack();
-        intermed_rules::evaluate_pack(&pack, ctx)
+        Ok(intermed_rules::evaluate_pack(&pack, ctx))
     }
 }
 
@@ -671,7 +676,10 @@ pub fn scan_mods_dir_filtered(
     let mut truncations = Vec::new();
     for (archive, cached) in scanned {
         match cached {
-            CachedVfsJar::Ok(partial) => {
+            CachedVfsJar::Ok(mut partial) => {
+                for write in &mut partial.writes {
+                    write.archive = archive.clone();
+                }
                 writes.extend(partial.writes);
                 for reason in partial.truncations {
                     truncations.push((archive.clone(), reason));
@@ -834,7 +842,7 @@ fn scan_jar(
     let mut total_bytes: u64 = 0;
     let mut resource_entries = 0usize;
     for i in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(i)
             .map_err(|e| ScanError::new(format!("read {} entry {i}: {e}", jar.display())))?;
         if entry.is_dir() {
@@ -868,32 +876,21 @@ fn scan_jar(
             break;
         }
 
-        // Defense in depth against a lying zip header: cap the actual read too.
-        let mut bytes = Vec::new();
-        let read_cap = MAX_RESOURCE_ENTRY_BYTES.saturating_add(1);
-        std::io::Read::take(&mut entry, read_cap)
-            .read_to_end(&mut bytes)
-            .map_err(|e| ScanError::new(format!("read {}!{path}: {e}", jar.display())))?;
-        if bytes.len() as u64 > MAX_RESOURCE_ENTRY_BYTES {
-            truncations.push(format!(
-                "{path}: decompressed past {MAX_RESOURCE_ENTRY_BYTES} byte cap, skipped"
-            ));
-            continue;
-        }
-        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
-        let json =
-            is_json_path(&path) && serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
+        // Pass 1 is central-directory-only: size and CRC are available without
+        // inflating the entry. Actual bytes (and JSON validity) are required only
+        // for colliding paths and are bounded/re-read in pass 2.
+        total_bytes = total_bytes.saturating_add(entry.size());
 
         writes.push(ResourceWrite {
             path,
             writer: writer.clone(),
             archive: archive_name.clone(),
-            size: bytes.len() as u64,
-            json,
+            size: entry.size(),
+            crc32: entry.crc32(),
+            json: is_json_path(entry.name()),
         });
-        // Pass 1 intentionally drops `bytes`: only `size`/`json` are needed for the
-        // write record. Resource bytes are re-read in pass 2 (`reread_collision_blobs`)
-        // for the few paths that actually collide — see `scan_mods_dir_filtered`.
+        // Resource bytes are re-read in pass 2 (`reread_collision_blobs`) for the
+        // few paths that actually collide — see `scan_mods_dir_filtered`.
     }
     Ok(())
 }
@@ -1270,10 +1267,9 @@ fn tag_values(bytes: &[u8]) -> Option<(bool, Vec<String>)> {
     for v in values {
         if let Some(s) = v.as_str() {
             out.push(s.to_string());
-        } else if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
-            out.push(id.to_string());
         } else {
-            return None;
+            let id = v.get("id").and_then(|x| x.as_str())?;
+            out.push(id.to_string());
         }
     }
     let replace = obj
@@ -1417,11 +1413,8 @@ fn lang_json_keys(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
     let obj = value.as_object()?;
     let mut out = BTreeMap::new();
     for (k, v) in obj {
-        if let Some(s) = v.as_str() {
-            out.insert(k.clone(), s.to_string());
-        } else {
-            return None;
-        }
+        let s = v.as_str()?;
+        out.insert(k.clone(), s.to_string());
     }
     Some(out)
 }

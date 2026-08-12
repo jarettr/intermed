@@ -52,12 +52,12 @@ fn declarative_pack_matches_imperative_wrappers() {
         .emit();
 
     let ctx = ctx(&store);
-    let pack_ids = finding_ids(&DeclarativeRulePack::default_core().evaluate(&ctx));
+    let pack_ids = finding_ids(&DeclarativeRulePack::default_core().evaluate(&ctx).unwrap());
 
     let mut imperative_ids = Vec::new();
-    imperative_ids.extend(finding_ids(&DuplicateIdRule.evaluate(&ctx)));
-    imperative_ids.extend(finding_ids(&LoaderMismatchRule.evaluate(&ctx)));
-    imperative_ids.extend(finding_ids(&SideMismatchRule.evaluate(&ctx)));
+    imperative_ids.extend(finding_ids(&DuplicateIdRule.evaluate(&ctx).unwrap()));
+    imperative_ids.extend(finding_ids(&LoaderMismatchRule.evaluate(&ctx).unwrap()));
+    imperative_ids.extend(finding_ids(&SideMismatchRule.evaluate(&ctx).unwrap()));
     imperative_ids.sort();
     let mut pack_sorted = pack_ids;
     pack_sorted.sort();

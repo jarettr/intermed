@@ -671,6 +671,11 @@ impl Default for FactRetentionPolicy {
             kind::UNKNOWN_SOURCE,
             kind::SIGNATURE_STATUS,
             kind::TRUST_SCORE,
+            // Environment inference for legacy Forge packs uses one archive
+            // filename vote per checksum fact. Dropping these before report
+            // assembly let two copied modern descriptors outvote dozens of
+            // 1.12.2 filenames in large/full scans.
+            kind::CHECKSUM,
             kind::USES_PROCESS_SPAWN,
             kind::USES_UNSAFE,
             kind::USES_DYNAMIC_CLASS_DEFINITION,

@@ -74,6 +74,7 @@ fn persist_run_survives_duplicate_fact_ids_in_batch() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };
@@ -135,6 +136,7 @@ fn persist_many_mixin_effects_is_idempotent() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };
@@ -190,6 +192,7 @@ fn persist_run_is_idempotent() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };
@@ -251,6 +254,7 @@ fn readonly_open_rejects_writes_but_allows_select() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };
@@ -290,8 +294,8 @@ fn readonly_open_rejects_writes_but_allows_select() {
 fn duplicate_id_matches_imperative_rule() {
     let store = duplicate_mod_store();
     let ctx = ctx_from_store(&store);
-    let imperative = DuplicateIdRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
+    let imperative = DuplicateIdRule.evaluate(&ctx).unwrap();
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx).unwrap();
 
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
@@ -310,8 +314,8 @@ fn duplicate_id_matches_souffle_when_available() {
     }
     let store = duplicate_mod_store();
     let ctx = ctx_from_store(&store);
-    let souffle = SouffleRulePack::default().evaluate(&ctx);
-    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
+    let souffle = SouffleRulePack::default().evaluate(&ctx).unwrap();
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx).unwrap();
     assert_eq!(souffle.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(souffle[0].id, duckdb[0].id);
@@ -328,7 +332,7 @@ fn mixin_overlap_sql_backend_surfaces_finding() {
         .attr("hot_path", false)
         .emit();
     let ctx = ctx_from_store(&store);
-    let findings = DuckdbRulePack::default().evaluate(&ctx);
+    let findings = DuckdbRulePack::default().evaluate(&ctx).unwrap();
     assert_eq!(findings.len(), 1);
     assert_eq!(
         findings[0].id,
@@ -353,8 +357,8 @@ fn loader_mismatch_matches_imperative_rule() {
         .attr("file", "alpha.jar")
         .emit();
     let ctx = ctx_from_store(&store);
-    let imperative = LoaderMismatchRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
+    let imperative = LoaderMismatchRule.evaluate(&ctx).unwrap();
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx).unwrap();
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(imperative[0].id, duckdb[0].id);
@@ -375,8 +379,8 @@ fn side_mismatch_matches_imperative_rule() {
         .attr("side", "client")
         .emit();
     let ctx = ctx_from_store(&store);
-    let imperative = SideMismatchRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
+    let imperative = SideMismatchRule.evaluate(&ctx).unwrap();
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx).unwrap();
     assert_eq!(imperative.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(imperative[0].id, duckdb[0].id);
@@ -399,8 +403,8 @@ fn resource_conflict_matches_vfs_rule() {
         .attr("path", "data/minecraft/tags/items/test.json")
         .emit();
     let ctx = ctx_from_store(&store);
-    let vfs = ResourceConflictRule.evaluate(&ctx);
-    let duckdb = DuckdbRulePack::default().evaluate(&ctx);
+    let vfs = ResourceConflictRule.evaluate(&ctx).unwrap();
+    let duckdb = DuckdbRulePack::default().evaluate(&ctx).unwrap();
     assert_eq!(vfs.len(), 1);
     assert_eq!(duckdb.len(), 1);
     assert_eq!(vfs[0].id, duckdb[0].id);
@@ -427,20 +431,15 @@ fn security_signals_match_imperative_aggregation() {
             .emit();
     }
     let ctx = ctx_from_store(&store);
-    let imperative = intermed_security_audit::rule().evaluate(&ctx);
+    let imperative = intermed_security_audit::rule().evaluate(&ctx).unwrap();
     let duckdb: Vec<_> = DuckdbRulePack::default()
         .evaluate(&ctx)
+        .unwrap()
         .into_iter()
         .filter(|f| f.id.starts_with("security-api-risk:"))
         .collect();
 
-    assert!(
-        !DuckdbRulePack::default()
-            .evaluate(&ctx)
-            .iter()
-            .any(|f| f.id == "duckdb-backend-failed"),
-        "duckdb security path must bind cleanly"
-    );
+    assert!(DuckdbRulePack::default().evaluate(&ctx).is_ok());
     assert_eq!(imperative.len(), 1);
     assert_eq!(
         duckdb.len(),
@@ -498,15 +497,10 @@ fn sbom_correlation_flags_only_low_trust_capability() {
         .emit();
 
     let ctx = ctx_from_store(&store);
-    let findings = DuckdbRulePack::default().evaluate(&ctx);
+    let findings = DuckdbRulePack::default().evaluate(&ctx).unwrap();
 
-    // The backend must bind/run every query cleanly, not bail with the fatal
-    // failure finding (regression guard for the GROUP BY-on-aggregate bug).
-    assert!(
-        !findings.iter().any(|f| f.id == "duckdb-backend-failed"),
-        "duckdb backend failed: {:?}",
-        findings.iter().map(|f| &f.id).collect::<Vec<_>>()
-    );
+    // `evaluate(...).unwrap()` above is the regression guard for backend
+    // execution. Operational failures are errors, never domain findings.
 
     let correlation: Vec<_> = findings
         .iter()
@@ -558,6 +552,7 @@ fn top_mixin_overlaps_query_runs_against_duckdb() {
         fact_stats: fact_store.stats(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };
@@ -608,6 +603,7 @@ fn risk_patterns_view_and_method_roll_up_findings() {
         fact_stats: std::collections::BTreeMap::new(),
         collectors: Vec::new(),
         rules: Vec::new(),
+        operational_errors: Vec::new(),
         deferred_layers: Vec::new(),
         profile: None,
     };

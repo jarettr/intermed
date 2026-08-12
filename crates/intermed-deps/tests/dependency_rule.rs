@@ -33,7 +33,7 @@ fn wrong_mc_version_for_two_component_instance() {
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = DependencyRule.evaluate(&ctx);
+    let findings = DependencyRule.evaluate(&ctx).unwrap();
     assert!(findings.iter().any(|f| f.id == "wrong-mc-version:alpha"));
 }
 
@@ -62,7 +62,7 @@ fn missing_dependency_is_error() {
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = DependencyRule.evaluate(&ctx);
+    let findings = DependencyRule.evaluate(&ctx).unwrap();
     assert!(
         findings
             .iter()
@@ -100,7 +100,7 @@ fn wrong_version_with_fabric_space_and_range() {
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = DependencyRule.evaluate(&ctx);
+    let findings = DependencyRule.evaluate(&ctx).unwrap();
     assert!(
         findings
             .iter()
@@ -133,6 +133,111 @@ fn snapshot_mc_version_is_undecidable() {
         spark_report: None,
     };
     let ctx = RuleCtx::for_test(&store, &target);
-    let findings = DependencyRule.evaluate(&ctx);
+    let findings = DependencyRule.evaluate(&ctx).unwrap();
     assert!(findings.is_empty());
+}
+
+#[test]
+fn game_prefixed_mod_version_is_undecidable_not_wrong() {
+    let mut store = FactStore::new();
+    store
+        .fact("meta", kind::MOD)
+        .subject("addon")
+        .attr("version", "1.0.0")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("aether")
+        .attr("version", "1.20.1-1.5.2-neoforge")
+        .emit();
+    store
+        .fact("meta", kind::MOD_METADATA)
+        .subject("aether")
+        .attr("version_raw", "1.20.1-1.5.2-neoforge")
+        .attr("version_ambiguous", true)
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("addon")
+        .attr("dep", "aether")
+        .attr("range", "[1.0.0,)")
+        .attr("mandatory", true)
+        .emit();
+
+    let target = Target::with_kind(".", TargetKind::ModsDir);
+    let findings = DependencyRule
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|finding| !finding.id.starts_with("wrong-version:"))
+    );
+    let undecidable = findings
+        .iter()
+        .find(|finding| finding.id == "version-undecidable:addon->aether")
+        .expect("ambiguous versions remain visible without a false error");
+    assert_eq!(
+        undecidable.severity,
+        intermed_doctor_core::evidence::Severity::Note
+    );
+    assert!(
+        undecidable
+            .machine_tags
+            .iter()
+            .any(|tag| tag == "ambiguous-version")
+    );
+}
+
+#[test]
+fn fabric_extended_semver_accepts_newer_core_prerelease_builds() {
+    let mut store = FactStore::new();
+    for (id, version) in [
+        ("bettercombat", "1.0.0"),
+        ("combatroll", "1.0.0"),
+        ("spell_engine", "1.0.0"),
+        ("archers_expansion", "1.0.0"),
+        ("forcemaster_rpg", "1.0.0"),
+        ("player-animator", "1.0.2-rc1+1.20"),
+        ("more_rpg_classes", "1.2.19-1.20.1"),
+    ] {
+        store
+            .fact("meta", kind::MOD)
+            .subject(id)
+            .attr("version", version)
+            .attr("loader", "fabric")
+            .emit();
+    }
+    for (from, to, range) in [
+        ("bettercombat", "player-animator", ">=1.0.0"),
+        ("combatroll", "player-animator", ">=1.0.0"),
+        ("spell_engine", "player-animator", ">=0.9.9"),
+        ("archers_expansion", "more_rpg_classes", ">=1.2.6-1.20.1"),
+        ("forcemaster_rpg", "more_rpg_classes", ">=1.1.8"),
+    ] {
+        store
+            .fact("meta", kind::DEPENDENCY)
+            .subject(from)
+            .attr("dep", to)
+            .attr("range", range)
+            .attr("mandatory", true)
+            .attr("relation", "depends")
+            .attr("version_dialect", "fabric-extended-semver")
+            .emit();
+    }
+
+    let target = Target::with_kind(".", TargetKind::ModsDir);
+    let findings = DependencyRule
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(
+        findings.iter().all(|finding| {
+            !finding.id.starts_with("wrong-version:") && finding.id != "dependency-unsat:global"
+        }),
+        "Fabric-valid Prominence constraints must not become errors: {findings:#?}"
+    );
+    assert!(matches!(
+        intermed_deps::resolve_store(&store).unwrap(),
+        intermed_deps::ResolutionOutcome::Satisfied { .. }
+    ));
 }

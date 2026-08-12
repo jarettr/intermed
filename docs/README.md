@@ -1,6 +1,7 @@
 # Documentation
 
-InterMed is at `0.1.3-alpha`; the [roadmap](ROADMAP.md) tracks what is planned.
+InterMed is at `0.1.4-alpha`. Read the [project status](PROJECT_STATUS.md) for
+the validated scope and limits, and the [roadmap](ROADMAP.md) for what comes next.
 
 The documentation has three layers. Start at the top and go deeper only when you
 need to.
@@ -28,6 +29,8 @@ Task-oriented. Each one walks a single job end to end.
   surface, the low-trust × capability correlation, and exporting an SBOM.
 - [Performance](guides/performance.md) — importing a Spark profile, hot
   methods/mods, and tying a hot method to the mixin that owns it.
+- [Telemetry and privacy](guides/telemetry.md) — the explicit opt-in event,
+  exactly what it contains, and the additional consent required for log excerpts.
 
 ## Reference
 
@@ -47,6 +50,8 @@ Complete and precise. Look here for the exact behaviour of a flag or a field.
   invalidates.
 - [Facts and schema](reference/facts.md) — the fact model and the
   `intermed-doctor-report-v1` JSON schema.
+- [Project status](PROJECT_STATUS.md) — maturity, validation corpus, support
+  boundary, and deferred work.
 
 ## Contributing
 

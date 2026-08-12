@@ -19,15 +19,15 @@ ahash = "0.8"
 thiserror = { workspace = true }
 
 # ── Optional engines/backends (feature-gated; NOT in the default build) ──
-# Real WASM sandbox for CallExternal (Phase 4.1).
+# Real WASM sandbox for CallExternal.
 wasmtime = { version = "45", optional = true }
 wat = { version = "1", optional = true }
-# DataFusion query backend (uses the same arrow 58 — no version duplication; Phase 4.2).
+# DataFusion query backend (uses the same arrow 58 — no version duplication).
 datafusion = { version = "54", optional = true }
 tokio = { version = "1", optional = true, features = ["rt"] }
-# Polars query backend (carries its own arrow fork; Phase 4.2).
+# Polars query backend (carries its own arrow fork).
 polars = { version = "0.54", optional = true, default-features = false, features = ["lazy"] }
-# Ascent (Rust Datalog) backend for the recursive fragment (Phase 4.2).
+# Ascent (Rust Datalog) backend for the recursive fragment.
 ascent = { version = "0.8", optional = true }
 
 [features]

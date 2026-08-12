@@ -1,10 +1,11 @@
 //! DuckDB persistence (`DuckStore`) — analytics history with idempotent upsert per `run_id`.
 //!
 //! Re-persisting the same diagnosis run deletes prior rows for that `run_id`, then
-//! inserts fresh data. Row writes use `INSERT OR REPLACE` so a partial retry or
-//! duplicate `(run_id, fact_id)` tuple in one batch cannot trip PRIMARY KEY errors
-//! (common when large `mixin_effect` fact sets are written twice into one DB).
+//! inserts fresh data. The two high-cardinality fact tables deliberately avoid
+//! primary-key indexes: DuckDB's ART indexes otherwise retain several GiB for a
+//! large pack. Persistence deduplicates fact ids while streaming instead.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use duckdb::{AccessMode, Config, Connection, params};
@@ -15,8 +16,12 @@ use thiserror::Error;
 use crate::schema::{
     FactAttributeRow, FactRow, FindingAffectsRow, FindingEvidenceRow, FindingRow, FindingTagRow,
     MaterializedRun, RunRow, SCHEMA_DDL, delete_run_statements, materialize_facts_only,
-    materialize_run,
+    materialize_run, run_row_from_report,
 };
+
+/// Maximum number of facts expanded into owned relational rows at once. Keeping
+/// this bounded is critical for large packs: one fact can have many attributes.
+const FACT_WRITE_CHUNK: usize = 2048;
 
 /// Query result for `intermed db query`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +52,7 @@ impl DuckStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, DuckError> {
         let conn = Connection::open(path)?;
         let store = Self { conn };
+        store.configure_resources()?;
         store.init_schema()?;
         Ok(store)
     }
@@ -61,15 +67,29 @@ impl DuckStore {
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self, DuckError> {
         let config = Config::default().access_mode(AccessMode::ReadOnly)?;
         let conn = Connection::open_with_flags(path, config)?;
-        Ok(Self { conn })
+        let store = Self { conn };
+        store.configure_resources()?;
+        Ok(store)
     }
 
     /// In-memory store (rule evaluation and tests).
     pub fn open_in_memory() -> Result<Self, DuckError> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn };
+        store.configure_resources()?;
         store.init_schema()?;
         Ok(store)
+    }
+
+    /// Leave headroom for collectors/report rendering on 16 GiB hosts. DuckDB
+    /// spills eligible operators once this cap is reached instead of competing
+    /// for nearly all physical memory; limiting threads also avoids per-thread
+    /// buffers multiplying the peak.
+    fn configure_resources(&self) -> Result<(), DuckError> {
+        self.conn.execute_batch(
+            "SET memory_limit='6GB'; SET threads=1; SET preserve_insertion_order=false;",
+        )?;
+        Ok(())
     }
 
     /// Idempotent `CREATE TABLE IF NOT EXISTS` for all relations.
@@ -80,21 +100,49 @@ impl DuckStore {
 
     /// Persist a full diagnosis run (idempotent per `run_id`).
     pub fn persist_run(&self, report: &DoctorReport, facts: &[Fact]) -> Result<String, DuckError> {
-        let bundle = materialize_run(report, facts);
-        let run_id = bundle.run.run_id.clone();
-        self.write_run_bundle(&bundle)?;
+        let run_id = run_row_from_report(report).run_id;
+        self.clear_run(&run_id)?;
+
+        // Do not build a second, fully-owned copy of every fact and attribute.
+        // Chunk commits bound both Rust allocations and DuckDB transaction state.
+        // The `runs` row is written last, so a failed partial import is invisible
+        // to history queries; cleanup is best-effort before returning the error.
+        let result = (|| {
+            let mut seen = HashSet::new();
+            for chunk in facts.chunks(FACT_WRITE_CHUNK) {
+                let unique: Vec<_> = chunk
+                    .iter()
+                    .filter(|fact| seen.insert(fact.id))
+                    .cloned()
+                    .collect();
+                let (fact_rows, attr_rows) = materialize_facts_only(&run_id, &unique);
+                let tx = self.conn.unchecked_transaction()?;
+                upsert_facts(&tx, &fact_rows)?;
+                upsert_fact_attributes(&tx, &attr_rows)?;
+                tx.commit()?;
+            }
+
+            let bundle = materialize_run(report, &[]);
+            self.write_report_bundle(&bundle)
+        })();
+        if let Err(error) = result {
+            let _ = self.clear_run(&run_id);
+            return Err(error);
+        }
         Ok(run_id)
     }
 
     /// Materialize facts only (in-memory rule evaluation).
     pub fn materialize_facts(&self, run_id: &str, facts: &[Fact]) -> Result<(), DuckError> {
-        let (fact_rows, attr_rows) = materialize_facts_only(run_id, facts);
         let tx = self.conn.unchecked_transaction()?;
         for stmt in delete_run_statements(run_id) {
             tx.execute(&stmt, [])?;
         }
-        upsert_facts(&tx, &fact_rows)?;
-        upsert_fact_attributes(&tx, &attr_rows)?;
+        for chunk in facts.chunks(FACT_WRITE_CHUNK) {
+            let (fact_rows, attr_rows) = materialize_facts_only(run_id, chunk);
+            upsert_facts(&tx, &fact_rows)?;
+            upsert_fact_attributes(&tx, &attr_rows)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -134,14 +182,11 @@ impl DuckStore {
         Ok(QueryResult { columns, rows })
     }
 
-    fn write_run_bundle(&self, bundle: &MaterializedRun) -> Result<(), DuckError> {
+    /// Finish a chunked persistence run. Fact tables were written first; the run
+    /// header is the commit marker that makes the snapshot visible to analytics.
+    fn write_report_bundle(&self, bundle: &MaterializedRun) -> Result<(), DuckError> {
         let tx = self.conn.unchecked_transaction()?;
-        for stmt in delete_run_statements(&bundle.run.run_id) {
-            tx.execute(&stmt, [])?;
-        }
         upsert_run(&tx, &bundle.run)?;
-        upsert_facts(&tx, &bundle.facts)?;
-        upsert_fact_attributes(&tx, &bundle.fact_attributes)?;
         upsert_findings(&tx, &bundle.findings)?;
         upsert_finding_tags(&tx, &bundle.finding_tags)?;
         upsert_finding_affects(&tx, &bundle.finding_affects)?;
@@ -183,7 +228,7 @@ fn upsert_run(conn: &Connection, run: &RunRow) -> Result<(), DuckError> {
 fn upsert_facts(conn: &Connection, rows: &[FactRow]) -> Result<(), DuckError> {
     for row in rows {
         conn.execute(
-            "INSERT OR REPLACE INTO facts (
+            "INSERT INTO facts (
                 run_id, fact_id, kind, subject, confidence, extractor,
                 source_locator, source_line, source_inner
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -206,7 +251,7 @@ fn upsert_facts(conn: &Connection, rows: &[FactRow]) -> Result<(), DuckError> {
 fn upsert_fact_attributes(conn: &Connection, rows: &[FactAttributeRow]) -> Result<(), DuckError> {
     for row in rows {
         conn.execute(
-            "INSERT OR REPLACE INTO fact_attributes (
+            "INSERT INTO fact_attributes (
                 run_id, fact_id, key, val_type, val_str, val_int, val_float, val_bool
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![

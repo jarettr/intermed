@@ -27,7 +27,7 @@ use crate::forge_annotation;
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan/parse logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r16");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r19");
 
 pub struct MetadataCollector;
 
@@ -57,7 +57,16 @@ impl Collector for MetadataCollector {
         let cache = ctx.jar_cache;
         let collector_id = self.id();
         let metadata_level = ctx.settings.metadata.level;
-        let cache_version = format!("{CACHE_VERSION}-{}", metadata_level_name(metadata_level));
+        let expected_loader = ctx
+            .store
+            .by_kind(kind::ENVIRONMENT)
+            .find_map(|fact| fact.attr("loader").and_then(Loader::parse))
+            .or_else(|| crate::env::loader_for_target(ctx.target));
+        let loader_scope = expected_loader.map_or("unknown", |loader| loader.as_str());
+        let cache_version = format!(
+            "{CACHE_VERSION}-{}-{loader_scope}",
+            metadata_level_name(metadata_level)
+        );
         let scanned: Vec<(PathBuf, String, CachedJarOutcome)> = jars
             .par_iter()
             .map(|jar| {
@@ -68,9 +77,9 @@ impl Collector for MetadataCollector {
                     .to_string();
                 let outcome = match cache {
                     Some(cache) => cache.get_or_scan(collector_id, &cache_version, jar, || {
-                        scan_jar_cached(jar, metadata_level)
+                        scan_jar_cached(jar, metadata_level, expected_loader)
                     }),
-                    None => scan_jar_cached(jar, metadata_level),
+                    None => scan_jar_cached(jar, metadata_level, expected_loader),
                 };
                 (jar.clone(), name, outcome)
             })
@@ -93,6 +102,7 @@ impl Collector for MetadataCollector {
                         ctx.store
                             .fact(self.id(), kind::SCAN_TRUNCATED)
                             .subject(name.clone())
+                            .attr("layer", "metadata")
                             .attr("reason", reason)
                             .source(SourceRef::file(jar.display().to_string()))
                             .confidence(0.9)
@@ -112,6 +122,22 @@ impl Collector for MetadataCollector {
                         .attr("failure_class", "no-manifest")
                         .source(SourceRef::file(jar.display().to_string()))
                         .confidence(0.7)
+                        .emit();
+                    emitted += 1;
+                }
+                CachedJarOutcome::InvalidDescriptor { manifest, reason } => {
+                    failed += 1;
+                    let active_for_instance = expected_loader.is_none_or(|loader| {
+                        preferred_descriptor(Some(loader)) == descriptor_for_manifest(&manifest)
+                    });
+                    ctx.store
+                        .fact(self.id(), kind::INVALID_METADATA)
+                        .subject(name.clone())
+                        .attr("reason", reason)
+                        .attr("manifest", manifest.clone())
+                        .attr("active_for_instance", active_for_instance)
+                        .source(SourceRef::inside(jar.display().to_string(), manifest))
+                        .confidence(0.95)
                         .emit();
                     emitted += 1;
                 }
@@ -160,6 +186,7 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
             .attr("reason", "missing or unparseable mod id")
             .attr("manifest", m.manifest_name)
             .attr("loader", m.loader.as_str())
+            .attr("active_for_instance", true)
             .source(SourceRef::inside(file, m.manifest_name))
             .confidence(0.9)
             .emit();
@@ -287,6 +314,7 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
             .attr("range", dep.range.clone())
             .attr("mandatory", dep.mandatory)
             .attr("relation", dep.relation)
+            .attr("version_dialect", version_dialect_for_loader(m.loader))
             .source(SourceRef::inside(file, m.manifest_name));
         if let Some(feature) = &dep.feature {
             builder = builder.attr("feature", feature.as_str());
@@ -472,6 +500,7 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
                 .attr("related", rel.related)
                 .attr("type", rel.kind)
                 .attr("reason", rel.reason)
+                .attr("archive", file)
                 .source(SourceRef::inside(file, m.manifest_name))
                 .confidence(rel.confidence)
                 .emit();
@@ -491,6 +520,15 @@ fn emit_artifact(ctx: &mut CollectCtx<'_>, m: &Artifact, file: &str) -> usize {
     }
 
     emitted
+}
+
+fn version_dialect_for_loader(loader: Loader) -> &'static str {
+    match loader {
+        Loader::Fabric => "fabric-extended-semver",
+        Loader::Quilt => "quilt",
+        Loader::Forge | Loader::NeoForge => "maven-range",
+        Loader::Paper | Loader::Spigot | Loader::Bukkit | Loader::Vanilla => "generic-semver",
+    }
 }
 
 /// Collect candidate jars from the mods dir and a sibling `plugins/` dir.
@@ -582,11 +620,19 @@ enum CachedJarOutcome {
         truncations: Vec<String>,
     },
     NoManifest,
+    InvalidDescriptor {
+        manifest: String,
+        reason: String,
+    },
     Error(String),
 }
 
-fn scan_jar_cached(path: &Path, metadata_level: MetadataLevel) -> CachedJarOutcome {
-    match parse_jar(path, metadata_level) {
+fn scan_jar_cached(
+    path: &Path,
+    metadata_level: MetadataLevel,
+    expected_loader: Option<Loader>,
+) -> CachedJarOutcome {
+    match parse_jar(path, metadata_level, expected_loader) {
         // No artifacts and nothing truncated: a benign manifest-less jar.
         Ok((artifacts, truncations)) if artifacts.is_empty() && truncations.is_empty() => {
             CachedJarOutcome::NoManifest
@@ -595,7 +641,13 @@ fn scan_jar_cached(path: &Path, metadata_level: MetadataLevel) -> CachedJarOutco
             artifacts: artifacts.iter().map(artifact_to_cached).collect(),
             truncations,
         },
-        Err(e) => CachedJarOutcome::Error(e.as_str().to_string()),
+        Err(e) => match e.descriptor_manifest() {
+            Some(manifest) => CachedJarOutcome::InvalidDescriptor {
+                manifest: manifest.to_string(),
+                reason: e.as_str().to_string(),
+            },
+            None => CachedJarOutcome::Error(e.as_str().to_string()),
+        },
     }
 }
 
@@ -925,11 +977,45 @@ pub(crate) struct DataSignals {
     pub(crate) content: bool,
 }
 
-/// Parse error reduced to a short, fact-friendly string.
-struct ParseErr(String);
+/// Typed parse failure: archive I/O/corruption and descriptor syntax are
+/// operationally different and must never collapse into the same diagnosis.
+#[derive(Debug)]
+struct ParseErr {
+    kind: ParseErrKind,
+    message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParseErrKind {
+    Archive,
+    Descriptor { manifest: &'static str },
+}
+
 impl ParseErr {
+    fn archive(message: impl Into<String>) -> Self {
+        Self {
+            kind: ParseErrKind::Archive,
+            message: message.into(),
+        }
+    }
+
+    fn descriptor(manifest: &'static str, message: impl Into<String>) -> Self {
+        let detail = message.into();
+        Self {
+            kind: ParseErrKind::Descriptor { manifest },
+            message: format!("{manifest}: {detail}"),
+        }
+    }
+
     fn as_str(&self) -> &str {
-        &self.0
+        &self.message
+    }
+
+    fn descriptor_manifest(&self) -> Option<&'static str> {
+        match self.kind {
+            ParseErrKind::Descriptor { manifest } => Some(manifest),
+            ParseErrKind::Archive => None,
+        }
     }
 }
 
@@ -954,11 +1040,33 @@ fn read_entry_bytes<R: Read + Seek>(
     bounded_zip::read_zip_bytes_bounded(archive, name, cap_for(name)).unwrap_or_default()
 }
 
-/// Sweep every entry once and report those whose declared uncompressed size
-/// exceeds the per-entry cap, so an oversized/crafted archive surfaces a
-/// `scan_truncated` reason rather than silently losing the skipped entry. The
-/// bounded readers above enforce the cap regardless of what the header claims;
-/// this sweep is the reporting half.
+/// Whether this collector can consume an entry as metadata or bytecode input.
+/// Large assets still remain bounded by the ZIP layer, but they must not make a
+/// metadata scan look incomplete when this collector never intended to read
+/// them (music files were the motivating real-world case).
+fn is_metadata_scan_entry(name: &str) -> bool {
+    matches!(
+        name,
+        "fabric.mod.json"
+            | "quilt.mod.json"
+            | "paper-plugin.yml"
+            | "plugin.yml"
+            | "META-INF/mods.toml"
+            | "META-INF/neoforge.mods.toml"
+            | "META-INF/MANIFEST.MF"
+            | "META-INF/accesstransformer.cfg"
+            | "META-INF/coremods.json"
+            | "META-INF/jarjar/metadata.json"
+    ) || name.ends_with(".class")
+        || name.ends_with(".mixins.json")
+        || name.ends_with("-refmap.json")
+        || name.ends_with(".accesswidener")
+        || is_nested_jar(name)
+}
+
+/// Report oversized entries only when they are inputs to this collector. The
+/// bounded ZIP readers enforce caps for every attempted read; this sweep is
+/// solely the user-facing completeness diagnostic.
 fn oversized_entries<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<String> {
     let mut out = Vec::new();
     for i in 0..archive.len() {
@@ -969,6 +1077,9 @@ fn oversized_entries<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<St
             continue;
         }
         let name = entry.name().to_string();
+        if !is_metadata_scan_entry(&name) {
+            continue;
+        }
         let cap = cap_for(&name);
         if entry.size() > cap {
             out.push(format!(
@@ -984,6 +1095,7 @@ fn oversized_entries<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<St
 /// it works on both on-disk jars and in-memory nested jars.
 fn parse_archive<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
+    expected_loader: Option<Loader>,
 ) -> Result<Vec<Artifact>, ParseErr> {
     // Universal server plugins (e.g. ViaVersion) may bundle a mod manifest for
     // proxy-side hooks; the Bukkit/Paper plugin descriptor stays the *primary*
@@ -991,29 +1103,103 @@ fn parse_archive<R: Read + Seek>(
     // loader-mismatch false positives the ordering deliberately prevents). The
     // co-present mod manifest is recorded as a non-rule `secondary` identity so
     // the second role is not lost.
-    if let Some(text) = read_entry(archive, "paper-plugin.yml") {
-        let mut a = parse_plugin_yml(&text, Loader::Paper, "paper-plugin.yml")?;
-        a.secondary = detect_secondary_mod(archive);
-        return Ok(vec![a]);
+    let preferred = preferred_descriptor(expected_loader);
+    let mut first_inactive_error = None;
+    for descriptor in descriptor_order(expected_loader) {
+        let parsed = match descriptor {
+            Descriptor::Paper => read_entry(archive, "paper-plugin.yml").map(|text| {
+                parse_plugin_yml(&text, Loader::Paper, "paper-plugin.yml").map(|mut artifact| {
+                    artifact.secondary = detect_secondary_mod(archive);
+                    vec![artifact]
+                })
+            }),
+            Descriptor::Bukkit => read_entry(archive, "plugin.yml").map(|text| {
+                parse_plugin_yml(&text, Loader::Bukkit, "plugin.yml").map(|mut artifact| {
+                    artifact.secondary = detect_secondary_mod(archive);
+                    vec![artifact]
+                })
+            }),
+            Descriptor::Fabric => read_entry(archive, "fabric.mod.json")
+                .map(|text| parse_fabric(&text).map(|artifact| vec![artifact])),
+            Descriptor::Quilt => read_entry(archive, "quilt.mod.json")
+                .map(|text| parse_quilt(&text).map(|artifact| vec![artifact])),
+            Descriptor::NeoForge => read_entry(archive, "META-INF/neoforge.mods.toml")
+                .map(|text| parse_forge_toml(&text, Loader::NeoForge)),
+            Descriptor::Forge => read_entry(archive, "META-INF/mods.toml")
+                .map(|text| parse_forge_toml(&text, Loader::Forge)),
+        };
+        if let Some(result) = parsed {
+            match result {
+                Ok(artifacts) => return Ok(artifacts),
+                Err(error) if Some(descriptor) == preferred => return Err(error),
+                Err(error) => {
+                    // With no matching instance descriptor, continue looking for
+                    // a valid co-present identity. Report the first syntax error
+                    // only when no descriptor can be parsed at all.
+                    first_inactive_error.get_or_insert(error);
+                }
+            }
+        }
     }
-    if let Some(text) = read_entry(archive, "plugin.yml") {
-        let mut a = parse_plugin_yml(&text, Loader::Bukkit, "plugin.yml")?;
-        a.secondary = detect_secondary_mod(archive);
-        return Ok(vec![a]);
+    first_inactive_error.map_or_else(|| Ok(Vec::new()), Err)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Descriptor {
+    Paper,
+    Bukkit,
+    Fabric,
+    Quilt,
+    NeoForge,
+    Forge,
+}
+
+/// Active-instance descriptor first, then deterministic fallbacks. A malformed
+/// inactive descriptor can no longer shadow a valid active one merely because
+/// its filename happened to appear earlier in a global priority list.
+fn descriptor_order(expected_loader: Option<Loader>) -> Vec<Descriptor> {
+    let preferred = preferred_descriptor(expected_loader);
+    let mut order = Vec::with_capacity(6);
+    if let Some(preferred) = preferred {
+        order.push(preferred);
     }
-    if let Some(text) = read_entry(archive, "fabric.mod.json") {
-        return parse_fabric(&text).map(|a| vec![a]);
+    for descriptor in [
+        Descriptor::Paper,
+        Descriptor::Bukkit,
+        Descriptor::Fabric,
+        Descriptor::Quilt,
+        Descriptor::NeoForge,
+        Descriptor::Forge,
+    ] {
+        if Some(descriptor) != preferred {
+            order.push(descriptor);
+        }
     }
-    if let Some(text) = read_entry(archive, "quilt.mod.json") {
-        return parse_quilt(&text).map(|a| vec![a]);
+    order
+}
+
+fn preferred_descriptor(expected_loader: Option<Loader>) -> Option<Descriptor> {
+    match expected_loader {
+        Some(Loader::Paper | Loader::Spigot) => Some(Descriptor::Paper),
+        Some(Loader::Bukkit) => Some(Descriptor::Bukkit),
+        Some(Loader::Fabric) => Some(Descriptor::Fabric),
+        Some(Loader::Quilt) => Some(Descriptor::Quilt),
+        Some(Loader::NeoForge) => Some(Descriptor::NeoForge),
+        Some(Loader::Forge) => Some(Descriptor::Forge),
+        Some(Loader::Vanilla) | None => None,
     }
-    if let Some(text) = read_entry(archive, "META-INF/neoforge.mods.toml") {
-        return parse_forge_toml(&text, Loader::NeoForge);
+}
+
+fn descriptor_for_manifest(manifest: &str) -> Option<Descriptor> {
+    match manifest {
+        "paper-plugin.yml" => Some(Descriptor::Paper),
+        "plugin.yml" => Some(Descriptor::Bukkit),
+        "fabric.mod.json" => Some(Descriptor::Fabric),
+        "quilt.mod.json" => Some(Descriptor::Quilt),
+        "META-INF/neoforge.mods.toml" => Some(Descriptor::NeoForge),
+        "META-INF/mods.toml" => Some(Descriptor::Forge),
+        _ => None,
     }
-    if let Some(text) = read_entry(archive, "META-INF/mods.toml") {
-        return parse_forge_toml(&text, Loader::Forge);
-    }
-    Ok(Vec::new())
 }
 
 /// When a plugin jar also ships a mod manifest, return its `"loader:id"` so the
@@ -1048,6 +1234,7 @@ fn is_nested_jar(name: &str) -> bool {
 fn collect_bundled<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     depth: u8,
+    expected_loader: Option<Loader>,
     out: &mut Vec<(String, String)>,
 ) {
     if depth == 0 {
@@ -1066,7 +1253,7 @@ fn collect_bundled<R: Read + Seek>(
         let Ok(mut inner) = zip::ZipArchive::new(Cursor::new(bytes)) else {
             continue;
         };
-        if let Ok(arts) = parse_archive(&mut inner) {
+        if let Ok(arts) = parse_archive(&mut inner, expected_loader) {
             for a in arts {
                 if !a.id.is_empty() {
                     // Resolve the nested jar's own `${file.jarVersion}` against
@@ -1076,22 +1263,24 @@ fn collect_bundled<R: Read + Seek>(
                 }
             }
         }
-        collect_bundled(&mut inner, depth - 1, out);
+        collect_bundled(&mut inner, depth - 1, expected_loader, out);
     }
 }
 
 fn parse_jar(
     path: &Path,
     metadata_level: MetadataLevel,
+    expected_loader: Option<Loader>,
 ) -> Result<(Vec<Artifact>, Vec<String>), ParseErr> {
-    let file = std::fs::File::open(path).map_err(|e| ParseErr(format!("open: {e}")))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|e| ParseErr(format!("zip: {e}")))?;
+    let file = std::fs::File::open(path).map_err(|e| ParseErr::archive(format!("open: {e}")))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| ParseErr::archive(format!("zip: {e}")))?;
 
     // Report entries skipped by the per-entry caps (the bounded readers enforce
     // them; this is the diagnostic half).
     let truncations = oversized_entries(&mut archive);
 
-    let mut artifacts = parse_archive(&mut archive)?;
+    let mut artifacts = parse_archive(&mut archive, expected_loader)?;
     if artifacts.is_empty() {
         artifacts = forge_annotation::discover_mods_from_jar(&mut archive);
     } else if artifacts
@@ -1118,7 +1307,7 @@ fn parse_jar(
 
     // Attach bundled Jar-in-Jar providers to the primary artifact.
     let mut bundled = Vec::new();
-    collect_bundled(&mut archive, MAX_NEST_DEPTH, &mut bundled);
+    collect_bundled(&mut archive, MAX_NEST_DEPTH, expected_loader, &mut bundled);
     if !bundled.is_empty() {
         bundled.sort();
         bundled.dedup();
@@ -1376,8 +1565,8 @@ fn parse_coremods(text: &str) -> Vec<String> {
 }
 
 fn parse_fabric(text: &str) -> Result<Artifact, ParseErr> {
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| ParseErr(format!("fabric.mod.json: {e}")))?;
+    let v: serde_json::Value = intermed_doctor_core::fabric_json::parse_value(text)
+        .map_err(|e| ParseErr::descriptor("fabric.mod.json", e.to_string()))?;
     let id = v
         .get("id")
         .and_then(|x| x.as_str())
@@ -1508,11 +1697,11 @@ fn push_fabric_dep_map(
 }
 
 fn parse_quilt(text: &str) -> Result<Artifact, ParseErr> {
-    let v: serde_json::Value =
-        serde_json::from_str(text).map_err(|e| ParseErr(format!("quilt.mod.json: {e}")))?;
+    let v: serde_json::Value = serde_json::from_str(text)
+        .map_err(|e| ParseErr::descriptor("quilt.mod.json", e.to_string()))?;
     let ql = v
         .get("quilt_loader")
-        .ok_or_else(|| ParseErr("quilt.mod.json: no quilt_loader".into()))?;
+        .ok_or_else(|| ParseErr::descriptor("quilt.mod.json", "no quilt_loader"))?;
     let id = ql
         .get("id")
         .and_then(|x| x.as_str())
@@ -1672,18 +1861,18 @@ fn quilt_provides_id(v: &serde_json::Value) -> Option<String> {
 }
 
 fn parse_forge_toml(text: &str, loader: Loader) -> Result<Vec<Artifact>, ParseErr> {
-    let v: toml::Value = text
-        .parse()
-        .map_err(|e| ParseErr(format!("mods.toml: {e}")))?;
-    let mods = v
-        .get("mods")
-        .and_then(|m| m.as_array())
-        .ok_or_else(|| ParseErr("mods.toml: no [[mods]]".into()))?;
     let manifest_name = if loader == Loader::NeoForge {
         "META-INF/neoforge.mods.toml"
     } else {
         "META-INF/mods.toml"
     };
+    let v: toml::Value = text
+        .parse::<toml::Value>()
+        .map_err(|e| ParseErr::descriptor(manifest_name, e.to_string()))?;
+    let mods = v
+        .get("mods")
+        .and_then(|m| m.as_array())
+        .ok_or_else(|| ParseErr::descriptor(manifest_name, "no [[mods]]"))?;
     let mut out = Vec::new();
     for entry in mods {
         let id = entry
@@ -1822,8 +2011,8 @@ fn parse_plugin_yml(
     loader: Loader,
     manifest_name: &'static str,
 ) -> Result<Artifact, ParseErr> {
-    let v: serde_yaml::Value =
-        serde_yaml::from_str(text).map_err(|e| ParseErr(format!("{manifest_name}: {e}")))?;
+    let v: serde_yaml::Value = serde_yaml::from_str(text)
+        .map_err(|e| ParseErr::descriptor(manifest_name, e.to_string()))?;
     let id = v
         .get("name")
         .and_then(|x| x.as_str())
@@ -2105,12 +2294,25 @@ fn version_ambiguous(raw: &str) -> bool {
         return false;
     }
     let starts_numeric = |s: &str| s.trim().chars().next().is_some_and(|c| c.is_ascii_digit());
-    // Ambiguous when the first group is a dotted version and a later group also
-    // begins numerically (a second version-looking token), or when an `mc`
-    // game-version prefix preceded a second numeric group.
-    let first_dotted = groups[0].contains('.') && starts_numeric(groups[0]);
-    let later_numeric = groups[1..].iter().any(|g| starts_numeric(g));
-    (first_dotted || had_mc) && later_numeric
+    // A numeric SemVer prerelease (`1.2.3-1`) is not automatically a Minecraft
+    // prefix. Require the leading group to look like an actual game version and
+    // the following component to look like another dotted version. An explicit
+    // `mc` prefix is sufficient game-version evidence, but still needs a numeric
+    // mod-version component after the dash.
+    let game_prefix = looks_like_minecraft_version(groups[0]);
+    let later_version = groups[1..]
+        .iter()
+        .any(|group| starts_numeric(group) && (had_mc || group.contains('.')));
+    game_prefix && later_version
+}
+
+fn looks_like_minecraft_version(value: &str) -> bool {
+    let mut parts = value.split('.');
+    matches!(parts.next(), Some("1"))
+        && parts
+            .next()
+            .and_then(|minor| minor.parse::<u16>().ok())
+            .is_some_and(|minor| (7..=99).contains(&minor))
 }
 
 fn classify_entrypoint(phase: &str, class: &str) -> &'static str {
@@ -2327,12 +2529,39 @@ mod version_tests {
         assert!(!version_ambiguous("1.2.3"));
         assert!(!version_ambiguous("4.0.0+build.7"));
         assert!(!version_ambiguous("1.0.0-alpha")); // alpha is not a second version
+        assert!(!version_ambiguous("1.2.3-1")); // valid numeric SemVer prerelease
+    }
+}
+
+#[cfg(test)]
+mod fabric_json_compat_tests {
+    use super::parse_fabric;
+
+    #[test]
+    fn literal_newlines_inside_strings_match_fabric_loader() {
+        let artifact = parse_fabric(
+            "{\"schemaVersion\":1,\"id\":\"multiline\",\"version\":\"1.0.0\",\
+             \"description\":\"first line\nsecond line\"}",
+        )
+        .expect("Fabric Loader accepts physical newlines inside quoted strings");
+        assert_eq!(artifact.id, "multiline");
+        assert_eq!(
+            artifact.description.as_deref(),
+            Some("first line\nsecond line")
+        );
+    }
+
+    #[test]
+    fn structural_json_errors_remain_errors() {
+        assert!(parse_fabric("{\"schemaVersion\":1,\"id\":}").is_err());
+        assert!(parse_fabric("{not valid json").is_err());
     }
 }
 
 #[cfg(test)]
 mod jar_version_tests {
     use super::{MetadataLevel, bounded_zip, parse_jar};
+    use intermed_doctor_core::Loader;
     use std::io::Write;
 
     fn write_jar(entries: &[(&str, &str)]) -> std::path::PathBuf {
@@ -2372,7 +2601,7 @@ mod jar_version_tests {
                 "Manifest-Version: 1.0\nImplementation-Version: 11.13.2+forge\n",
             ),
         ]);
-        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic, None).expect("parse");
         let jade = arts.iter().find(|a| a.id == "jade").expect("jade");
         assert_eq!(jade.version, "11.13.2+forge");
         std::fs::remove_dir_all(jar.parent().unwrap()).ok();
@@ -2386,8 +2615,54 @@ mod jar_version_tests {
             "META-INF/mods.toml",
             "[[mods]]\nmodId=\"x\"\nversion=\"${file.jarVersion}\"\n",
         )]);
-        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        let (arts, _trunc) = parse_jar(&jar, MetadataLevel::Basic, None).expect("parse");
         assert_eq!(arts[0].version, "${file.jarVersion}");
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn active_instance_descriptor_wins_over_malformed_inactive_descriptor() {
+        let jar = write_jar(&[
+            ("fabric.mod.json", "{not valid json"),
+            (
+                "META-INF/mods.toml",
+                "[[mods]]\nmodId=\"forge_mod\"\nversion=\"1.0.0\"\n",
+            ),
+        ]);
+
+        let (artifacts, _) = parse_jar(&jar, MetadataLevel::Basic, Some(Loader::Forge))
+            .expect("the active Forge descriptor is valid");
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].id, "forge_mod");
+        assert_eq!(artifacts[0].loader, Loader::Forge);
+
+        let error = parse_jar(&jar, MetadataLevel::Basic, Some(Loader::Fabric))
+            .err()
+            .expect("the same malformed descriptor is active for Fabric");
+        assert!(error.as_str().contains("fabric.mod.json"));
+
+        let (unknown_artifacts, _) = parse_jar(&jar, MetadataLevel::Basic, None)
+            .expect("without an instance, select a valid descriptor rather than a broken one");
+        assert_eq!(unknown_artifacts[0].id, "forge_mod");
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn neoforge_instance_selects_neoforge_descriptor_when_both_exist() {
+        let jar = write_jar(&[
+            (
+                "META-INF/mods.toml",
+                "[[mods]]\nmodId=\"forge_identity\"\nversion=\"1.0.0\"\n",
+            ),
+            (
+                "META-INF/neoforge.mods.toml",
+                "[[mods]]\nmodId=\"neoforge_identity\"\nversion=\"1.0.0\"\n",
+            ),
+        ]);
+        let (artifacts, _) = parse_jar(&jar, MetadataLevel::Basic, Some(Loader::NeoForge))
+            .expect("parse NeoForge descriptor");
+        assert_eq!(artifacts[0].id, "neoforge_identity");
+        assert_eq!(artifacts[0].loader, Loader::NeoForge);
         std::fs::remove_dir_all(jar.parent().unwrap()).ok();
     }
 
@@ -2416,7 +2691,7 @@ mod jar_version_tests {
             "a".repeat((bounded_zip::MAX_MANIFEST_BYTES as usize) + 16)
         );
         let jar = write_jar(&[("fabric.mod.json", &huge)]);
-        let (arts, trunc) = parse_jar(&jar, MetadataLevel::Basic).ok().expect("parse");
+        let (arts, trunc) = parse_jar(&jar, MetadataLevel::Basic, None).expect("parse");
         assert!(
             arts.is_empty(),
             "oversized manifest must not yield an artifact"
@@ -2426,6 +2701,24 @@ mod jar_version_tests {
                 .iter()
                 .any(|t| t.contains("fabric.mod.json") && t.contains("cap")),
             "expected a scan_truncated reason, got: {trunc:?}"
+        );
+        std::fs::remove_dir_all(jar.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn oversized_media_does_not_mark_metadata_scan_incomplete() {
+        let descriptor = r#"{"id":"music_mod","version":"1.0.0"}"#;
+        let huge_media = "x".repeat((bounded_zip::MAX_MANIFEST_BYTES as usize) + 16);
+        let jar = write_jar(&[
+            ("fabric.mod.json", descriptor),
+            ("musicpack/music/theme.mp3", &huge_media),
+            ("assets/music/sounds/theme.ogg", &huge_media),
+        ]);
+        let (arts, trunc) = parse_jar(&jar, MetadataLevel::Basic, None).expect("parse");
+        assert_eq!(arts.len(), 1);
+        assert!(
+            trunc.is_empty(),
+            "irrelevant assets must not imply incomplete metadata: {trunc:?}"
         );
         std::fs::remove_dir_all(jar.parent().unwrap()).ok();
     }

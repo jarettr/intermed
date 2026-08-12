@@ -357,7 +357,7 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
     fn id(&self) -> &'static str {
         "script-dynamics"
     }
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let recipes: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_RECIPE).collect();
         let items: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_ITEM).collect();
         let loot_tables: Vec<&_> = ctx
@@ -366,7 +366,7 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
             .collect();
         let tags: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_TAG).collect();
         if recipes.is_empty() && items.is_empty() && loot_tables.is_empty() && tags.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let all_facts: Vec<&intermed_doctor_core::facts::Fact> = recipes
@@ -419,7 +419,7 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
         for fact in &all_facts {
             builder = builder.evidence(EvidenceEdge::subject(fact.id));
         }
-        vec![builder.build()]
+        Ok(vec![builder.build()])
     }
 }
 
@@ -618,6 +618,6 @@ mod tests {
             spark_report: None,
         };
         let ctx = RuleCtx::for_test(&store, &target);
-        assert!(ScriptDynamicsRule.evaluate(&ctx).is_empty());
+        assert!(ScriptDynamicsRule.evaluate(&ctx).unwrap().is_empty());
     }
 }

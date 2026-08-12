@@ -22,6 +22,26 @@ Dependency findings appear in a normal `doctor` run:
 A bundled (Jar-in-Jar) library counts as installed: if a mod ships its dependency
 inside itself, that dependency is satisfied and not reported missing.
 
+## Version languages
+
+Ranges are interpreted in the language selected by the declaring loader, not as
+one universal SemVer dialect:
+
+- Fabric dependencies use Fabric Loader extended SemVer. Build metadata does not
+  affect ordering, and prereleases are compared directly. For example,
+  `1.0.2-rc1+1.20` satisfies `>=1.0.0` because the `1.0.2` release tuple is newer.
+- Forge and NeoForge dependencies use Maven interval syntax such as `[47,)` and
+  `[1.0,2.0)`.
+- Quilt is represented separately so its dependency language can remain distinct
+  from Fabric metadata.
+- Generic and opaque metadata stays conservative: an unsupported comparison is
+  undecidable, not an incompatible-version error.
+
+The same decision is reused by doctor findings, `impact update`, and the PubGrub
+whole-pack resolver. An undecidable installed candidate is admitted to global
+resolution, preventing an uncertain edge from becoming a false
+`dependency-unsat:global` error.
+
 ## Implicit dependencies
 
 Some dependencies are never declared but are visible in a mod's data. A recipe

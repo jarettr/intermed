@@ -19,7 +19,7 @@
 //! feature — the engine is pure Rust — so it is always available.
 
 use intermed_columnar::{QueryEngine, RelExpr, Value};
-use intermed_doctor_core::evidence::{Category, Finding, Severity};
+use intermed_doctor_core::evidence::Finding;
 use intermed_doctor_core::facts::{Fact, FactId};
 use intermed_doctor_core::{Rule, RuleCtx};
 
@@ -53,20 +53,9 @@ impl Rule for ColumnarRulePack {
         "columnar-rule-pack"
     }
 
-    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<Finding> {
-        match run_columnar(&self.pack, ctx) {
-            Ok(findings) => findings,
-            Err(e) => vec![
-                Finding::builder("columnar-rule-pack", "columnar-backend-failed")
-                    .severity(Severity::Fatal)
-                    .category(Category::Runtime)
-                    .title("Columnar backend failed")
-                    .explanation(e.to_string())
-                    .tag("logic")
-                    .tag("columnar")
-                    .build(),
-            ],
-        }
+    fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
+        run_columnar(&self.pack, ctx)
+            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))
     }
 }
 
@@ -209,7 +198,7 @@ mod tests {
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
 
-        let columnar = ColumnarRulePack::default().evaluate(&ctx);
+        let columnar = ColumnarRulePack::default().evaluate(&ctx).unwrap();
         // Same pack via the interpreter.
         let interp = evaluate_pack(&default_core_pack_v2(), &ctx);
 

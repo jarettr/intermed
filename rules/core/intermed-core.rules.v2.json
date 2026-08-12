@@ -1,7 +1,7 @@
 {
   "schema": "intermed-rule-pack-v2",
   "id": "intermed-core",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "publisher": "intermed",
   "rules": [
     {
@@ -24,10 +24,10 @@
     {
       "id": "known-incompatible-mods",
       "kind": "join",
-      "left": { "kind": "mod_relationship", "alias": "r", "select": ["subject", "attr:related", "attr:type", "attr:reason"] },
-      "right": { "kind": "mod", "alias": "m2", "select": ["subject"] },
+      "left": { "kind": "mod_relationship", "alias": "r", "select": ["subject", "attr:related", "attr:type", "attr:reason", "attr:archive"] },
+      "right": { "kind": "mod", "alias": "m2", "select": ["subject", "attr:file"] },
       "on": "r.related = m2.subject",
-      "where": "r.type = 'known_incompatible' AND r.subject < r.related",
+      "where": "r.type = 'known_incompatible' AND r.subject < r.related AND r.archive != m2.file",
       "finding": {
         "id": "known-incompatible:{r.subject}->{r.related}",
         "rule_id": "known-incompatible",
@@ -491,6 +491,37 @@
         "explanation": "No META-INF/*.SF signature block was found. Most Fabric/Forge mods ship unsigned; this is informational only.",
         "fix": "Verify mod source manually if supply-chain trust matters.",
         "tags": ["sbom", "signature"]
+      }
+    },
+    {
+      "id": "scan-incomplete",
+      "kind": "fact-finding",
+      "input_kinds": ["scan_truncated"],
+      "finding": {
+        "id": "scan-incomplete:{attr:layer}:{subject}",
+        "rule_id": "scan-incomplete",
+        "severity": "warn",
+        "category": "runtime",
+        "title": "Incomplete {attr:layer} analysis: {subject}",
+        "explanation": "The {attr:layer} scanner could not fully analyze this input: {attr:reason}. Findings that depend on the omitted scope are inconclusive rather than confirmed absent.",
+        "fix": "Inspect the cited input and scanner limit/namespace message; provide a supported artifact or raise the relevant bounded-scan limit only when the input is trusted.",
+        "tags": ["scan", "incomplete"]
+      }
+    },
+    {
+      "id": "invalid-active-metadata",
+      "kind": "fact-finding",
+      "input_kinds": ["invalid_metadata"],
+      "where_all": { "attr:active_for_instance": "true" },
+      "finding": {
+        "id": "invalid-active-metadata:{subject}",
+        "rule_id": "invalid-active-metadata",
+        "severity": "error",
+        "category": "metadata",
+        "title": "Invalid active mod descriptor: {subject}",
+        "explanation": "The descriptor selected for this instance ({attr:manifest}) is malformed or incomplete: {attr:reason}. The archive itself may still be a valid ZIP, but the active loader cannot reliably identify or load it.",
+        "fix": "Install a version built for this instance loader, or repair the named descriptor; re-downloading is only useful if the metadata was damaged in transit.",
+        "tags": ["metadata", "descriptor"]
       }
     },
     {

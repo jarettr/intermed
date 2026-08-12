@@ -20,6 +20,7 @@ complete = false
 [kind.target]
 subject = "target"
 complete = false
+reserved = true
 
 [kind.mod]
 subject = "mod id"
@@ -45,6 +46,7 @@ complete = true
 attrs.reason = "string"
 attrs.manifest = "string"
 attrs.loader = "string"
+attrs.active_for_instance = "bool"
 
 [kind.secondary_identity]
 subject = "secondary identity"
@@ -58,6 +60,7 @@ attrs.range = "string"
 attrs.mandatory = "bool"
 attrs.relation = "string"
 attrs.feature = "string"
+attrs.version_dialect = "string"
 
 [kind.provided_dependency]
 subject = "provided dependency"
@@ -89,6 +92,7 @@ complete = true
 attrs.related = "string"
 attrs.type = "string"
 attrs.reason = "string"
+attrs.archive = "string"
 
 [kind.mod_capability]
 subject = "mod id"
@@ -466,6 +470,7 @@ complete = false
 [kind.writes_files]
 subject = "writes files"
 complete = false
+reserved = true
 
 [kind.security_suspect_modification]
 subject = "security suspect modification"
@@ -488,6 +493,7 @@ attrs.reason = "string"
 subject = "archive file name"
 complete = true
 attrs.status = "string"
+attrs.material = "string"
 attrs.jar_signed = "bool"
 
 [kind.sbom]
@@ -529,3 +535,4 @@ complete = false
 [kind.deferred_layer]
 subject = "deferred layer"
 complete = false
+reserved = true

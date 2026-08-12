@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Layer H — SBOM / provenance / packaging hygiene (Phase 6)."
+description = "SBOM, provenance, packaging hygiene, and JAR signature verification."
 
 [dependencies]
 chrono.workspace = true

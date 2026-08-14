@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH intermed 1  "intermed 0.1.4-alpha"
+.TH intermed 1  "intermed 0.1.5-alpha"
 .SH NAME
 intermed \- InterMed — Minecraft modpack/server evidence engine
 .SH SYNOPSIS
@@ -15,7 +15,7 @@ See docs/guides/quickstart.md for copy\-paste recipes for every subcommand.
 Config file (`intermed\-config\-v1` TOML). Overrides discovery; see docs/reference/configuration.md
 .TP
 \fB\-\-dump\-config\fR
-Print the effective default config as TOML and exit (no subcommand required)
+Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional
 .TP
 \fB\-\-quiet\fR
 Suppress informational progress messages on stderr (errors still print)
@@ -84,4 +84,4 @@ Examples:
 
 More: docs/guides/quickstart.md | Reference: docs/reference/commands.md | Man: docs/man/intermed.1
 .SH VERSION
-v0.1.4\-alpha
+v0.1.5\-alpha

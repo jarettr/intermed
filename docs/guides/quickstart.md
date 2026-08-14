@@ -46,7 +46,7 @@ The process exit code follows the lint convention: `0` healthy, `1` warnings,
 ## Going deeper on one run
 
 ```bash
-intermed doctor ./mods --mixin-risk          # add the mixin analysis
+intermed doctor ./mods --mixin-level standard # add the mixin analysis
 intermed doctor ./mods --resource-level full # parse every resource domain
 intermed doctor ./mods --explain <finding-id># show the evidence behind one finding
 intermed doctor ./mods --json > report.json  # machine-readable
@@ -58,7 +58,7 @@ intermed doctor ./mods --html report.html    # a self-contained HTML report
 ```bash
 # doctor — the main diagnosis
 intermed doctor ./mods
-intermed doctor ./server --mixin-risk --performance --json
+intermed doctor ./server --mixin-level standard --performance --json
 
 # vfs — resource/data overrides
 intermed vfs scan ./mods                      # who writes which file

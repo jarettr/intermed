@@ -24,10 +24,8 @@ pub fn mod_id_from_mods_toml(text: &str) -> Option<String> {
         if l.starts_with('[') {
             in_mods = false;
         }
-        if in_mods {
-            if let Some(value) = parse_mod_id_assignment(l) {
-                return Some(value);
-            }
+        if in_mods && let Some(value) = parse_mod_id_assignment(l) {
+            return Some(value);
         }
     }
     // Fallback for malformed files with no `[[mods]]` header: first `modId` line.

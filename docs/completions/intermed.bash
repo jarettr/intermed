@@ -1231,7 +1231,7 @@ _intermed() {
                     return 0
                     ;;
                 --mixin-level)
-                    COMPREPLY=($(compgen -W "normal detailed full" -- "${cur}"))
+                    COMPREPLY=($(compgen -W "basic standard full" -- "${cur}"))
                     return 0
                     ;;
                 --db)

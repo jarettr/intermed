@@ -112,11 +112,11 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, LabError>
 pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), LabError> {
     let json = serde_json::to_vec_pretty(value)
         .map_err(|e| LabError::new(format!("serialize {}: {e}", path.display())))?;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| LabError::new(format!("create {}: {e}", parent.display())))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| LabError::new(format!("create {}: {e}", parent.display())))?;
     }
     write_atomic(path, &json).map_err(|e| LabError::new(format!("write {}: {e}", path.display())))
 }

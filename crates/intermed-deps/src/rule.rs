@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, CoverageRequirement, EvidenceEdge, Finding, FixCandidate, ProofKind, Severity,
+};
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{Rule, RuleCtx};
 
@@ -36,10 +38,19 @@ impl Rule for DependencyRule {
 /// plain `missing-dependency` root cause. PubGrub may choose that missing edge as
 /// its derivation even when unrelated optional version warnings exist; emitting
 /// both would duplicate the error and imply a false causal link.
-fn should_emit_pubgrub_unsat(pairwise: &[Finding]) -> bool {
-    !pairwise
-        .iter()
-        .any(|finding| finding.id.starts_with("missing-dependency:"))
+fn should_emit_pubgrub_unsat(
+    pairwise: &[Finding],
+    proof_dependencies: &[(String, String)],
+) -> bool {
+    !proof_dependencies.iter().any(|(from, to)| {
+        let edge = format!("{from}->{to}");
+        pairwise.iter().any(|finding| {
+            finding.id.ends_with(&edge)
+                && (matches!(finding.severity, Severity::Error)
+                    || finding.id.starts_with("provider-identity-unresolved:")
+                    || finding.id.starts_with("dependency-identity-undecidable:"))
+        })
+    })
 }
 
 /// Translate the global PubGrub resolution outcome into at most one finding.
@@ -61,7 +72,9 @@ fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) ->
             explanation,
             proof_packages,
             proof_dependencies,
-        } if should_emit_pubgrub_unsat(pairwise) && !explanation.trim().is_empty() => {
+        } if should_emit_pubgrub_unsat(pairwise, &proof_dependencies)
+            && !explanation.trim().is_empty() =>
+        {
             Some(pubgrub_unsat_finding(
                 ctx,
                 rule_id,
@@ -100,6 +113,8 @@ fn pubgrub_unsat_finding(
     proof_dependencies: &[(String, String)],
 ) -> Finding {
     let mut builder = Finding::builder(rule_id, "dependency-unsat:global")
+        .coverage_requirement(CoverageRequirement::CompletePack)
+        .proof_kind(ProofKind::DeterministicDerivation)
         .severity(Severity::Error)
         .category(Category::Dependency)
         .title("Dependency constraints cannot be satisfied together")
@@ -266,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn unsat_evidence_is_limited_to_derivation_packages() {
+    fn single_pairwise_conflict_deduplicates_global_unsat() {
         let mut store = FactStore::new();
         for (id, version) in [
             ("alpha", "1.0.0"),
@@ -280,14 +295,14 @@ mod tests {
                 .attr("version", version)
                 .emit();
         }
-        let relevant = store
+        store
             .fact("meta", kind::DEPENDENCY)
             .subject("alpha")
             .attr("dep", "beta")
             .attr("range", ">=2.0.0")
             .attr("mandatory", true)
             .emit();
-        let unrelated = store
+        store
             .fact("meta", kind::DEPENDENCY)
             .subject("unrelated")
             .attr("dep", "also-unrelated")
@@ -299,12 +314,16 @@ mod tests {
         let findings = DependencyRule
             .evaluate(&RuleCtx::for_test(&store, &target))
             .unwrap();
-        let unsat = findings
-            .iter()
-            .find(|finding| finding.id == "dependency-unsat:global")
-            .expect("expected global unsat");
-        assert!(unsat.evidence.iter().any(|edge| edge.fact == relevant));
-        assert!(!unsat.evidence.iter().any(|edge| edge.fact == unrelated));
-        assert!(unsat.evidence.len() <= 3, "evidence: {:?}", unsat.evidence);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.id == "wrong-version:alpha->beta")
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.id != "dependency-unsat:global"),
+            "a global UNSAT fully explained by one pairwise conflict is redundant"
+        );
     }
 }

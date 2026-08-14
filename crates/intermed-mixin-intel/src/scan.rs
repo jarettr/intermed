@@ -98,6 +98,7 @@ pub fn scan_mods_dir_filtered(
         .collect();
 
     let mut configs = Vec::new();
+    let mut configs_discovered = 0usize;
     let mut classes = Vec::new();
     let mut failures = Vec::new();
     let mut hierarchy = HierarchyIndex::new();
@@ -109,6 +110,7 @@ pub fn scan_mods_dir_filtered(
         rebind_archive(&mut result, &archive);
         match result {
             CachedMixinJar::Ok(mut partial) => {
+                configs_discovered += partial.configs_discovered;
                 configs.append(&mut partial.configs);
                 classes.append(&mut partial.classes);
                 failures.append(&mut partial.failures);
@@ -123,19 +125,21 @@ pub fn scan_mods_dir_filtered(
         }
     }
 
+    let global_mappings = minecraft_mappings.and_then(load_tiny_mappings_file);
+
     // Optional Minecraft jar broadens the index to MC classes, so apply-failure
     // checks cover vanilla-targeting mixins (not just mod-targeting ones).
-    if let Some(mc_jar) = minecraft_jar {
-        if let Err(e) = ingest_minecraft_jar(mc_jar, &mut target_index) {
+    let minecraft_observation = minecraft_jar.map(|mc_jar| {
+        let observation = ingest_minecraft_jar(mc_jar, &mut target_index, global_mappings.as_ref());
+        if let Some(error) = &observation.error {
             failures.push(MixinScanFailure {
                 archive: mc_jar.display().to_string(),
                 path: None,
-                reason: format!("minecraft jar index: {e}"),
+                reason: format!("minecraft jar index: {error}"),
             });
         }
-    }
-
-    let global_mappings = minecraft_mappings.and_then(load_tiny_mappings_file);
+        observation
+    });
 
     enrich_classes_with_effects(&mut classes);
     let mut analysis = MixinInteractionEngine::new()
@@ -143,7 +147,15 @@ pub fn scan_mods_dir_filtered(
         .analyze(&classes);
     // Phase 4: what classes did the analyzer actually have indexed? Absence-based
     // verdicts read this so they never sound more confident than coverage allows.
-    let classpath_coverage = crate::classpath::ClasspathCoverage::from_index(&target_index);
+    let mut classpath_coverage = crate::classpath::ClasspathCoverage::from_index(&target_index);
+    // The namespace of a supplied artifact is useful provenance even when that
+    // artifact is deliberately rejected for absence checks. Keep observation
+    // separate from accepted coverage: an official-obfuscated jar without an
+    // official mapping edge remains `mods-only`, but the passport must not call
+    // the artifact itself unsupported.
+    if let Some(namespace) = minecraft_observation.and_then(|observation| observation.namespace) {
+        classpath_coverage.minecraft_namespace = namespace.as_str().to_string();
+    }
     let apply_failures = crate::apply_failure::detect_apply_failures(
         &classes,
         &target_index,
@@ -164,6 +176,7 @@ pub fn scan_mods_dir_filtered(
     };
     Ok(assemble_scan(
         dir,
+        configs_discovered,
         configs,
         classes,
         analysis,
@@ -203,13 +216,35 @@ fn load_tiny_mappings_file(path: &Path) -> Option<TinyMappings> {
     TinyMappings::parse(&text)
 }
 
+#[derive(Debug)]
+struct MinecraftJarObservation {
+    namespace: Option<crate::apply_failure::MinecraftClassNamespace>,
+    error: Option<String>,
+}
+
 fn ingest_minecraft_jar(
     jar: &Path,
     target_index: &mut crate::apply_failure::TargetClassIndex,
-) -> Result<(), String> {
-    let file = std::fs::File::open(jar).map_err(|e| format!("open {}: {e}", jar.display()))?;
-    let mut archive =
-        zip::ZipArchive::new(file).map_err(|e| format!("zip {}: {e}", jar.display()))?;
+    mappings: Option<&TinyMappings>,
+) -> MinecraftJarObservation {
+    let file = match std::fs::File::open(jar) {
+        Ok(file) => file,
+        Err(error) => {
+            return MinecraftJarObservation {
+                namespace: None,
+                error: Some(format!("open {}: {error}", jar.display())),
+            };
+        }
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        Err(error) => {
+            return MinecraftJarObservation {
+                namespace: None,
+                error: Some(format!("zip {}: {error}", jar.display())),
+            };
+        }
+    };
     let mut hierarchy = HierarchyIndex::new();
     let mut candidate = crate::apply_failure::TargetClassIndex::new();
     // The vanilla jar is trusted; class-index caps still apply but truncation
@@ -220,29 +255,47 @@ fn ingest_minecraft_jar(
         &mut candidate,
         ClassIndexSource::Minecraft,
     );
-    if !truncations.is_empty() {
-        Err(format!(
+    let namespace = candidate.minecraft_class_namespace();
+    let error = if !truncations.is_empty() {
+        Some(format!(
             "Minecraft class index is incomplete: {}",
             truncations.join("; ")
         ))
-    } else if candidate.minecraft_class_namespace()
-        == crate::apply_failure::MinecraftClassNamespace::Unsupported
+    } else if namespace == crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
+        && mappings.is_some_and(|mapping| {
+            mapping.has_namespace("official")
+                && (mapping.has_namespace("named") || mapping.has_namespace("intermediary"))
+        })
     {
-        Err(
-            "Minecraft artifact uses an unsupported/obfuscated class namespace; \
-             absence checks were disabled (supply a named or intermediary jar)"
-                .to_string(),
-        )
+        candidate.mark_minecraft_coverage_complete();
+        target_index.merge_explicit_minecraft(&candidate);
+        None
+    } else if matches!(
+        namespace,
+        crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
+            | crate::apply_failure::MinecraftClassNamespace::Unsupported
+    ) {
+        Some(format!(
+            "Minecraft artifact uses `{}` class names; absence checks were disabled \
+             because no complete mapping edge connects that artifact to the analyzed targets \
+             (supply a named or intermediary Minecraft jar)",
+            namespace.as_str()
+        ))
     } else {
         candidate.mark_minecraft_coverage_complete();
         target_index.merge_explicit_minecraft(&candidate);
-        Ok(())
+        None
+    };
+    MinecraftJarObservation {
+        namespace: Some(namespace),
+        error,
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn assemble_scan(
     dir: &Path,
+    configs_discovered: usize,
     configs: Vec<MixinConfigRecord>,
     classes: Vec<MixinClassRecord>,
     analysis: MixinAnalysis,
@@ -288,6 +341,7 @@ fn assemble_scan(
     );
     MixinScan {
         target: dir.display().to_string(),
+        configs_discovered,
         configs,
         classes,
         overlaps: analysis.overlaps,
@@ -316,6 +370,8 @@ fn assemble_scan(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct JarScanPartial {
+    #[serde(default)]
+    configs_discovered: usize,
     configs: Vec<MixinConfigRecord>,
     classes: Vec<MixinClassRecord>,
     failures: Vec<MixinScanFailure>,
@@ -359,6 +415,7 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
     })?;
     let mod_id = detect_mod_id(&mut archive).unwrap_or_else(|| archive_stem(&archive_label));
     let config_paths = discover_mixin_configs(&mut archive);
+    let configs_discovered = config_paths.len();
     let tiny = discover_tiny_mappings(&mut archive);
     let runtime_namespace = detect_runtime_namespace(&mut archive);
 
@@ -372,6 +429,7 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
     );
 
     let mut partial = JarScanPartial {
+        configs_discovered,
         configs: Vec::new(),
         classes: Vec::new(),
         failures: Vec::new(),
@@ -397,12 +455,11 @@ fn scan_jar(jar: &Path) -> Result<JarScanPartial, JarScanError> {
                 if let Some(t) = &tiny {
                     mapping = mapping.with_tiny(t.clone());
                 }
-                if let Some(ref rpath) = config.refmap {
-                    if let Some(text) = read_zip_text(&mut archive, rpath) {
-                        if let Ok(refmap) = Refmap::parse(&text) {
-                            mapping = mapping.with_refmap(refmap);
-                        }
-                    }
+                if let Some(ref rpath) = config.refmap
+                    && let Some(text) = read_zip_text(&mut archive, rpath)
+                    && let Ok(refmap) = Refmap::parse(&text)
+                {
+                    mapping = mapping.with_refmap(refmap);
                 }
 
                 let hierarchy = &partial.hierarchy;
@@ -564,10 +621,10 @@ fn discover_tiny_mappings(archive: &mut zip::ZipArchive<std::fs::File>) -> Optio
         "META-INF/mappings.tiny",
         "mappings.tiny",
     ] {
-        if let Some(text) = read_zip_text(archive, name) {
-            if let Some(map) = TinyMappings::parse(&text) {
-                return Some(map);
-            }
+        if let Some(text) = read_zip_text(archive, name)
+            && let Some(map) = TinyMappings::parse(&text)
+        {
+            return Some(map);
         }
     }
     None
@@ -755,11 +812,11 @@ fn unfold_manifest_lines(text: &str) -> Vec<String> {
     let mut logical: Vec<String> = Vec::new();
     for raw in text.split('\n') {
         let line = raw.strip_suffix('\r').unwrap_or(raw);
-        if let Some(cont) = line.strip_prefix(' ') {
-            if let Some(last) = logical.last_mut() {
-                last.push_str(cont);
-                continue;
-            }
+        if let Some(cont) = line.strip_prefix(' ')
+            && let Some(last) = logical.last_mut()
+        {
+            last.push_str(cont);
+            continue;
         }
         logical.push(line.to_string());
     }
@@ -957,6 +1014,48 @@ fn read_zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> O
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    #[test]
+    fn rejected_official_jar_preserves_observed_namespace_without_coverage() {
+        use std::io::Write;
+
+        let path = std::env::temp_dir().join(format!(
+            "intermed-official-observation-{}-{}.jar",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let file = std::fs::File::create(&path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        for index in 0..40 {
+            let name = format!("x{index}");
+            archive
+                .start_file(
+                    format!("{name}.class"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            archive
+                .write_all(&crate::fixtures::class_with_method(&name, "a", "()V"))
+                .unwrap();
+        }
+        archive.finish().unwrap();
+
+        let mappings = TinyMappings::parse(
+            "tiny\t2\t0\tintermediary\tnamed\n\
+             c\tnet/minecraft/class_1297\tnet/minecraft/world/entity/Entity\n",
+        )
+        .unwrap();
+        let mut target_index = crate::apply_failure::TargetClassIndex::new();
+        let observation = ingest_minecraft_jar(&path, &mut target_index, Some(&mappings));
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(
+            observation.namespace,
+            Some(crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated)
+        );
+        assert!(observation.error.is_some());
+        assert!(!target_index.has_minecraft_coverage());
+    }
 
     #[test]
     fn forge_mods_toml_mixins_block_is_parsed() {

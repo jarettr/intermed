@@ -5,7 +5,7 @@ checked, how it is laid out, the invariants every change has to keep, and how to
 add the common kinds of analysis. It is meant to let you make a change that fits
 the grain of the codebase rather than fighting it.
 
-InterMed is `0.1.4-alpha` and moves fast; treat APIs between crates as unstable.
+InterMed is `0.1.5-alpha` and moves fast; treat APIs between crates as unstable.
 
 ## Principles
 

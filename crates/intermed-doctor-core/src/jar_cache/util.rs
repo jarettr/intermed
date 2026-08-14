@@ -76,19 +76,19 @@ pub(crate) fn sha256_file(path: &Path) -> io::Result<String> {
 /// predictable shared location (`/tmp/intermed`) would be a cache-poisoning
 /// vector, so absence of a private directory disables the cache instead.
 pub(crate) fn default_cache_root() -> Option<std::path::PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        if !xdg.is_empty() {
-            return Some(std::path::PathBuf::from(xdg).join("intermed"));
-        }
+    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(std::path::PathBuf::from(xdg).join("intermed"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        if !home.is_empty() {
-            return Some(
-                std::path::PathBuf::from(home)
-                    .join(".cache")
-                    .join("intermed"),
-            );
-        }
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return Some(
+            std::path::PathBuf::from(home)
+                .join(".cache")
+                .join("intermed"),
+        );
     }
     None
 }

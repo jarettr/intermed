@@ -489,11 +489,11 @@ impl JarCache {
         let key = inflight_key(collector_id, cache_version, sha256);
 
         // Tier 1 — memory (only on the trusted-sha path).
-        if allow_memory {
-            if let Some(text) = self.memory.lock().ok().and_then(|m| m.get(&key).cloned()) {
-                self.mem_hits.fetch_add(1, Ordering::Relaxed);
-                return Some(text);
-            }
+        if allow_memory
+            && let Some(text) = self.memory.lock().ok().and_then(|m| m.get(&key).cloned())
+        {
+            self.mem_hits.fetch_add(1, Ordering::Relaxed);
+            return Some(text);
         }
 
         // Tier 2 — disk.
@@ -505,17 +505,15 @@ impl JarCache {
         }
 
         // Tier 3 — remote (validated before it is allowed to populate the disk).
-        if let Some(remote) = &self.remote {
-            if let Some(bytes) = remote.get(&key) {
-                if let Ok(text) = String::from_utf8(bytes) {
-                    if record_header_valid(&text, sha256, cache_version) {
-                        self.remote_hits.fetch_add(1, Ordering::Relaxed);
-                        let _ = self.write_text_to_disk(sha256, &path, &text);
-                        self.mem_put(&key, &text);
-                        return Some(text);
-                    }
-                }
-            }
+        if let Some(remote) = &self.remote
+            && let Some(bytes) = remote.get(&key)
+            && let Ok(text) = String::from_utf8(bytes)
+            && record_header_valid(&text, sha256, cache_version)
+        {
+            self.remote_hits.fetch_add(1, Ordering::Relaxed);
+            let _ = self.write_text_to_disk(sha256, &path, &text);
+            self.mem_put(&key, &text);
+            return Some(text);
         }
         None
     }
@@ -534,14 +532,11 @@ impl JarCache {
     /// recently-used ("hot") entries longer. Debounced via [`PROMOTE_DEBOUNCE_SECS`]
     /// so a run full of repeat hits does not rewrite metadata on every access.
     fn promote_on_hit(&self, path: &Path) {
-        if let Ok(meta) = fs::metadata(path) {
-            if let Ok(modified) = meta.modified() {
-                if modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX)
-                    < PROMOTE_DEBOUNCE_SECS
-                {
-                    return;
-                }
-            }
+        if let Ok(meta) = fs::metadata(path)
+            && let Ok(modified) = meta.modified()
+            && modified.elapsed().map(|e| e.as_secs()).unwrap_or(u64::MAX) < PROMOTE_DEBOUNCE_SECS
+        {
+            return;
         }
         if let Ok(file) = fs::OpenOptions::new().write(true).open(path) {
             let _ = file.set_modified(std::time::SystemTime::now());

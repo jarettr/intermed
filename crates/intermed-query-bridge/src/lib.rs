@@ -135,6 +135,7 @@ mod tests {
                 rule_id: None,
                 severity: "warn".into(),
                 category: "mixin".into(),
+                visibility: "default".into(),
                 title: "t".into(),
                 explanation: "e".into(),
                 fix: None,

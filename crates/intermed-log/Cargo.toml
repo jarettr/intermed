@@ -10,4 +10,5 @@ description = "Layer D — log & crash analyzer. Classifies known failure signat
 rayon.workspace = true
 regex.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 intermed-doctor-core.workspace = true

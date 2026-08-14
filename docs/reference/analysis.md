@@ -146,7 +146,7 @@ See the [Resources guide](../guides/resources.md).
 
 **Reads:** mixin configs (Fabric `fabric.mod.json:mixins`, Forge/NeoForge
 `mods.toml` and the manifest), the compiled handler bytecode, refmaps, and any
-Tiny mappings shipped in the jar. Off unless `--mixin-risk` is set.
+Tiny mappings shipped in the jar. Off unless a non-off `--mixin-level` is selected (`--mixin-risk` selects `standard`).
 
 **Concludes:** the analysis works at the *application site* (one `handler →
 target method → injection point`), not the mixin class. It reports: what each
@@ -227,11 +227,20 @@ See the [Security guide](../guides/security.md).
 **Reads:** crash reports and `latest.log` (or a single log file passed as the
 target).
 
-**Concludes:** known error signatures, the mods a log mentions, and — when a log
-accompanies a mods scan — correlations between logged errors and the mods present.
+**Concludes:** structured runtime incidents with throwable chains, crash anchors,
+physical occurrence ids, semantic fingerprints, owned stack frames, known error
+signatures, and — when a log accompanies a mods scan — correlations between the
+runtime evidence and the scanned artifacts.
 
-**Stops at:** it matches known signatures and references. It does not replay the
-run.
+Log content retained for analysis is bounded to a 64 MiB tail and parsing uses
+bounded buffers. The input checksum is a full-file SHA-256, however, so disk I/O
+for a multi-gigabyte log is not bounded to 64 MiB. Truncation is reported
+explicitly; “bounded” here describes memory and analyzed content, not checksum
+I/O.
+
+**Stops at:** it normalizes and interprets evidence from a completed run. It does
+not replay the run or prove that every earlier log message contributed to the
+crash.
 
 ---
 
@@ -277,12 +286,12 @@ layers; the cross-layer correlations that currently fire:
 | Mixins × Resources | A mixin that mutates a loader (e.g. the recipe manager) is correlated with a static resource conflict at the same data; a worldgen mixin is flagged alongside a worldgen resource it touches. |
 | Mixins × Logs | A runtime mixin-apply failure in a supplied log upgrades a static apply *hypothesis* to a confirmed finding. |
 | Mixins × Metadata / Security | A mixin's target subsystem yields a behaviour-grounded capability and a security-sensitivity flag (networking, class loading, (de)serialization, save IO). |
-| SBOM × Security | A low-trust (poorly-identified) jar that also references a dangerous capability is a stronger supply-chain concern than either signal alone — see the [Security guide](../guides/security.md#low-provenance-meets-a-dangerous-capability). |
+| SBOM × Security | An artifact with unresolved identity that also references a dangerous capability needs more provenance review than either signal alone; unresolved identity is not itself a malware or safety verdict. |
 | Scripts × Resources | A recipe a KubeJS/CraftTweaker script removes is not reported as a resource conflict — the runtime removal suppresses the static collision. |
 | Resources × Dependencies | The namespace-reference graph from resources drives implicit dependencies and the `impact` blast radius — see [Dependencies](../guides/dependencies.md#implicit-dependencies). |
 
 Each link only fires when the inputs are present: the mixin links need
-`--mixin-risk`; the performance link needs `--performance --spark-report`; the log
+`--mixin-level basic|standard|full`; the performance link needs `--performance --spark-report`; the log
 link needs a log alongside the mods scan. Without an input, the analysis simply says
 less — it never invents the other side.
 

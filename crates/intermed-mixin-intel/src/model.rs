@@ -1244,6 +1244,10 @@ pub struct MixinScanFailure {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MixinScan {
     pub target: String,
+    /// Config paths discovered before parsing. This can exceed `configs.len()`
+    /// when a relevant config was malformed or could not be read.
+    #[serde(default)]
+    pub configs_discovered: usize,
     pub configs: Vec<MixinConfigRecord>,
     pub classes: Vec<MixinClassRecord>,
     pub overlaps: Vec<MixinOverlap>,

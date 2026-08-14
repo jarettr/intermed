@@ -75,20 +75,20 @@ pub fn resolve_doctor_packs(
     let mut overlay_ids = Vec::new();
     let mut trust = Vec::new();
 
-    if !selection.skip_installed {
-        if let Some(dir) = &install_dir {
-            for path in list_installed_pack_paths(dir) {
-                let (pack, level) = load_and_verify_pack(&path, &registry, &trusted, policy)?;
-                if pack.id == base.id {
-                    continue;
-                }
-                overlay_ids.push(pack.id.clone());
-                trust.push(PackTrust {
-                    id: pack.id.clone(),
-                    trust: level,
-                });
-                overlays.push(pack);
+    if !selection.skip_installed
+        && let Some(dir) = &install_dir
+    {
+        for path in list_installed_pack_paths(dir) {
+            let (pack, level) = load_and_verify_pack(&path, &registry, &trusted, policy)?;
+            if pack.id == base.id {
+                continue;
             }
+            overlay_ids.push(pack.id.clone());
+            trust.push(PackTrust {
+                id: pack.id.clone(),
+                trust: level,
+            });
+            overlays.push(pack);
         }
     }
 
@@ -292,13 +292,13 @@ fn load_and_verify_pack(
         &registry_declared,
         policy,
     )?;
-    if let Some(entry) = registry.packs.iter().find(|e| e.id == pack.id) {
-        if canonical_digest(&pack) != entry.sha256 {
-            return Err(SigningError::Message(format!(
-                "pack `{}` digest does not match registry sha256",
-                pack.id
-            )));
-        }
+    if let Some(entry) = registry.packs.iter().find(|e| e.id == pack.id)
+        && canonical_digest(&pack)? != entry.sha256
+    {
+        return Err(SigningError::Message(format!(
+            "pack `{}` digest does not match registry sha256",
+            pack.id
+        )));
     }
     Ok((pack, level))
 }

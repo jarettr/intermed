@@ -364,7 +364,9 @@ fn detect_interactions(
                     mixin_b: b.class_name.clone(),
                     target: target.clone(),
                     detail: if cross_mod {
-                        format!("Both inject into site `{method}` on `{target}`")
+                        format!(
+                            "Both inject into site `{method}` on `{target}`; co-location alone does not prove order-sensitive behavior"
+                        )
                     } else {
                         format!(
                             "`{}` injects into site `{method}` on `{target}` from two of its own mixins",
@@ -372,7 +374,10 @@ fn detect_interactions(
                         )
                     },
                     // Same-mod overlap is internal complexity, not a mod conflict.
-                    strength: if cross_mod { 90 } else { 40 },
+                    // Exact co-location is useful navigation evidence, but is
+                    // not itself a conflict. Composition analysis separately
+                    // raises proven redirects/overwrites/order-sensitive chains.
+                    strength: if cross_mod { 70 } else { 40 },
                     cross_mod,
                 });
                 // Conflict *edges* model the cross-mod conflict graph only. Two
@@ -391,7 +396,7 @@ fn detect_interactions(
                         target_mixin: b.class_name.clone(),
                         target_class: target.clone(),
                         site: method.clone(),
-                        strength: 90,
+                        strength: 70,
                     });
                 }
             }

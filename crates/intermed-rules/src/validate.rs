@@ -38,6 +38,15 @@ pub fn validate_rule_pack(pack: &RulePack) -> Result<(), RulePackError> {
                 rule.id, rule.finding.category
             )));
         }
+        if !matches!(
+            rule.finding.visibility.as_str(),
+            "default" | "verbose" | "explain-only" | "overlay-only"
+        ) {
+            return Err(RulePackError(format!(
+                "{}: invalid finding visibility {}",
+                rule.id, rule.finding.visibility
+            )));
+        }
         validate_rule_shape(rule)?;
         validate_rule_expressions(rule)?;
     }

@@ -16,7 +16,7 @@ _intermed() {
     local context curcontext="$curcontext" state line
     _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -68,14 +68,14 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Sa
 '--security-corroborated-confidence=[Confidence for reflection-corroborated security facts (default\: 0.4)]:SCORE:_default' \
 '--minecraft-jar=[Minecraft client/server jar to index. Powers two layers\: mixin apply-failure verification against vanilla classes (Layer F), and a vanilla resource index (Layer M) so \`minecraft\:\` references resolve and tags expand against real vanilla data instead of being assumed present]:JAR:_files' \
 '--minecraft-mappings=[Yarn/Mojmap Tiny v2 mappings (\`mappings.tiny\`) for named↔intermediary bridging during mixin apply-failure checks with \`--minecraft-jar\`]:FILE:_files' \
-'--mixin-level=[Mixin analysis preset\: \`normal\` (overlaps/risk only), \`detailed\` (+ recommendations), \`full\` (+ per-handler intelligence findings)]:LEVEL:(normal detailed full)' \
+'--mixin-level=[Mixin analysis preset\: \`basic\` (overlaps/risk only), \`standard\` (+ recommendations), \`full\` (+ per-handler intelligence findings)]:LEVEL:(basic standard full)' \
 '--db=[Persist this run to a DuckDB analytics file (requires \`--features duckdb\`)]:FILE:_files' \
 '*--rule-pack=[Extra declarative rule packs\: file path or installed pack id (repeatable)]:PATH|ID:_default' \
 '--rule-pack-dir=[Rule pack install directory (default\: XDG \`.../intermed/rule-packs\`)]:DIR:_files' \
 '--rule-pack-trusted-keys=[Trusted publisher keys file for verifying signed rule pack overlays]:FILE:_files' \
 '--rule-pack-registry=[Registry index path or URL for resolving \`--rule-pack\` ids]:FILE|URL:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--mixin-risk[Enable Layer-F Mixin risk scanning during doctor]' \
+'--mixin-risk[Compatibility shorthand for \`--mixin-level standard\`]' \
 '--no-color[Disable ANSI colour even on a TTY]' \
 '--telemetry-include-log-excerpts[Include up to 20 redacted, truncated log-signal excerpts in explicitly requested telemetry. Requires \`--telemetry-out\` or \`--telemetry-endpoint\`]' \
 '--exit-zero[Exit 0 whenever the run completes, regardless of findings]' \
@@ -89,7 +89,7 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Sa
 '--core-rule-pack-only[Use only the embedded core rule pack (ignore installed/community overlays)]' \
 '--allow-insecure-registry[Allow \`http\://\` rule-pack registries/packs (insecure; HTTPS is required by default)]' \
 '--allow-unsigned-rules[Accept unsigned, or signed-but-unpinned, remote rule packs]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -101,7 +101,7 @@ duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Sa
 (vfs)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -124,7 +124,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--ast[Show the Layer-M typed AST view (domain, semantic diff, references) for \`--path\`. Requires \`--path\`]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -140,7 +140,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--ast[Show the Layer-M typed AST view (domain, semantic diff, references) for \`--path\`. Requires \`--path\`]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -156,7 +156,7 @@ _arguments "${_arguments_options[@]}" : \
 '--include-unsafe-winners[Also stage order-dependent collisions by picking a lexical winner. These are previews, NOT safe fixes\: the manifest marks them safe_to_apply=false. By default only deterministic, order-independent merges are written]' \
 '--explain-plan[Print the semantic overlay plan (\`intermed-overlay-plan-v2\`\: safe / review / unsafe buckets) to stdout and exit — read-only, writes nothing]' \
 '--no-color[Accepted for script consistency; VFS output currently has no ANSI colour]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -204,7 +204,7 @@ esac
 (deps)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -224,7 +224,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -237,7 +237,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -251,7 +251,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -266,7 +266,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -282,7 +282,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -296,7 +296,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -358,7 +358,7 @@ esac
 (impact)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -379,7 +379,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -394,7 +394,7 @@ _arguments "${_arguments_options[@]}" : \
 '--mods-dir=[Override the mods directory (otherwise auto-detected)]:MODS_DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit machine-readable JSON instead of text]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -448,7 +448,7 @@ html\:""))' \
 '--graph-out=[Write graph export to file (stdout when omitted for dot/graphml)]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--no-color[Accepted for script consistency; Mixin Map output currently has no ANSI colour]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -462,7 +462,7 @@ _arguments "${_arguments_options[@]}" : \
 '--spark-report=[Explicit spark report JSON (\`intermed-spark-report-v1\`)]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--no-color[Accepted for script consistency; Spark Map output currently has no ANSI colour]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -474,7 +474,7 @@ _arguments "${_arguments_options[@]}" : \
 (lab)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -494,7 +494,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--out=[Output lock path]:OUT:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -509,7 +509,7 @@ _arguments "${_arguments_options[@]}" : \
 '--out=[Output directory for the run artifact (\`lab-run.json\`)]:OUT:_files' \
 '--lab-excerpt-max=[Maximum characters kept from a failure log excerpt (default\: 280)]:N:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -522,7 +522,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--out=[Output directory for \`matrix.json\` + \`index.html\`]:OUT:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -539,7 +539,7 @@ _arguments "${_arguments_options[@]}" : \
 '--min-severity=[Minimum prediction severity that counts as "flagged"]:MIN_SEVERITY:(note warn error)' \
 '--out=[Output accuracy report path (\`intermed-rule-accuracy-v3\`)]:OUT:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -590,7 +590,7 @@ esac
 (rules)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -613,7 +613,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--require-signature[Require a valid Ed25519 signature on v2 packs]' \
 '--trace[Dry-run\: evaluate each rule against facts JSON and print a trace table]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -630,7 +630,7 @@ datalog\:""
 explain\:"Columnar query-engine \`EXPLAIN\` (logical + physical plan + engines) per rule"))' \
 '--out=[Write to file instead of stdout]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -644,7 +644,7 @@ _arguments "${_arguments_options[@]}" : \
 '--key=[Ed25519 seed file (32 raw bytes or base64 text)]:FILE:_files' \
 '--out=[Output signed pack path (default\: overwrite input)]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -657,7 +657,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--trusted-keys=[Trusted publisher public keys (one base64 key per line)]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -675,7 +675,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries/packs (insecure; HTTPS is required by default)]' \
 '--allow-unsigned-rules[Accept unsigned, or signed-but-unpinned, remote rule packs]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -688,7 +688,7 @@ _arguments "${_arguments_options[@]}" : \
 '--registry=[Registry index JSON or URL. Defaults to the embedded InterMed registry]:FILE|URL:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries (insecure; HTTPS is required by default)]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -705,7 +705,7 @@ _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--allow-insecure-registry[Allow \`http\://\` registries/packs (insecure; HTTPS is required by default)]' \
 '--allow-unsigned-rules[Accept unsigned, or signed-but-unpinned, remote rule packs]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -718,7 +718,7 @@ _arguments "${_arguments_options[@]}" : \
 '--rule=[Explain only this rule id (default\: every lowerable rule)]:ID:_default' \
 '--facts=[A \`doctor --dump-facts\` JSON file\: enables EXPLAIN ANALYZE on those real facts]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -786,7 +786,7 @@ esac
 (db)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -806,7 +806,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -846,7 +846,7 @@ esac
 (history)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -867,7 +867,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--since=[Relative look-back window (\`30d\`, \`7d\`, \`24h\`). Default\: 30d]:DURATION:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -880,7 +880,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--limit=[Maximum patterns to show (highest severity / most recurring first)]:N:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -895,7 +895,7 @@ _arguments "${_arguments_options[@]}" : \
 '--run-b=[]:RUN_ID:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
 '--json[Emit structured JSON (\`intermed-history-diff-v1\`) instead of TSV]' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -908,7 +908,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[]:FILE:_files' \
 '--keep=[Keep runs within this window (\`90d\`, \`30d\`). Older runs are deleted]:DURATION:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -959,7 +959,7 @@ esac
 (trends)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -979,7 +979,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -992,7 +992,7 @@ _arguments "${_arguments_options[@]}" : \
 '--db=[DuckDB analytics database file]:FILE:_files' \
 '--limit=[Number of rows to return (default\: 10)]:LIMIT:_default' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1035,7 +1035,7 @@ esac
 (cache)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1055,7 +1055,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1067,7 +1067,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1079,7 +1079,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '--cache-dir=[]:DIR:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1126,7 +1126,7 @@ esac
 (sbom)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1148,7 +1148,7 @@ _arguments "${_arguments_options[@]}" : \
 '--format=[]:FORMAT:(spdx-json cyclonedx-json)' \
 '--out=[]:FILE:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1188,7 +1188,7 @@ esac
 (demo)
 _arguments "${_arguments_options[@]}" : \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
@@ -1209,7 +1209,7 @@ _arguments "${_arguments_options[@]}" : \
 '-o+[Output directory for \`intermed-atlauncher-demo-summary.md\`, \`intermed-demo-report.html\`, and JSON]:OUT:_files' \
 '--out=[Output directory for \`intermed-atlauncher-demo-summary.md\`, \`intermed-demo-report.html\`, and JSON]:OUT:_files' \
 '--config=[Config file (\`intermed-config-v1\` TOML). Overrides discovery; see docs/reference/configuration.md]:FILE:_files' \
-'--dump-config[Print the effective default config as TOML and exit (no subcommand required)]' \
+'--dump-config[Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional]' \
 '(-v --verbose)--quiet[Suppress informational progress messages on stderr (errors still print)]' \
 '*-v[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \
 '*--verbose[Increase informational detail (repeatable\: \`-v\`, \`-vv\`)]' \

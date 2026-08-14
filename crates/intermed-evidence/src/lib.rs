@@ -88,6 +88,36 @@ pub enum FindingVisibility {
     OverlayOnly,
 }
 
+/// Coverage which must be trustworthy before a finding may be treated as a
+/// conclusive absence/incompatibility assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoverageRequirement {
+    LocalArtifact,
+    CompletePack,
+    CompleteClasspath,
+    RuntimeEvidence,
+}
+
+/// Strength of the derivation represented by a finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProofKind {
+    Observation,
+    DeterministicDerivation,
+    Heuristic,
+}
+
+/// Runtime observation capable of refuting a static conclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeRefutability {
+    ClassPresence,
+    ExactMethodPresence,
+    AppliedMixin,
+    DependencyUse,
+}
+
 impl FindingVisibility {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -258,6 +288,14 @@ pub struct Finding {
     /// Layer-M semantic finding, or SBOM correlation enriching a signature note).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rule_sources: Vec<String>,
+    /// Typed prerequisites used by cross-layer certainty policy. This replaces
+    /// safety decisions based on finding-id naming conventions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage_requirements: Vec<CoverageRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof_kind: Option<ProofKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtime_refutability: Vec<RuntimeRefutability>,
 }
 
 /// Fluent builder so rules read declaratively.
@@ -283,6 +321,9 @@ impl Finding {
                 machine_tags: Vec::new(),
                 visibility: FindingVisibility::Default,
                 rule_sources: Vec::new(),
+                coverage_requirements: Vec::new(),
+                proof_kind: None,
+                runtime_refutability: Vec::new(),
             },
         }
     }
@@ -323,6 +364,22 @@ impl FindingBuilder {
     }
     pub fn confidence(mut self, c: f32) -> Self {
         self.finding.confidence = c.clamp(0.0, 1.0);
+        self
+    }
+    pub fn coverage_requirement(mut self, requirement: CoverageRequirement) -> Self {
+        if !self.finding.coverage_requirements.contains(&requirement) {
+            self.finding.coverage_requirements.push(requirement);
+        }
+        self
+    }
+    pub fn proof_kind(mut self, proof_kind: ProofKind) -> Self {
+        self.finding.proof_kind = Some(proof_kind);
+        self
+    }
+    pub fn runtime_refutability(mut self, refutability: RuntimeRefutability) -> Self {
+        if !self.finding.runtime_refutability.contains(&refutability) {
+            self.finding.runtime_refutability.push(refutability);
+        }
         self
     }
     /// Set how prominently the finding is surfaced (default vs explain-only).

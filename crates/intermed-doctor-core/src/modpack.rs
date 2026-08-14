@@ -173,6 +173,16 @@ fn extract_archive_with_limits(
                 entry.size()
             )));
         }
+        let declared_total = total_written.checked_add(entry.size()).ok_or_else(|| {
+            ModpackError::Message("archive declared-size total overflow".to_string())
+        })?;
+        if declared_total > limits.max_total_uncompressed_bytes {
+            return Err(ModpackError::Message(format!(
+                "archive entry {} would exceed the {} byte total uncompressed limit",
+                entry.name(),
+                limits.max_total_uncompressed_bytes
+            )));
+        }
 
         let out_path = safe_entry_path(dest, entry.name())?;
         if let Some(parent) = out_path.parent() {
@@ -182,7 +192,14 @@ fn extract_archive_with_limits(
 
         // Cap the reader at one byte past the limit so an over-large (or
         // bomb-inflated) entry is detected rather than fully materialized.
-        let cap = limits.max_single_entry_bytes.saturating_add(1);
+        let total_remaining = limits
+            .max_total_uncompressed_bytes
+            .checked_sub(total_written)
+            .ok_or_else(|| ModpackError::Message("archive total budget exhausted".to_string()))?;
+        let cap = limits
+            .max_single_entry_bytes
+            .min(total_remaining)
+            .saturating_add(1);
         let mut capped = (&mut entry).take(cap);
         let written = io::copy(&mut capped, &mut out)?;
         if written > limits.max_single_entry_bytes {
@@ -193,13 +210,16 @@ fn extract_archive_with_limits(
             )));
         }
 
-        total_written = total_written.saturating_add(written);
-        if total_written > limits.max_total_uncompressed_bytes {
+        if written > total_remaining {
+            let _ = fs::remove_file(&out_path);
             return Err(ModpackError::Message(format!(
                 "archive exceeds the {} byte total uncompressed limit (zip bomb?)",
                 limits.max_total_uncompressed_bytes
             )));
         }
+        total_written = total_written
+            .checked_add(written)
+            .ok_or_else(|| ModpackError::Message("archive extracted-size total overflow".into()))?;
     }
     Ok(())
 }

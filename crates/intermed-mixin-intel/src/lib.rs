@@ -184,18 +184,26 @@ impl Collector for MixinCollector {
         ) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);
-                CollectorOutcome::active(
-                    emitted,
-                    format!(
-                        "{} config(s), {} mixin class(es), {} overlap(s), {} effect(s), {} recommendation(s), {} risk score(s)",
-                        scan.configs.len(),
-                        scan.classes.len(),
-                        scan.overlaps.len(),
-                        scan.mixin_effects.len(),
-                        scan.recommendations.len(),
-                        scan.risk_assessments.len()
-                    ),
-                )
+                let summary = format!(
+                    "{} config(s), {} mixin class(es), {} overlap(s), {} effect(s), {} recommendation(s), {} risk score(s)",
+                    scan.configs.len(),
+                    scan.classes.len(),
+                    scan.overlaps.len(),
+                    scan.mixin_effects.len(),
+                    scan.recommendations.len(),
+                    scan.risk_assessments.len()
+                );
+                if scan.failures.is_empty() {
+                    CollectorOutcome::active(emitted, summary)
+                } else {
+                    CollectorOutcome::incomplete(
+                        emitted,
+                        format!(
+                            "{summary}; {} relevant input failure(s)",
+                            scan.failures.len()
+                        ),
+                    )
+                }
             }
             Err(e) => CollectorOutcome::failed(e.0),
         }

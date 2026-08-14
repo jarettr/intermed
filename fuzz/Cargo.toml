@@ -75,5 +75,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "log_runtime_event"
+path = "fuzz_targets/log_runtime_event.rs"
+test = false
+doc = false
+bench = false
+
 # Detach from the parent workspace so the fuzz crate builds standalone.
 [workspace]

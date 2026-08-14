@@ -29,8 +29,8 @@ pub const DEFAULT_LOG_PARALLEL_LINE_THRESHOLD: usize = 4_096;
 /// Maximum characters kept from a smoke-test log excerpt in lab runs.
 pub const DEFAULT_LAB_EXCERPT_MAX: usize = 280;
 
-/// Default mixin analysis preset (`detailed` — overlaps + recommendations, no per-handler spam).
-pub const DEFAULT_MIXIN_LEVEL: &str = "detailed";
+/// Default mixin analysis preset (`standard` — overlaps + recommendations, no per-handler spam).
+pub const DEFAULT_MIXIN_LEVEL: &str = "standard";
 pub const DEFAULT_METADATA_LEVEL: &str = "enriched";
 pub const DEFAULT_RESOURCE_LEVEL: &str = "semantic";
 pub const DEFAULT_RESOURCE_MAX_JSON_BYTES: u64 = 1_048_576;
@@ -152,7 +152,10 @@ impl Default for LabSection {
 /// Layer-F mixin scan depth and finding noise controls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MixinSection {
-    /// Preset: `normal` | `detailed` | `full` (default: `detailed`).
+    /// Whether Layer F is enabled without an explicit CLI activation flag.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Preset: `basic` | `standard` | `full` (default: `standard`).
     #[serde(default = "default_mixin_level")]
     pub level: String,
     /// Emit per-handler bytecode intelligence facts (default: derived from `level`).
@@ -205,6 +208,7 @@ impl Default for MetadataSection {
 impl Default for MixinSection {
     fn default() -> Self {
         Self {
+            enabled: false,
             level: default_mixin_level(),
             handler_effects: None,
             recommendations: None,

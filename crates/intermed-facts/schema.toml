@@ -13,6 +13,12 @@ schema_version = "intermed-fact-schema-v1"
 subject = "environment"
 complete = false
 
+[kind.analysis_environment]
+subject = "analyzer host environment"
+complete = true
+attrs.os = "string"
+attrs.java = "string"
+
 [kind.java_runtime]
 subject = "java runtime"
 complete = false
@@ -31,6 +37,8 @@ attrs.file = "string"
 attrs.synthetic_id = "bool"
 attrs.api_version = "string"
 attrs.load_order = "string"
+attrs.identity_certainty = "string"
+attrs.descriptor_candidates = "string"
 
 [kind.plugin]
 subject = "plugin id"
@@ -39,6 +47,8 @@ attrs.version = "string"
 attrs.loader = "string"
 attrs.file = "string"
 attrs.synthetic_id = "bool"
+attrs.identity_certainty = "string"
+attrs.descriptor_candidates = "string"
 
 [kind.invalid_metadata]
 subject = "archive file name"
@@ -61,6 +71,7 @@ attrs.mandatory = "bool"
 attrs.relation = "string"
 attrs.feature = "string"
 attrs.version_dialect = "string"
+attrs.identity_certainty = "string"
 
 [kind.provided_dependency]
 subject = "provided dependency"
@@ -77,6 +88,13 @@ complete = false
 [kind.mod_metadata]
 subject = "mod metadata"
 complete = false
+
+[kind.bytecode_reference]
+subject = "referencing mod id"
+complete = true
+attrs.target_package = "string"
+attrs.reference_kind = "string"
+attrs.scan_truncated = "bool"
 
 [kind.entrypoint_detail]
 subject = "entrypoint detail"
@@ -105,6 +123,13 @@ attrs.source = "string"
 [kind.nested_jar]
 subject = "nested jar"
 complete = false
+
+[kind.compatibility_bridge]
+subject = "bridge mod id"
+complete = true
+attrs.from_loader = "string"
+attrs.to_loader = "string"
+attrs.scope = "string"
 
 [kind.unparseable_archive]
 subject = "archive file name"
@@ -152,11 +177,28 @@ complete = false
 subject = "log mod error"
 complete = false
 
+[kind.runtime_event]
+subject = "physical runtime event occurrence id"
+complete = false
+
+[kind.throwable_node]
+subject = "runtime event occurrence id"
+complete = false
+
+[kind.stack_frame]
+subject = "runtime event occurrence id"
+complete = false
+
+[kind.crash_anchor]
+subject = "runtime event occurrence id"
+complete = false
+
 [kind.scan_truncated]
 subject = "archive file name"
 complete = true
 attrs.layer = "string"
 attrs.reason = "string"
+attrs.relevant_entry = "bool"
 
 [kind.resource_writer]
 subject = "mod id"

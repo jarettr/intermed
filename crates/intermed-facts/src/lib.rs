@@ -35,6 +35,7 @@ pub mod schema_contract;
 pub mod kind {
     // Layer A — environment / target detection
     pub const ENVIRONMENT: &str = "environment";
+    pub const ANALYSIS_ENVIRONMENT: &str = "analysis_environment";
     pub const JAVA_RUNTIME: &str = "java_runtime";
     pub const TARGET: &str = "target";
     // Layer B — metadata
@@ -59,9 +60,16 @@ pub mod kind {
     /// frame-to-jar ownership index: a crash stack frame whose class falls under an
     /// *exclusively*-owned root is attributed to that mod with high confidence.
     pub const PACKAGE_OWNER: &str = "package_owner";
+    /// A class symbol referenced by a mod's ordinary bytecode constant pool.
+    /// This is a bounded structural usage edge, not proof that the call executes.
+    pub const BYTECODE_REFERENCE: &str = "bytecode_reference";
     pub const MOD_RELATIONSHIP: &str = "mod_relationship";
     pub const MOD_CAPABILITY: &str = "mod_capability";
     pub const NESTED_JAR: &str = "nested_jar";
+    /// A loader-compatibility bridge installed in the target. This is evidence
+    /// that cross-loader descriptors may be intentional; it does not by itself
+    /// prove every foreign artifact is supported.
+    pub const COMPATIBILITY_BRIDGE: &str = "compatibility_bridge";
     pub const UNPARSEABLE_ARCHIVE: &str = "unparseable_archive";
     // Modpack manifests (.mrpack / CurseForge export). These describe mods by
     // reference (download url / project id), which may not be materialized on disk.
@@ -81,6 +89,14 @@ pub mod kind {
     pub const LOG_MENTIONS_MOD: &str = "log_mentions_mod";
     pub const LOG_CRASH: &str = "log_crash";
     pub const LOG_MOD_ERROR: &str = "log_mod_error";
+    /// A normalized semantic log event (logger record plus continuation lines).
+    pub const RUNTIME_EVENT: &str = "runtime_event";
+    /// One throwable in an event's structured exception chain.
+    pub const THROWABLE_NODE: &str = "throwable_node";
+    /// One parsed stack frame with platform/framework/mod classification.
+    pub const STACK_FRAME: &str = "stack_frame";
+    /// A fatal/uncaught/loader-exit event around which causal ranking is built.
+    pub const CRASH_ANCHOR: &str = "crash_anchor";
     /// A jar scan was truncated by a per-jar resource limit (entry too large,
     /// total bytes, or entry count) — analysis of that archive is incomplete, so
     /// absence of a finding from it is lower-confidence. Emitted by VFS and
@@ -283,6 +299,7 @@ pub mod kind {
     pub fn all_kinds() -> &'static [&'static str] {
         &[
             ENVIRONMENT,
+            ANALYSIS_ENVIRONMENT,
             JAVA_RUNTIME,
             TARGET,
             MOD,
@@ -296,9 +313,11 @@ pub mod kind {
             MOD_METADATA,
             ENTRYPOINT_DETAIL,
             PACKAGE_OWNER,
+            BYTECODE_REFERENCE,
             MOD_RELATIONSHIP,
             MOD_CAPABILITY,
             NESTED_JAR,
+            COMPATIBILITY_BRIDGE,
             UNPARSEABLE_ARCHIVE,
             MODPACK_MANIFEST,
             MODPACK_FILE_REF,
@@ -310,6 +329,10 @@ pub mod kind {
             LOG_MENTIONS_MOD,
             LOG_CRASH,
             LOG_MOD_ERROR,
+            RUNTIME_EVENT,
+            THROWABLE_NODE,
+            STACK_FRAME,
+            CRASH_ANCHOR,
             SCAN_TRUNCATED,
             RESOURCE_WRITER,
             RESOURCE_COLLISION,
@@ -593,6 +616,7 @@ impl<'s> FactBuilder<'s> {
         self.store.next_id += 1;
         let idx = self.store.facts.len();
         let kind = self.kind.clone();
+        let emitted_kind = kind.clone();
         self.store.facts.push(Fact {
             id,
             kind,
@@ -613,18 +637,21 @@ impl<'s> FactBuilder<'s> {
             .or_default()
             .push(idx);
         self.store.id_index.insert(id, idx);
+        *self.store.emitted_stats.entry(emitted_kind).or_insert(0) += 1;
+        self.store.maybe_compact_live();
         id
     }
 }
 
-/// Policy for dropping verbose low-signal facts when the store grows large.
+/// Policy for dropping verbose low-signal facts from an exported snapshot.
 ///
 /// Collectors emit many mixin bytecode facts; rules rarely need all of them.
 /// Compaction keeps predicates required for findings and drops the rest once
-/// `max_facts` is exceeded.
+/// `max_facts` is exceeded. Diagnosis engines must apply this only after all
+/// rules have evaluated; collectors enforce their own input/work budgets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactRetentionPolicy {
-    /// When `facts.len()` exceeds this, [`FactStore::compact`] runs automatically.
+    /// When `facts.len()` exceeds this, the post-rule snapshot is compacted.
     pub max_facts: usize,
     /// Predicates always retained (findings depend on these).
     pub keep_kinds: BTreeSet<String>,
@@ -640,12 +667,28 @@ impl Default for FactRetentionPolicy {
             kind::PROVIDED_DEPENDENCY,
             kind::MOD_SIDE,
             kind::ENVIRONMENT,
+            kind::ANALYSIS_ENVIRONMENT,
             kind::JAVA_RUNTIME,
             kind::TARGET,
             kind::LOG_SIGNAL,
             kind::LOG_MENTIONS_MOD,
+            kind::LOG_CRASH,
+            kind::LOG_MOD_ERROR,
+            // Runtime incident evidence is sparse and causally stronger than
+            // bulk resource/mixin detail. It must survive retention regardless
+            // of how many low-priority facts a large pack emits.
+            kind::RUNTIME_EVENT,
+            kind::THROWABLE_NODE,
+            kind::STACK_FRAME,
+            kind::CRASH_ANCHOR,
+            kind::SCAN_TRUNCATED,
+            kind::INVALID_METADATA,
+            kind::UNPARSEABLE_ARCHIVE,
+            kind::MOD_METADATA,
+            kind::PACKAGE_OWNER,
+            kind::ARTIFACT_IDENTITY,
+            kind::COMPATIBILITY_BRIDGE,
             kind::RESOURCE_COLLISION,
-            kind::RESOURCE_WRITER,
             kind::RESOURCE_OVERLAY_ACTION,
             kind::RUNTIME_REMOVED_RECIPE,
             kind::RUNTIME_REMOVED_ITEM,
@@ -656,7 +699,6 @@ impl Default for FactRetentionPolicy {
             kind::MODPACK_MANIFEST,
             kind::MIXIN_OVERLAP,
             kind::MIXIN_DATAFLOW_METRICS,
-            kind::MIXIN_EFFECT,
             kind::HIGH_RISK_OVERWRITE,
             // Site-level overhaul (plan Phases 1–14): conclusion-bearing diagnoses.
             // The verbose per-site `mixin_application_site` stays droppable (like
@@ -691,7 +733,6 @@ impl Default for FactRetentionPolicy {
             // Layer M — keep the *compact* conclusion-bearing facts; the verbose
             // per-edge `resource_reference` / `resource_definition` are evidence
             // only and remain droppable (preserved when a finding cites them).
-            kind::RESOURCE_AST_PARSED,
             kind::RESOURCE_SEMANTIC_DIFF,
             kind::RESOURCE_SEMANTIC_CONFLICT,
             kind::RESOURCE_SEMANTIC_ISSUE,
@@ -723,11 +764,54 @@ pub struct FactStore {
     /// stable across [`FactStore::compact`], so `id.0` is *not* the slot index
     /// once any fact has been dropped. See `get_still_works_after_compaction`.
     id_index: BTreeMap<FactId, usize>,
+    /// Optional collection-time soft bound. When crossed, low-priority facts are
+    /// compacted before the next collector can grow the store without limit.
+    live_policy: Option<FactRetentionPolicy>,
+    /// Next collection length at which legacy opt-in live retention retries.
+    /// A failed pass backs off exponentially when protected facts dominate.
+    live_next_compaction_at: usize,
+    live_dropped: usize,
+    emitted_stats: BTreeMap<String, usize>,
 }
 
 impl FactStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a store with collection-time semantic retention enabled. Protected
+    /// predicates may exceed the soft count bound, but bulk detail cannot; this
+    /// preserves sparse causal evidence while bounding the dominant allocations.
+    pub fn with_live_retention(policy: FactRetentionPolicy) -> Self {
+        let slack = (policy.max_facts / 20).clamp(256, 4_096);
+        Self {
+            live_next_compaction_at: policy.max_facts.saturating_add(slack),
+            live_policy: Some(policy),
+            ..Self::default()
+        }
+    }
+
+    fn maybe_compact_live(&mut self) {
+        let Some(policy) = self.live_policy.clone() else {
+            return;
+        };
+        if self.facts.len() <= self.live_next_compaction_at {
+            return;
+        }
+        let dropped = self.compact_preserving(&policy, &BTreeSet::new());
+        self.live_dropped = self.live_dropped.saturating_add(dropped);
+        let slack = (policy.max_facts / 20).clamp(256, 4_096);
+        let normal_threshold = policy.max_facts.saturating_add(slack);
+        self.live_next_compaction_at = if self.facts.len() > normal_threshold {
+            // Protected facts cannot be removed. Do not rescan the entire store
+            // after every subsequent emit; retry only after substantial growth.
+            self.facts
+                .len()
+                .saturating_mul(2)
+                .max(self.facts.len().saturating_add(slack))
+        } else {
+            normal_threshold
+        };
     }
 
     /// Begin building a fact. `extractor` is the producing collector's id.
@@ -754,6 +838,29 @@ impl FactStore {
 
     pub fn is_empty(&self) -> bool {
         self.facts.is_empty()
+    }
+
+    #[must_use]
+    pub fn live_dropped(&self) -> usize {
+        self.live_dropped
+    }
+
+    #[must_use]
+    pub fn emitted_stats(&self) -> BTreeMap<String, usize> {
+        self.emitted_stats.clone()
+    }
+
+    /// Facts discarded by collection-time retention, grouped by predicate.
+    #[must_use]
+    pub fn live_dropped_stats(&self) -> BTreeMap<String, usize> {
+        let retained = self.stats();
+        self.emitted_stats
+            .iter()
+            .filter_map(|(kind, emitted)| {
+                let dropped = emitted.saturating_sub(*retained.get(kind).unwrap_or(&0));
+                (dropped > 0).then(|| (kind.clone(), dropped))
+            })
+            .collect()
     }
 
     /// All facts with the given predicate (indexed; O(k) not O(n)).
@@ -831,16 +938,11 @@ impl FactStore {
             return 0;
         }
         let before = self.facts.len();
-        let retained: Vec<Fact> = self
-            .facts
-            .iter()
-            .filter(|f| policy.keep_kinds.contains(&f.kind) || keep_ids.contains(&f.id))
-            .cloned()
-            .collect();
-        if retained.len() >= before {
+        self.facts
+            .retain(|f| policy.keep_kinds.contains(&f.kind) || keep_ids.contains(&f.id));
+        if self.facts.len() >= before {
             return 0;
         }
-        self.facts = retained;
         self.rebuild_index();
         before.saturating_sub(self.facts.len())
     }
@@ -863,13 +965,8 @@ impl FactStore {
         // Ids are *not* renumbered: existing FactIds (e.g. held by findings'
         // evidence edges) must stay valid after compaction. next_id continues
         // monotonically past the largest surviving id.
-        self.next_id = self
-            .facts
-            .iter()
-            .map(|f| f.id.0)
-            .max()
-            .map(|m| m + 1)
-            .unwrap_or(0);
+        // Never lower `next_id`: facts removed by live retention still consumed
+        // identifiers, and a later fact must not reuse one of them.
     }
 
     /// Per-predicate counts, for report fact-stats.
@@ -903,7 +1000,12 @@ impl FactStore {
             kind_index: BTreeMap::new(),
             subject_index: BTreeMap::new(),
             id_index: BTreeMap::new(),
+            live_policy: None,
+            live_next_compaction_at: 0,
+            live_dropped: 0,
+            emitted_stats: BTreeMap::new(),
         };
+        store.emitted_stats = store.stats();
         store.rebuild_index();
         store
     }
@@ -1030,6 +1132,56 @@ mod tests {
         assert!(dropped > 0);
         assert_eq!(store.by_kind(kind::MOD).count(), 1);
         assert_eq!(store.by_kind(kind::MIXIN_HANDLER_BODY).count(), 0);
+    }
+
+    #[test]
+    fn live_retention_bounds_bulk_detail_and_preserves_causal_facts() {
+        let policy = FactRetentionPolicy {
+            max_facts: 32,
+            ..FactRetentionPolicy::default()
+        };
+        let mut store = FactStore::with_live_retention(policy);
+        for i in 0..600 {
+            store
+                .fact("mixin", kind::MIXIN_HANDLER_BODY)
+                .subject(format!("m{i}"))
+                .emit();
+        }
+        let protected = store
+            .fact("runtime", kind::CRASH_ANCHOR)
+            .subject("fatal-event")
+            .emit();
+
+        assert!(store.live_dropped() > 0);
+        assert!(store.len() <= 32 + 256);
+        assert_eq!(store.get(protected).unwrap().subject, "fatal-event");
+        assert_eq!(store.emitted_stats()[kind::MIXIN_HANDLER_BODY], 600);
+        assert!(store.live_dropped_stats()[kind::MIXIN_HANDLER_BODY] > 0);
+    }
+
+    #[test]
+    fn live_retention_backs_off_when_protected_facts_dominate() {
+        let policy = FactRetentionPolicy {
+            max_facts: 1,
+            ..FactRetentionPolicy::default()
+        };
+        let mut store = FactStore::with_live_retention(policy);
+        for index in 0..300 {
+            store
+                .fact("runtime", kind::CRASH_ANCHOR)
+                .subject(format!("event-{index}"))
+                .emit();
+        }
+        assert_eq!(store.live_dropped(), 0);
+        let retry_at = store.live_next_compaction_at;
+        assert!(retry_at > store.len());
+        for index in 300..400 {
+            store
+                .fact("runtime", kind::CRASH_ANCHOR)
+                .subject(format!("event-{index}"))
+                .emit();
+        }
+        assert_eq!(store.live_next_compaction_at, retry_at);
     }
 
     #[test]

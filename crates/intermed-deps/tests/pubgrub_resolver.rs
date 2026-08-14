@@ -3,7 +3,7 @@ use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{Rule, RuleCtx, Target, TargetKind};
 
 #[test]
-fn global_unsat_finding_emitted() {
+fn single_wrong_version_deduplicates_global_unsat_finding() {
     let mut store = FactStore::new();
     store
         .fact("meta", kind::MOD)
@@ -29,7 +29,7 @@ fn global_unsat_finding_emitted() {
     let target = test_target();
     let ctx = RuleCtx::for_test(&store, &target);
     let findings = DependencyRule.evaluate(&ctx).unwrap();
-    assert!(findings.iter().any(|f| f.id == "dependency-unsat:global"));
+    assert!(!findings.iter().any(|f| f.id == "dependency-unsat:global"));
     assert!(
         findings
             .iter()

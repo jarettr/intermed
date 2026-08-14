@@ -26,7 +26,8 @@ pub struct Cli {
     #[arg(long = "config", global = true, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Print the effective default config as TOML and exit (no subcommand required).
+    /// Print the fully merged config (defaults, files, environment, and doctor CLI overrides)
+    /// as TOML and exit. A subcommand is optional.
     #[arg(long = "dump-config", global = true)]
     pub dump_config: bool,
 
@@ -79,7 +80,7 @@ pub enum Command {
 intermed doctor ./mods\n  \
 intermed doctor ./server --mixin-risk --json\n  \
 intermed doctor ./mods --dump-facts facts.json --explain duplicate-id:foo\n  \
-intermed doctor ./mods --logic=datalog\n  \
+intermed doctor ./mods --logic=souffle\n  \
 intermed doctor ./mods --profile profile.json --no-cache")]
 pub struct DoctorArgs {
     /// What to diagnose. Defaults to the current directory.
@@ -96,7 +97,7 @@ pub struct DoctorArgs {
     #[arg(long = "pack-manifest", value_name = "FILE")]
     pub pack_manifest: Option<PathBuf>,
 
-    /// Enable Layer-F Mixin risk scanning during doctor.
+    /// Compatibility shorthand for `--mixin-level standard`.
     #[arg(long = "mixin-risk")]
     pub mixin_risk: bool,
 
@@ -290,7 +291,7 @@ pub struct DoctorPerformanceArgs {
 /// Layer-F mixin scan depth controls (see `[mixin]` in config and `INTERMED_MIXIN_*` env).
 #[derive(Args, Default)]
 pub struct DoctorMixinArgs {
-    /// Mixin analysis preset: `normal` (overlaps/risk only), `detailed` (+ recommendations),
+    /// Mixin analysis preset: `basic` (overlaps/risk only), `standard` (+ recommendations),
     /// `full` (+ per-handler intelligence findings).
     #[arg(long = "mixin-level", value_enum, value_name = "LEVEL")]
     pub level: Option<MixinLevelArg>,
@@ -326,8 +327,10 @@ pub struct DoctorMixinArgs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum MixinLevelArg {
-    Normal,
-    Detailed,
+    #[value(alias = "normal")]
+    Basic,
+    #[value(alias = "detailed")]
+    Standard,
     Full,
 }
 

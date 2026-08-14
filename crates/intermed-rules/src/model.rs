@@ -134,6 +134,12 @@ pub struct FindingTemplate {
     pub rule_id: Option<String>,
     pub severity: String,
     pub category: String,
+    /// Report surface for the finding: `default`, `verbose`, `explain-only`, or
+    /// `overlay-only`. Keeping this in the rule schema prevents informational
+    /// facts from being promoted merely because they came from a declarative
+    /// pack rather than an imperative rule.
+    #[serde(default = "default_finding_visibility")]
+    pub visibility: String,
     pub title: String,
     pub explanation: String,
     #[serde(default)]
@@ -146,6 +152,10 @@ pub struct FindingTemplate {
     /// "issues affecting mod X" surfaces it from either mod.
     #[serde(default)]
     pub affects: Vec<String>,
+}
+
+fn default_finding_visibility() -> String {
+    "default".to_string()
 }
 
 fn default_min_count() -> usize {

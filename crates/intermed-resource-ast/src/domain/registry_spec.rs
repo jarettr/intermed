@@ -102,10 +102,10 @@ fn registry_of(path: &str) -> Option<String> {
     let mut segs = rest.split('/');
     let _ns = segs.next()?;
     let first = segs.next()?;
-    if first == "worldgen" {
-        if let Some(sub) = segs.next() {
-            return Some(format!("worldgen/{sub}"));
-        }
+    if first == "worldgen"
+        && let Some(sub) = segs.next()
+    {
+        return Some(format!("worldgen/{sub}"));
     }
     Some(first.to_string())
 }

@@ -31,17 +31,17 @@ impl Refmap {
         let class_slash = slash_name(target_class);
 
         for env_mappings in self.data.values() {
-            if let Some(class_map) = env_mappings.get(&class_slash) {
-                if let Some(mapped) = class_map.get(method) {
-                    return (mapped.to_string(), true);
-                }
+            if let Some(class_map) = env_mappings.get(&class_slash)
+                && let Some(mapped) = class_map.get(method)
+            {
+                return (mapped.to_string(), true);
             }
         }
 
-        if let Some(class_map) = self.mappings.get(&class_slash) {
-            if let Some(mapped) = class_map.get(method) {
-                return (mapped.to_string(), true);
-            }
+        if let Some(class_map) = self.mappings.get(&class_slash)
+            && let Some(mapped) = class_map.get(method)
+        {
+            return (mapped.to_string(), true);
         }
 
         (method.to_string(), false)
@@ -97,6 +97,11 @@ pub fn is_intermediary_name(name: &str) -> bool {
 /// columns by namespace *name*, not a fixed column index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TinyMappings {
+    namespaces: Vec<String>,
+    /// Pairwise class-name graph keyed by `(from namespace, to namespace, name)`.
+    class_translations: BTreeMap<(String, String, String), String>,
+    /// Pairwise method-name graph keyed by `(from ns, to ns, owner, member)`.
+    method_translations: BTreeMap<(String, String, String, String), String>,
     /// `namespace -> (src_class_slash -> mapped_class_slash)`.
     class_maps: BTreeMap<String, BTreeMap<String, String>>,
     /// `namespace -> (intermediary_class_slash -> (src_member -> mapped_member))`.
@@ -159,6 +164,7 @@ impl TinyMappings {
 
         let mut out = Self {
             named_ns,
+            namespaces: namespaces.clone(),
             ..Self::default()
         };
         for ns in &namespaces {
@@ -170,6 +176,7 @@ impl TinyMappings {
         // The class currently in scope, as its intermediary slash (the key the
         // analyzer queries members by). `None` until the first `c` row.
         let mut class_inter: Option<String> = None;
+        let mut current_class_names: Option<Vec<String>> = None;
 
         for line in raw {
             if line.trim().is_empty() {
@@ -186,6 +193,18 @@ impl TinyMappings {
                         continue;
                     }
                     let src = names[0].to_string();
+                    let all_names = (0..namespaces.len())
+                        .map(|i| names.get(i).copied().unwrap_or(names[0]).to_string())
+                        .collect::<Vec<_>>();
+                    for (from_idx, from_ns) in namespaces.iter().enumerate() {
+                        for (to_idx, to_ns) in namespaces.iter().enumerate() {
+                            out.class_translations.insert(
+                                (from_ns.clone(), to_ns.clone(), all_names[from_idx].clone()),
+                                all_names[to_idx].clone(),
+                            );
+                        }
+                    }
+                    current_class_names = Some(all_names);
                     let inter = names
                         .get(inter_idx)
                         .copied()
@@ -198,13 +217,13 @@ impl TinyMappings {
                             m.insert(src.clone(), mapped.to_string());
                         }
                     }
-                    if let Some(named) = names.get(named_idx) {
-                        if *named != inter {
-                            out.named_class_to_intermediary
-                                .insert(dotted_name(named), inter.clone());
-                            out.intermediary_class_to_named
-                                .insert(inter.clone(), dotted_name(named));
-                        }
+                    if let Some(named) = names.get(named_idx)
+                        && *named != inter
+                    {
+                        out.named_class_to_intermediary
+                            .insert(dotted_name(named), inter.clone());
+                        out.intermediary_class_to_named
+                            .insert(inter.clone(), dotted_name(named));
                     }
                 }
                 // Member rows nested one tab under the current class. Layout:
@@ -219,6 +238,26 @@ impl TinyMappings {
                     }
                     let names = &cols[2..];
                     let src = names[0].to_string();
+                    let all_member_names = (0..namespaces.len())
+                        .map(|i| names.get(i).copied().unwrap_or(names[0]).to_string())
+                        .collect::<Vec<_>>();
+                    if tag == "m"
+                        && let Some(class_names) = &current_class_names
+                    {
+                        for (from_idx, from_ns) in namespaces.iter().enumerate() {
+                            for (to_idx, to_ns) in namespaces.iter().enumerate() {
+                                out.method_translations.insert(
+                                    (
+                                        from_ns.clone(),
+                                        to_ns.clone(),
+                                        class_names[from_idx].clone(),
+                                        all_member_names[from_idx].clone(),
+                                    ),
+                                    all_member_names[to_idx].clone(),
+                                );
+                            }
+                        }
+                    }
                     let target = if tag == "m" {
                         &mut out.method_maps
                     } else {
@@ -233,13 +272,13 @@ impl TinyMappings {
                                 .insert(src.clone(), mapped.to_string());
                         }
                     }
-                    if tag == "m" {
-                        if let Some(named) = names.get(named_idx) {
-                            out.named_to_intermediary
-                                .entry(owner.clone())
-                                .or_default()
-                                .insert((*named).to_string(), src.clone());
-                        }
+                    if tag == "m"
+                        && let Some(named) = names.get(named_idx)
+                    {
+                        out.named_to_intermediary
+                            .entry(owner.clone())
+                            .or_default()
+                            .insert((*named).to_string(), src.clone());
                     }
                 }
                 // Deeper rows (parameters, locals, comments) carry no class-level
@@ -258,19 +297,18 @@ impl TinyMappings {
             .get(&self.named_ns)
             .and_then(|c| c.get(class_slash))
             .and_then(|mm| mm.get(method))
+            && mapped != method
         {
-            if mapped != method {
-                return Some(mapped.clone());
-            }
+            return Some(mapped.clone());
         }
         for (ns, map) in &self.method_maps {
             if ns == &self.named_ns {
                 continue;
             }
-            if let Some(mapped) = map.get(class_slash).and_then(|mm| mm.get(method)) {
-                if mapped != method {
-                    return Some(mapped.clone());
-                }
+            if let Some(mapped) = map.get(class_slash).and_then(|mm| mm.get(method))
+                && mapped != method
+            {
+                return Some(mapped.clone());
             }
         }
         None
@@ -295,6 +333,48 @@ impl TinyMappings {
     /// Map an intermediary class slash to its named dotted form.
     pub fn to_named_class(&self, class_slash: &str) -> Option<String> {
         self.intermediary_class_to_named.get(class_slash).cloned()
+    }
+
+    /// Translate a class from whichever declared namespace contains `class` to
+    /// `to_namespace`. This is the class-symbol edge of the mapping graph.
+    pub fn translate_class_to(&self, class: &str, to_namespace: &str) -> Option<String> {
+        let slash = class.replace('.', "/");
+        self.namespaces.iter().find_map(|from_namespace| {
+            self.class_translations
+                .get(&(
+                    from_namespace.clone(),
+                    to_namespace.to_string(),
+                    slash.clone(),
+                ))
+                .cloned()
+        })
+    }
+
+    /// Translate a method owner/name pair to another declared namespace.
+    pub fn translate_method_to(
+        &self,
+        owner: &str,
+        method: &str,
+        to_namespace: &str,
+    ) -> Option<String> {
+        let owner = owner.replace('.', "/");
+        self.namespaces.iter().find_map(|from_namespace| {
+            self.method_translations
+                .get(&(
+                    from_namespace.clone(),
+                    to_namespace.to_string(),
+                    owner.clone(),
+                    method.to_string(),
+                ))
+                .cloned()
+        })
+    }
+
+    #[must_use]
+    pub fn has_namespace(&self, namespace: &str) -> bool {
+        self.namespaces
+            .iter()
+            .any(|candidate| candidate == namespace)
     }
 
     /// Expand mixin `@Mixin` targets into every JVM owner slash form that may
@@ -362,13 +442,13 @@ impl MappingContext {
             display = r_name;
             mapped = r_mapped;
         }
-        if let Some(ref tiny) = self.tiny {
-            if let Some(t_name) = tiny.resolve_method(&class_slash, &display) {
-                if t_name != display {
-                    mapped = true;
-                }
-                display = t_name;
+        if let Some(ref tiny) = self.tiny
+            && let Some(t_name) = tiny.resolve_method(&class_slash, &display)
+        {
+            if t_name != display {
+                mapped = true;
             }
+            display = t_name;
         }
 
         let (canonical, namespace) = self.canonicalize(&class_slash, method, &display);
@@ -504,6 +584,27 @@ mod tests {
         assert_eq!(
             map.to_intermediary_class("net.minecraft.server.MinecraftServer"),
             Some("net/minecraft/class_3218".to_string())
+        );
+    }
+
+    #[test]
+    fn mapping_graph_translates_official_intermediary_and_named_symbols() {
+        let tiny = "tiny\t2\t0\tofficial\tintermediary\tnamed\n\
+                    c\ta\tnet/minecraft/class_3218\tnet/minecraft/server/MinecraftServer\n\
+                    \tm\t()V\tb\tmethod_1574\ttick\n";
+        let map = TinyMappings::parse(tiny).unwrap();
+        assert!(map.has_namespace("official"));
+        assert_eq!(
+            map.translate_class_to("net.minecraft.server.MinecraftServer", "official"),
+            Some("a".to_string())
+        );
+        assert_eq!(
+            map.translate_class_to("a", "intermediary"),
+            Some("net/minecraft/class_3218".to_string())
+        );
+        assert_eq!(
+            map.translate_method_to("net.minecraft.server.MinecraftServer", "tick", "official"),
+            Some("b".to_string())
         );
     }
 

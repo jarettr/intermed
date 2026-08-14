@@ -70,6 +70,8 @@ pub struct ClasspathCoverage {
     pub loader: bool,
     pub minecraft_classes: usize,
     pub mod_classes: usize,
+    /// Exact class-name family of the explicit Minecraft artifact.
+    pub minecraft_namespace: String,
     /// Scopes that were *not* indexed — absence-based conclusions about classes
     /// these scopes could provide are necessarily inconclusive (plan Phase 15).
     pub missing_scopes: Vec<String>,
@@ -111,6 +113,7 @@ impl ClasspathCoverage {
             loader,
             minecraft_classes,
             mod_classes,
+            minecraft_namespace: index.minecraft_class_namespace().as_str().to_string(),
             missing_scopes,
         }
     }

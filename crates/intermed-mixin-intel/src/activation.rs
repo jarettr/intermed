@@ -23,10 +23,10 @@ pub fn side_from_environment(env: &str) -> Side {
 /// `{ "config": …, "environment": … }` (Fabric/Quilt) overrides the array default,
 /// otherwise the array's own default side applies.
 pub fn entry_side(entry: &serde_json::Value, array_default: Side) -> Side {
-    if let serde_json::Value::Object(o) = entry {
-        if let Some(env) = o.get("environment").and_then(|e| e.as_str()) {
-            return side_from_environment(env);
-        }
+    if let serde_json::Value::Object(o) = entry
+        && let Some(env) = o.get("environment").and_then(|e| e.as_str())
+    {
+        return side_from_environment(env);
     }
     array_default
 }

@@ -707,6 +707,7 @@ mod tests {
                 path: "/mods".into(),
                 kind: TargetKind::ModsDir,
             },
+            analysis_environment: Default::default(),
             environment: Environment::default(),
             summary: Summary {
                 total: 1,
@@ -726,6 +727,8 @@ mod tests {
             fix_plan: Vec::new(),
             fact_stats: store.stats(),
             collectors: Vec::new(),
+            analysis_configuration: Default::default(),
+            mixin_coverage: Default::default(),
             rules: Vec::new(),
             operational_errors: Vec::new(),
             deferred_layers: Vec::new(),

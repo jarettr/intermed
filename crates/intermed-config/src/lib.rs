@@ -147,10 +147,10 @@ impl IntermedConfig {
             push(&path, &mut merged)?;
         } else {
             // Home (global, lower precedence) before project (local, higher).
-            if let Some(home) = home_config_path() {
-                if home.is_file() {
-                    push(&home, &mut merged)?;
-                }
+            if let Some(home) = home_config_path()
+                && home.is_file()
+            {
+                push(&home, &mut merged)?;
             }
             for rel in DISCOVERY_PATHS {
                 let path = PathBuf::from(rel);
@@ -240,10 +240,10 @@ impl IntermedConfig {
 }
 
 fn home_config_path() -> Option<PathBuf> {
-    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Some(PathBuf::from(xdg).join("intermed").join("config.toml"));
-        }
+    if let Some(xdg) = env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Some(PathBuf::from(xdg).join("intermed").join("config.toml"));
     }
     env::var_os("HOME").map(|home| {
         PathBuf::from(home)
@@ -313,9 +313,9 @@ fn from_merged_value(value: toml::Value) -> Result<IntermedConfig, ConfigError> 
 
 fn parse_mixin_level(raw: &str) -> MixinLevel {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "normal" => MixinLevel::Normal,
+        "basic" | "normal" => MixinLevel::Basic,
         "full" => MixinLevel::Full,
-        _ => MixinLevel::Detailed,
+        _ => MixinLevel::Standard,
     }
 }
 
@@ -376,16 +376,18 @@ fn apply_env(cfg: &mut IntermedConfig) {
     );
     env_usize("INTERMED_LAB_EXCERPT_MAX", &mut cfg.lab.excerpt_max);
     env_usize("INTERMED_JOBS", &mut cfg.runtime.jobs);
-    if let Ok(v) = env::var("INTERMED_METADATA_LEVEL") {
-        if !v.trim().is_empty() {
-            cfg.metadata.level = v;
-        }
+    if let Ok(v) = env::var("INTERMED_METADATA_LEVEL")
+        && !v.trim().is_empty()
+    {
+        cfg.metadata.level = v;
     }
-    if let Ok(v) = env::var("INTERMED_MIXIN_LEVEL") {
-        if !v.trim().is_empty() {
-            cfg.mixin.level = v;
-        }
+    if let Ok(v) = env::var("INTERMED_MIXIN_LEVEL")
+        && !v.trim().is_empty()
+    {
+        cfg.mixin.level = v;
+        cfg.mixin.enabled = true;
     }
+    env_bool("INTERMED_MIXIN_ENABLED", &mut cfg.mixin.enabled);
     env_bool_opt(
         "INTERMED_MIXIN_HANDLER_EFFECTS",
         &mut cfg.mixin.handler_effects,
@@ -394,9 +396,19 @@ fn apply_env(cfg: &mut IntermedConfig) {
         "INTERMED_MIXIN_RECOMMENDATIONS",
         &mut cfg.mixin.recommendations,
     );
-    if let Ok(v) = env::var("INTERMED_RESOURCE_LEVEL") {
-        if !v.trim().is_empty() {
-            cfg.resource.level = v;
+    if let Ok(v) = env::var("INTERMED_RESOURCE_LEVEL")
+        && !v.trim().is_empty()
+    {
+        cfg.resource.level = v;
+    }
+}
+
+fn env_bool(key: &str, target: &mut bool) {
+    if let Ok(v) = env::var(key) {
+        match v.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => *target = true,
+            "0" | "false" | "no" | "off" => *target = false,
+            _ => {}
         }
     }
 }
@@ -412,42 +424,42 @@ fn env_bool_opt(key: &str, target: &mut Option<bool>) {
 }
 
 fn env_u64(key: &str, target: &mut u64) {
-    if let Ok(v) = env::var(key) {
-        if let Ok(n) = v.parse() {
-            *target = n;
-        }
+    if let Ok(v) = env::var(key)
+        && let Ok(n) = v.parse()
+    {
+        *target = n;
     }
 }
 
 fn env_i64(key: &str, target: &mut i64) {
-    if let Ok(v) = env::var(key) {
-        if let Ok(n) = v.parse() {
-            *target = n;
-        }
+    if let Ok(v) = env::var(key)
+        && let Ok(n) = v.parse()
+    {
+        *target = n;
     }
 }
 
 fn env_usize(key: &str, target: &mut usize) {
-    if let Ok(v) = env::var(key) {
-        if let Ok(n) = v.parse() {
-            *target = n;
-        }
+    if let Ok(v) = env::var(key)
+        && let Ok(n) = v.parse()
+    {
+        *target = n;
     }
 }
 
 fn env_f64(key: &str, target: &mut f64) {
-    if let Ok(v) = env::var(key) {
-        if let Ok(n) = v.parse() {
-            *target = n;
-        }
+    if let Ok(v) = env::var(key)
+        && let Ok(n) = v.parse()
+    {
+        *target = n;
     }
 }
 
 fn env_f32(key: &str, target: &mut f32) {
-    if let Ok(v) = env::var(key) {
-        if let Ok(n) = v.parse() {
-            *target = n;
-        }
+    if let Ok(v) = env::var(key)
+        && let Ok(n) = v.parse()
+    {
+        *target = n;
     }
 }
 

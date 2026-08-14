@@ -3,9 +3,12 @@
 //! JSON / SARIF output; they never recompute anything.
 
 use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use intermed_evidence::{EvidenceSummaryItem, Finding, FindingVisibility, FixCandidate, Severity};
 use intermed_facts::{Fact, FactStore, kind};
@@ -27,6 +30,14 @@ pub struct TargetView {
     pub kind: TargetKind,
 }
 
+/// Environment of the InterMed process itself. It is deliberately separate
+/// from [`DoctorReport::environment`], which describes the analyzed target.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisEnvironment {
+    pub os: Option<String>,
+    pub java_version: Option<String>,
+}
+
 /// Severity histogram + overall verdict.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Summary {
@@ -36,6 +47,21 @@ pub struct Summary {
     pub note: usize,
     pub info: usize,
     pub total: usize,
+    /// Default-surface fatal/error conclusions with sufficient certainty.
+    #[serde(default)]
+    pub confirmed_problems: usize,
+    /// Default-surface warnings that require human review.
+    #[serde(default)]
+    pub needs_review: usize,
+    /// Findings or operational results that explicitly mark analysis incomplete.
+    #[serde(default)]
+    pub incomplete_analysis: usize,
+    /// Default-surface note/info context, not a confirmed problem.
+    #[serde(default)]
+    pub context: usize,
+    /// Raw detail retained outside the default report surface.
+    #[serde(default)]
+    pub hidden_details: usize,
     /// Highest severity present, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worst: Option<Severity>,
@@ -53,6 +79,22 @@ impl Summary {
                 Severity::Info => s.info += 1,
             }
             s.worst = Some(s.worst.map_or(f.severity, |w| w.max(f.severity)));
+            if f.visibility != FindingVisibility::Default {
+                s.hidden_details += 1;
+                continue;
+            }
+            let incomplete = f.machine_tags.iter().any(|tag| tag == "incomplete")
+                || f.id.starts_with("scan-incomplete:")
+                || f.id.contains("analysis-incomplete");
+            if incomplete {
+                s.incomplete_analysis += 1;
+            } else {
+                match f.severity {
+                    Severity::Fatal | Severity::Error => s.confirmed_problems += 1,
+                    Severity::Warn => s.needs_review += 1,
+                    Severity::Note | Severity::Info => s.context += 1,
+                }
+            }
         }
         s.total = findings.len();
         s
@@ -74,6 +116,102 @@ pub struct CollectorReport {
     pub status: String,
     pub facts_emitted: usize,
     pub message: String,
+}
+
+/// Effective analysis configuration recorded with the result, after config,
+/// environment, and CLI precedence have all been resolved.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisConfiguration {
+    pub enabled_collectors: Vec<String>,
+    pub disabled_collectors: Vec<String>,
+    pub mixin: MixinAnalysisConfiguration,
+    /// Reproduction identity for the analyzer build and effective inputs.
+    #[serde(default)]
+    pub fingerprint: AnalyzerFingerprint,
+    /// Content-addressed inputs observed by collectors (primarily mod JARs).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_manifest: Vec<InputFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputFingerprint {
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalyzerFingerprint {
+    pub git_commit: Option<String>,
+    pub git_dirty: Option<bool>,
+    pub cargo_features: Vec<String>,
+    pub effective_config_sha256: Option<String>,
+    pub rule_pack_sha256: Option<String>,
+    pub minecraft_jar_sha256: Option<String>,
+    pub mappings_sha256: Option<String>,
+    pub target_manifest_sha256: Option<String>,
+    pub cache_mode: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixinAnalysisConfiguration {
+    pub enabled: bool,
+    pub level: String,
+    pub handler_effects: bool,
+    pub recommendations: bool,
+    pub minecraft_jar_supplied: bool,
+    pub mappings_supplied: bool,
+}
+
+/// Auditable passport for Layer F. Counts describe what was actually discovered
+/// and resolved, while hashes bind the result to the supplied game/mapping data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MixinCoveragePassport {
+    pub status: String,
+    pub reason: String,
+    pub configs_discovered: usize,
+    pub configs_parsed: usize,
+    pub mixin_classes: usize,
+    pub target_classes: usize,
+    pub target_classes_resolved: usize,
+    pub target_methods: usize,
+    pub target_methods_resolved: usize,
+    pub namespaces: Vec<String>,
+    pub classpath_level: Option<String>,
+    pub minecraft_classes: usize,
+    pub mod_classes: usize,
+    pub minecraft_namespace: Option<String>,
+    pub unresolved_targets: usize,
+    pub truncations: usize,
+    pub minecraft_jar_sha256: Option<String>,
+    pub mappings_source: Option<String>,
+    pub mappings_sha256: Option<String>,
+}
+
+impl Default for MixinCoveragePassport {
+    fn default() -> Self {
+        Self {
+            status: "unavailable".to_string(),
+            reason: "Layer F was not registered in this report".to_string(),
+            configs_discovered: 0,
+            configs_parsed: 0,
+            mixin_classes: 0,
+            target_classes: 0,
+            target_classes_resolved: 0,
+            target_methods: 0,
+            target_methods_resolved: 0,
+            namespaces: Vec::new(),
+            classpath_level: None,
+            minecraft_classes: 0,
+            mod_classes: 0,
+            minecraft_namespace: None,
+            unresolved_targets: 0,
+            truncations: 0,
+            minecraft_jar_sha256: None,
+            mappings_source: None,
+            mappings_sha256: None,
+        }
+    }
 }
 
 /// Per-rule record.
@@ -116,12 +254,18 @@ pub struct DoctorReport {
     pub tool_version: String,
     pub generated_at: DateTime<Utc>,
     pub target: TargetView,
+    #[serde(default)]
+    pub analysis_environment: AnalysisEnvironment,
     pub environment: Environment,
     pub summary: Summary,
     pub findings: Vec<Finding>,
     pub fix_plan: Vec<FixPlanItem>,
     pub fact_stats: BTreeMap<String, usize>,
     pub collectors: Vec<CollectorReport>,
+    #[serde(default)]
+    pub analysis_configuration: AnalysisConfiguration,
+    #[serde(default)]
+    pub mixin_coverage: MixinCoveragePassport,
     pub rules: Vec<RuleStat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operational_errors: Vec<OperationalError>,
@@ -193,16 +337,30 @@ fn environment_from_facts(store: &FactStore) -> Environment {
     env
 }
 
+fn analysis_environment_from_facts(store: &FactStore) -> AnalysisEnvironment {
+    let Some(fact) = store.by_kind(kind::ANALYSIS_ENVIRONMENT).next() else {
+        return AnalysisEnvironment::default();
+    };
+    AnalysisEnvironment {
+        os: fact.attr("os").map(str::to_string),
+        java_version: fact.attr("java").map(str::to_string),
+    }
+}
+
 /// The loader the scanned content targets (consensus of the per-mod / per-plugin
 /// `loader` facts). Covers both mod loaders (Fabric/Forge/NeoForge) and server
 /// plugin platforms (Bukkit/Spigot/Paper), which ship `plugin` facts, not `mod`.
 fn infer_loader_from_mods(store: &FactStore) -> Option<Loader> {
     let mut loaders = std::collections::BTreeSet::new();
-    for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
-        if let Some(l) = f.attr("loader") {
-            if Loader::parse(l).is_some() {
-                loaders.insert(l);
-            }
+    for f in store
+        .by_kind(kind::MOD)
+        .chain(store.by_kind(kind::PLUGIN))
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
+    {
+        if let Some(l) = f.attr("loader")
+            && Loader::parse(l).is_some()
+        {
+            loaders.insert(l);
         }
     }
     // A majority is not an instance baseline: one foreign-loader jar is exactly
@@ -222,9 +380,13 @@ fn infer_minecraft_version(store: &FactStore) -> Option<String> {
         BTreeMap::new();
     let mod_files: BTreeMap<&str, &str> = store
         .by_kind(kind::MOD)
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
         .filter_map(|fact| fact.attr("file").map(|file| (fact.subject.as_str(), file)))
         .collect();
     for f in store.by_kind(kind::DEPENDENCY) {
+        if f.attr("identity_certainty") == Some("undecidable") {
+            continue;
+        }
         if f.attr("dep") != Some("minecraft") {
             continue;
         }
@@ -250,7 +412,10 @@ fn infer_minecraft_version(store: &FactStore) -> Option<String> {
     // Filenames are secondary corroboration, not authority. They are useful for
     // old Forge packs whose descriptors omit Minecraft entirely. If one mod's
     // filename and descriptor disagree, that mod casts no vote.
-    for f in store.by_kind(kind::MOD) {
+    for f in store
+        .by_kind(kind::MOD)
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
+    {
         let Some(file) = f.attr("file") else {
             continue;
         };
@@ -267,7 +432,10 @@ fn infer_minecraft_version(store: &FactStore) -> Option<String> {
     // Legacy Forge jars often have no recognized modern descriptor at all.
     // Checksums are emitted once per scanned archive, so their subjects provide
     // a complete filename census without counting the same jar once per alias.
-    for f in store.by_kind(kind::CHECKSUM) {
+    for f in store
+        .by_kind(kind::CHECKSUM)
+        .filter(|fact| fact.attr("input_kind") != Some("runtime-log"))
+    {
         for token in version_tokens(&f.subject) {
             if plausible_minecraft_version(&token) {
                 candidates_by_artifact
@@ -424,6 +592,9 @@ fn merge_into(findings: &mut [Finding], winner: usize, loser: usize) {
     let loser_sources = findings[loser].rule_sources.clone();
     let loser_fixes = findings[loser].fix_candidates.clone();
     let loser_components = findings[loser].affected_components.clone();
+    let loser_requirements = findings[loser].coverage_requirements.clone();
+    let loser_refutability = findings[loser].runtime_refutability.clone();
+    let loser_proof = findings[loser].proof_kind;
 
     let w = &mut findings[winner];
     for e in loser_evidence {
@@ -444,6 +615,19 @@ fn merge_into(findings: &mut [Finding], winner: usize, loser: usize) {
         if !w.affected_components.contains(&comp) {
             w.affected_components.push(comp);
         }
+    }
+    for requirement in loser_requirements {
+        if !w.coverage_requirements.contains(&requirement) {
+            w.coverage_requirements.push(requirement);
+        }
+    }
+    for refutability in loser_refutability {
+        if !w.runtime_refutability.contains(&refutability) {
+            w.runtime_refutability.push(refutability);
+        }
+    }
+    if w.proof_kind.is_none() {
+        w.proof_kind = loser_proof;
     }
     for fix in loser_fixes {
         if !w
@@ -495,6 +679,11 @@ fn evidence_summary_item(fact: &Fact) -> EvidenceSummaryItem {
     if let Some(reason) = fact.attr("reason") {
         item.detail.insert("reason".to_string(), reason.to_string());
     }
+    for key in ["occurrence_id", "semantic_fingerprint"] {
+        if let Some(value) = fact.attr(key) {
+            item.detail.insert(key.to_string(), value.to_string());
+        }
+    }
     item
 }
 
@@ -504,6 +693,69 @@ fn split_csv(s: &str) -> Vec<String> {
         .filter(|p| !p.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn sha256_file(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hash.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", hash.finalize()))
+}
+
+fn fact_usize(fact: &Fact, attr: &str) -> usize {
+    fact.attr_int(attr)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+fn mixin_coverage_passport(
+    store: &FactStore,
+    collectors: &[CollectorReport],
+    settings: &crate::settings::DiagnosisSettings,
+) -> MixinCoveragePassport {
+    let collector = collectors
+        .iter()
+        .find(|collector| collector.layer == Layer::Mixin);
+    let coverage = store.by_kind(kind::MIXIN_CLASSPATH_COVERAGE).next();
+    let mut passport = MixinCoveragePassport {
+        status: collector
+            .map(|collector| collector.status.clone())
+            .unwrap_or_else(|| "unavailable".to_string()),
+        reason: collector
+            .map(|collector| collector.message.clone())
+            .unwrap_or_else(|| "Layer F was not registered".to_string()),
+        minecraft_jar_sha256: settings.minecraft_jar.as_deref().and_then(sha256_file),
+        mappings_source: settings
+            .minecraft_mappings
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        mappings_sha256: settings.minecraft_mappings.as_deref().and_then(sha256_file),
+        ..Default::default()
+    };
+    if let Some(fact) = coverage {
+        passport.configs_discovered = fact_usize(fact, "configs_discovered");
+        passport.configs_parsed = fact_usize(fact, "configs_parsed");
+        passport.mixin_classes = fact_usize(fact, "mixin_classes");
+        passport.target_classes = fact_usize(fact, "target_classes");
+        passport.target_classes_resolved = fact_usize(fact, "target_classes_resolved");
+        passport.target_methods = fact_usize(fact, "target_methods");
+        passport.target_methods_resolved = fact_usize(fact, "target_methods_resolved");
+        passport.namespaces = fact.attr("namespaces").map(split_csv).unwrap_or_default();
+        passport.classpath_level = fact.attr("level").map(str::to_string);
+        passport.minecraft_classes = fact_usize(fact, "minecraft_classes");
+        passport.mod_classes = fact_usize(fact, "mod_classes");
+        passport.minecraft_namespace = fact.attr("minecraft_namespace").map(str::to_string);
+        passport.unresolved_targets = fact_usize(fact, "unresolved_targets");
+        passport.truncations = fact_usize(fact, "truncations");
+    }
+    passport
 }
 
 /// Classify findings that describe a *normal state* rather than a problem so the
@@ -581,9 +833,119 @@ fn populate_evidence_summaries(findings: &mut [Finding], store: &FactStore) {
     }
 }
 
-/// Assemble the final report from everything gathered during a run.
+fn cluster_resource_conflicts(findings: &mut Vec<Finding>, store: &FactStore) {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (index, finding) in findings.iter().enumerate() {
+        if !finding.id.starts_with("recipe-output-override:") {
+            continue;
+        }
+        let writers = finding.evidence.iter().find_map(|edge| {
+            store
+                .get(edge.fact)
+                .and_then(|fact| fact.attr("writers"))
+                .map(|writers| {
+                    let mut writers = split_csv(writers);
+                    writers.sort();
+                    writers.join(" <-> ")
+                })
+        });
+        if let Some(writers) = writers.filter(|writers| !writers.is_empty()) {
+            groups.entry(writers).or_default().push(index);
+        }
+    }
+
+    let mut clustered = Vec::new();
+    for (writers, indexes) in groups.into_iter().filter(|(_, indexes)| indexes.len() >= 3) {
+        let severity = indexes
+            .iter()
+            .map(|index| findings[*index].severity)
+            .max()
+            .unwrap_or(Severity::Warn);
+        let paths = indexes
+            .iter()
+            .filter_map(|index| findings[*index].affected_components.first().cloned())
+            .collect::<Vec<_>>();
+        let sample = paths
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id_pair = writers
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+            .collect::<String>();
+        let mut builder = Finding::builder(
+            "resource-semantics",
+            format!("recipe-output-override-cluster:{id_pair}"),
+        )
+        .severity(severity)
+        .category(intermed_evidence::Category::Resource)
+        .title(format!(
+            "{} recipe output overrides between {writers}",
+            indexes.len()
+        ))
+        .explanation(format!(
+            "The same writer pair overrides {} recipe outputs. Review this as one load-order \
+             decision. Resources: {}{}",
+            indexes.len(),
+            sample,
+            if paths.len() > 12 {
+                format!(" … and {} more", paths.len() - 12)
+            } else {
+                String::new()
+            }
+        ))
+        .tag("resource")
+        .tag("recipe")
+        .tag("cluster")
+        .confidence(0.9)
+        .affects(writers.clone())
+        .fix(FixCandidate::advice(
+            "Choose the intended recipe owner for this writer pair and encode that decision in a small compatibility data pack instead of relying on load order.",
+        ));
+        for index in &indexes {
+            findings[*index].visibility = FindingVisibility::ExplainOnly;
+            findings[*index]
+                .machine_tags
+                .push("clustered-detail".to_string());
+            for evidence in &findings[*index].evidence {
+                builder = builder.evidence(evidence.clone());
+            }
+        }
+        clustered.push(builder.build());
+    }
+    findings.extend(clustered);
+}
+
+/// Assemble a report with default analysis settings.
 #[allow(clippy::too_many_arguments)]
 pub fn assemble(
+    tool_version: &str,
+    target: &Target,
+    store: &FactStore,
+    findings: Vec<Finding>,
+    collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
+    rule_stats: Vec<RuleStat>,
+    operational_errors: Vec<OperationalError>,
+    profile: Option<DiagnosticProfile>,
+) -> DoctorReport {
+    assemble_with_settings(
+        tool_version,
+        target,
+        store,
+        findings,
+        collectors,
+        rule_stats,
+        operational_errors,
+        profile,
+        &crate::settings::DiagnosisSettings::default(),
+    )
+}
+
+/// Assemble the final report from everything gathered during a configured run.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_with_settings(
     tool_version: &str,
     target: &Target,
     store: &FactStore,
@@ -592,6 +954,7 @@ pub fn assemble(
     rule_stats: Vec<RuleStat>,
     mut operational_errors: Vec<OperationalError>,
     profile: Option<DiagnosticProfile>,
+    settings: &crate::settings::DiagnosisSettings,
 ) -> DoctorReport {
     // 1. Collapse findings that share an id into one (unique-id contract).
     merge_findings_by_id(&mut findings);
@@ -600,9 +963,24 @@ pub fn assemble(
     crate::suppression::apply_semantic_override_suppression(&mut findings);
     // 2b. Downgrade static resource findings a data-pack script removes/replaces.
     crate::suppression::apply_runtime_caveats(&mut findings, store);
+    // 2c. Turn repetitive writer-pair recipe overrides into one actionable card;
+    // raw per-resource findings remain in JSON/ExplainOnly.
+    cluster_resource_conflicts(&mut findings, store);
     // 3. Demote "normal state" findings (safe merges, pack.mcmeta) so the default
     //    report can collapse them.
     apply_visibility_policy(&mut findings);
+    for finding in &mut findings {
+        let channel = if finding.id.starts_with("incident:")
+            || finding.machine_tags.iter().any(|tag| tag == "incident")
+        {
+            "incident-diagnosis"
+        } else {
+            "pack-health-static-review"
+        };
+        if !finding.machine_tags.iter().any(|tag| tag == channel) {
+            finding.machine_tags.push(channel.to_string());
+        }
+    }
     // 4. Lift the cited facts into an inline, structured evidence summary.
     populate_evidence_summaries(&mut findings, store);
 
@@ -620,18 +998,25 @@ pub fn assemble(
     // Stable ordering: worst severity first, then by id.
     findings.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.id.cmp(&b.id)));
 
-    let summary = Summary::tally(&findings);
+    let mut summary = Summary::tally(&findings);
 
-    let fix_plan = findings
+    let mut seen_fixes = std::collections::BTreeSet::new();
+    let mut fix_plan = Vec::new();
+    for finding in findings
         .iter()
-        .flat_map(|f| {
-            f.fix_candidates.iter().map(move |fc| FixPlanItem {
-                finding_id: f.id.clone(),
-                severity: f.severity,
-                fix: fc.clone(),
-            })
-        })
-        .collect();
+        .filter(|finding| finding.visibility == FindingVisibility::Default)
+    {
+        for fix in &finding.fix_candidates {
+            let key = (fix.description.clone(), fix.command.clone());
+            if seen_fixes.insert(key) {
+                fix_plan.push(FixPlanItem {
+                    finding_id: finding.id.clone(),
+                    severity: finding.severity,
+                    fix: fix.clone(),
+                });
+            }
+        }
+    }
 
     let mut collector_reports = Vec::new();
     let mut deferred_layers = Vec::new();
@@ -652,7 +1037,9 @@ pub fn assemble(
             });
         }
         let status = match outcome.status {
+            CollectorStatus::Disabled => "disabled",
             CollectorStatus::Active => "active",
+            CollectorStatus::Incomplete => "incomplete",
             CollectorStatus::Skipped => "skipped",
             CollectorStatus::Deferred => "deferred",
             CollectorStatus::Failed => "failed",
@@ -667,6 +1054,53 @@ pub fn assemble(
             message: outcome.message,
         });
     }
+    summary.incomplete_analysis += collector_reports
+        .iter()
+        .filter(|collector| matches!(collector.status.as_str(), "incomplete" | "failed"))
+        .count();
+    summary.incomplete_analysis += operational_errors
+        .iter()
+        .filter(|error| error.stage != "collector")
+        .count();
+
+    let enabled_collectors = collector_reports
+        .iter()
+        .filter(|collector| collector.status != "disabled")
+        .map(|collector| collector.id.clone())
+        .collect();
+    let disabled_collectors = collector_reports
+        .iter()
+        .filter(|collector| collector.status == "disabled")
+        .map(|collector| collector.id.clone())
+        .collect();
+    let mixin_enabled = collector_reports
+        .iter()
+        .any(|collector| collector.layer == Layer::Mixin && collector.status != "disabled");
+    let analysis_configuration = AnalysisConfiguration {
+        enabled_collectors,
+        disabled_collectors,
+        mixin: MixinAnalysisConfiguration {
+            enabled: mixin_enabled,
+            level: settings.mixin.level.as_str().to_string(),
+            handler_effects: settings.mixin.handler_effects,
+            recommendations: settings.mixin.recommendations,
+            minecraft_jar_supplied: settings.minecraft_jar.is_some(),
+            mappings_supplied: settings.minecraft_mappings.is_some(),
+        },
+        fingerprint: AnalyzerFingerprint::default(),
+        input_manifest: store
+            .by_kind(kind::CHECKSUM)
+            .filter(|fact| fact.attr("algorithm") == Some("sha256"))
+            .filter_map(|fact| {
+                fact.attr("hex").map(|sha256| InputFingerprint {
+                    kind: fact.attr("input_kind").unwrap_or("mod-archive").to_string(),
+                    path: fact.subject.clone(),
+                    sha256: sha256.to_string(),
+                })
+            })
+            .collect(),
+    };
+    let mixin_coverage = mixin_coverage_passport(store, &collector_reports, settings);
 
     DoctorReport {
         schema: REPORT_SCHEMA.to_string(),
@@ -676,12 +1110,15 @@ pub fn assemble(
             path: target.path.display().to_string(),
             kind: target.kind,
         },
+        analysis_environment: analysis_environment_from_facts(store),
         environment: environment_from_facts(store),
         summary,
         findings,
         fix_plan,
         fact_stats: store.stats(),
         collectors: collector_reports,
+        analysis_configuration,
+        mixin_coverage,
         rules: rule_stats,
         operational_errors,
         deferred_layers,
@@ -716,6 +1153,42 @@ mod tests {
         m.insert("1.21.1".to_string(), 2);
         m.insert("1.21.2".to_string(), 2);
         assert_eq!(consensus_version(m), None);
+    }
+
+    #[test]
+    fn recipe_overrides_cluster_by_writer_pair_without_losing_raw_detail() {
+        let mut store = FactStore::new();
+        let mut findings = Vec::new();
+        for index in 0..4 {
+            let path = format!("data/example/recipe/{index}.json");
+            let fact = store
+                .fact("resource", kind::RESOURCE_SEMANTIC_DIFF)
+                .subject(path.clone())
+                .attr("writers", "addon,base")
+                .emit();
+            findings.push(
+                Finding::builder("resource", format!("recipe-output-override:{path}"))
+                    .severity(Severity::Warn)
+                    .category(intermed_evidence::Category::Resource)
+                    .evidence(intermed_evidence::EvidenceEdge::subject(fact))
+                    .affects(path)
+                    .build(),
+            );
+        }
+        cluster_resource_conflicts(&mut findings, &store);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|finding| finding.id.starts_with("recipe-output-override-cluster:"))
+                .count(),
+            1
+        );
+        assert!(
+            findings
+                .iter()
+                .filter(|finding| finding.id.starts_with("recipe-output-override:data/"))
+                .all(|finding| finding.visibility == FindingVisibility::ExplainOnly)
+        );
     }
 
     #[test]

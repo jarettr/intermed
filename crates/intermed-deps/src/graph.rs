@@ -122,13 +122,18 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
     let loader_by_mod: HashMap<String, String> = store
         .by_kind(kind::MOD)
         .chain(store.by_kind(kind::PLUGIN))
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
         .filter_map(|fact| {
             fact.attr("loader")
                 .map(|loader| (fact.subject.clone(), loader.to_string()))
         })
         .collect();
 
-    for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
+    for f in store
+        .by_kind(kind::MOD)
+        .chain(store.by_kind(kind::PLUGIN))
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
+    {
         let version = f.attr("version").unwrap_or("0").to_string();
         // `version_ambiguous` describes the generic display normalizer, not the
         // loader's comparison language. Fabric/Quilt order valid raw extended
@@ -167,21 +172,24 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
         .next()
         .and_then(|f| f.attr("mc_version").map(str::to_string));
 
-    if let Some(mc) = &mc_version {
-        if semver::parse_mod_version(mc).is_some() {
-            let already = packages.iter().any(|p| p.id == "minecraft");
-            if !already {
-                packages.push(ModPackage {
-                    id: "minecraft".to_string(),
-                    version: mc.clone(),
-                    parsed_version: Some(mc.clone()),
-                });
-            }
+    if let Some(mc) = &mc_version
+        && semver::parse_mod_version(mc).is_some()
+    {
+        let already = packages.iter().any(|p| p.id == "minecraft");
+        if !already {
+            packages.push(ModPackage {
+                id: "minecraft".to_string(),
+                version: mc.clone(),
+                parsed_version: Some(mc.clone()),
+            });
         }
     }
 
     let mut edges = Vec::new();
-    for dep in store.by_kind(kind::DEPENDENCY) {
+    for dep in store
+        .by_kind(kind::DEPENDENCY)
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
+    {
         let dep_id = dep.attr("dep").unwrap_or("").to_string();
         if dep_id.is_empty() {
             continue;

@@ -55,8 +55,8 @@ defaults to the current directory. The target kind is auto-detected.
 |------|--------|
 | `--metadata-level <basic\|enriched\|full>` | Metadata detail. Default `enriched`. |
 | `--resource-level <basic\|semantic\|full>` | Resource/data semantics depth. `basic` off, `semantic` core domains, `full` all domains. Default `semantic`. |
-| `--mixin-risk` | Enable the mixin analysis. |
-| `--mixin-level <normal\|detailed\|full>` | Mixin depth. Default `detailed`. |
+| `--mixin-level basic\|standard\|full` | Enable Layer F at the requested depth. |
+| `--mixin-risk` | Compatibility alias for `--mixin-level standard`. |
 | `--mixin-handler-effects` / `--no-mixin-handler-effects` | Toggle per-handler effect facts. |
 | `--mixin-recommendations` / `--no-mixin-recommendations` | Toggle mixin fix recommendations. |
 | `--performance` | Import a Spark profile (see `--spark-report`). |

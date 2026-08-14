@@ -946,30 +946,29 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
         return classify_tag_group(group);
     }
 
-    if is_lang_json_path(path) {
-        if let Some(per_writer) = group
+    if is_lang_json_path(path)
+        && let Some(per_writer) = group
             .iter()
             .map(|b| lang_json_keys(&b.bytes))
             .collect::<Option<Vec<_>>>()
-        {
-            // Key-level diff: a JSON lang file is always mechanically mergeable as
-            // a key union, but report *how many* shared keys map to different text
-            // (the last writer wins per key). The semantic "which tooltip shows"
-            // finding is Layer M's `lang-key-conflict`; Layer E only records the
-            // structural count so the overlay/report can show it without a
-            // duplicate finding.
-            let conflicts = count_conflicting_keys(&per_writer);
-            let reason = if conflicts == 0 {
-                "JSON language files merge as a deterministic key union (no shared key differs)"
-                    .to_string()
-            } else {
-                format!(
-                    "JSON language files merge as a key union; {conflicts} shared key(s) map to \
+    {
+        // Key-level diff: a JSON lang file is always mechanically mergeable as
+        // a key union, but report *how many* shared keys map to different text
+        // (the last writer wins per key). The semantic "which tooltip shows"
+        // finding is Layer M's `lang-key-conflict`; Layer E only records the
+        // structural count so the overlay/report can show it without a
+        // duplicate finding.
+        let conflicts = count_conflicting_keys(&per_writer);
+        let reason = if conflicts == 0 {
+            "JSON language files merge as a deterministic key union (no shared key differs)"
+                .to_string()
+        } else {
+            format!(
+                "JSON language files merge as a key union; {conflicts} shared key(s) map to \
                      different text and are resolved by load order"
-                )
-            };
-            return (ConflictClass::LangJsonMerge, reason);
-        }
+            )
+        };
+        return (ConflictClass::LangJsonMerge, reason);
     }
 
     if is_lang_properties_path(path)

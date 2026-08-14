@@ -71,6 +71,84 @@ fn missing_dependency_is_error() {
 }
 
 #[test]
+fn dependency_from_undecidable_descriptor_is_context_not_error() {
+    let mut store = FactStore::new();
+    store
+        .fact("meta", kind::MOD)
+        .subject("dual-loader-artifact")
+        .attr("version", "1.0.0")
+        .attr("loader", "fabric")
+        .attr("identity_certainty", "undecidable")
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("dual-loader-artifact")
+        .attr("dep", "fabric-api")
+        .attr("range", "*")
+        .attr("mandatory", true)
+        .attr("relation", "depends")
+        .attr("identity_certainty", "undecidable")
+        .emit();
+
+    let target = Target::with_kind(".", TargetKind::ModsDir);
+    let findings = DependencyRule
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|finding| { finding.severity != intermed_doctor_core::evidence::Severity::Error })
+    );
+    assert!(findings.iter().any(|finding| {
+        finding.id == "dependency-identity-undecidable:dual-loader-artifact->fabric-api"
+    }));
+    assert!(!matches!(
+        intermed_deps::resolve_store(&store).unwrap(),
+        intermed_deps::ResolutionOutcome::Unsatisfiable { .. }
+    ));
+}
+
+#[test]
+fn plausible_legacy_provider_prevents_definite_absence_claim() {
+    let mut store = FactStore::new();
+    store
+        .fact("meta", kind::MOD)
+        .subject("enhancedvisuals")
+        .attr("version", "1.0.0")
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("enhancedvisuals")
+        .attr("dep", "creativecore")
+        .attr("range", "*")
+        .attr("mandatory", true)
+        .emit();
+    store
+        .fact("sbom", kind::CHECKSUM)
+        .subject("CreativeCore_v1.10.71_mc1.12.2.jar")
+        .attr("sha256", "00")
+        .emit();
+
+    let target = Target::with_kind(".", TargetKind::ModsDir);
+    let findings = DependencyRule
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.id != "missing-dependency:enhancedvisuals->creativecore")
+    );
+    let unresolved = findings
+        .iter()
+        .find(|finding| finding.id == "provider-identity-unresolved:enhancedvisuals->creativecore")
+        .expect("plausible physical artifact must remain visible");
+    assert_eq!(
+        unresolved.severity,
+        intermed_doctor_core::evidence::Severity::Warn
+    );
+}
+
+#[test]
 fn wrong_version_with_fabric_space_and_range() {
     let mut store = FactStore::new();
     store

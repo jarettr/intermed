@@ -6,9 +6,12 @@
 //! It lives here, once, so every writer shares the exact same guarantee instead
 //! of re-implementing it per crate.
 
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Write `bytes` to `path` atomically: stage into a unique temp sibling, then
 /// rename over the target. A concurrent reader or a crash mid-write therefore
@@ -21,13 +24,31 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("out");
     let tmp = parent.join(format!(
-        ".{file_name}.tmp-{}-{:?}",
+        ".{file_name}.tmp-{}-{:?}-{}",
         std::process::id(),
-        std::thread::current().id()
+        std::thread::current().id(),
+        TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    fs::write(&tmp, bytes)?;
+    let stage_result = (|| {
+        let mut staged = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        staged.write_all(bytes)?;
+        staged.flush()?;
+        staged.sync_all()?;
+        Ok::<_, io::Error>(())
+    })();
+    if let Err(error) = stage_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
     match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            // Persist the directory entry as well as the file contents. This is
+            // required for cache/index/signature state to survive a crash after
+            // rename rather than merely appearing atomic to concurrent readers.
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
             Err(e)

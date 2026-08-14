@@ -102,9 +102,224 @@ fn generic_version_in_range(version: &str, range: &str) -> Option<bool> {
 }
 
 fn maven_version_in_range(version: &str, range: &str) -> Option<bool> {
-    // Forge/NeoForge dependency declarations are Maven intervals. A bare value
-    // is retained as a conservative exact/generic requirement for legacy facts.
-    generic_version_in_range(version, range)
+    let version = MavenVersion::parse(version)?;
+    let range = range.trim();
+    if !range.starts_with(['[', '(']) {
+        // A bare Forge/NeoForge requirement is treated as an exact constraint in
+        // the static model. Maven itself calls this a soft recommendation, but
+        // InterMed has no repository selection step in which to apply one.
+        let expected = range.strip_prefix('=').unwrap_or(range);
+        return Some(version.cmp(&MavenVersion::parse(expected)?) == Ordering::Equal);
+    }
+    let intervals = split_maven_intervals(range);
+    if intervals.is_empty() {
+        return None;
+    }
+    let mut matched = false;
+    for interval in intervals {
+        matched |= maven_interval_matches(&version, &interval)?;
+    }
+    Some(matched)
+}
+
+#[derive(Debug, Clone)]
+struct MavenVersion(Vec<MavenItem>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MavenItem {
+    Number(String),
+    Qualifier(String),
+    Minus,
+}
+
+impl MavenVersion {
+    fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty()
+            || !raw
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | '+'))
+        {
+            return None;
+        }
+        let mut items = Vec::new();
+        let mut token = String::new();
+        let mut numeric = None;
+        let flush = |token: &mut String, numeric: Option<bool>, items: &mut Vec<MavenItem>| {
+            if token.is_empty() {
+                return;
+            }
+            if numeric == Some(true) {
+                let normalized = token.trim_start_matches('0');
+                items.push(MavenItem::Number(if normalized.is_empty() {
+                    "0".to_string()
+                } else {
+                    normalized.to_string()
+                }));
+            } else {
+                items.push(MavenItem::Qualifier(normalize_maven_qualifier(token)));
+            }
+            token.clear();
+        };
+        for ch in raw.chars() {
+            if matches!(ch, '.' | '-' | '_' | '+') {
+                flush(&mut token, numeric, &mut items);
+                if ch == '-' {
+                    items.push(MavenItem::Minus);
+                }
+                numeric = None;
+                continue;
+            }
+            let is_numeric = ch.is_ascii_digit();
+            if numeric.is_some_and(|was_numeric| was_numeric != is_numeric) {
+                flush(&mut token, numeric, &mut items);
+                items.push(MavenItem::Minus);
+            }
+            numeric = Some(is_numeric);
+            token.push(ch.to_ascii_lowercase());
+        }
+        flush(&mut token, numeric, &mut items);
+        (!items.is_empty()).then_some(Self(items))
+    }
+}
+
+impl Ord for MavenVersion {
+    fn cmp(&self, other: &Self) -> Ordering {
+        compare_maven_items(&self.0, &other.0)
+    }
+}
+
+impl PartialEq for MavenVersion {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl Eq for MavenVersion {}
+
+impl PartialOrd for MavenVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+fn normalize_maven_qualifier(raw: &str) -> String {
+    match raw.to_ascii_lowercase().as_str() {
+        "a" => "alpha".into(),
+        "b" => "beta".into(),
+        "m" => "milestone".into(),
+        "cr" => "rc".into(),
+        "ga" | "final" | "release" => String::new(),
+        value => value.to_string(),
+    }
+}
+
+fn maven_qualifier_key(value: &str) -> (u8, &str) {
+    match value {
+        "alpha" => (0, ""),
+        "beta" => (1, ""),
+        "milestone" => (2, ""),
+        "rc" => (3, ""),
+        "snapshot" => (4, ""),
+        "" => (5, ""),
+        "sp" => (6, ""),
+        // Unknown qualifiers sort after the well-known Maven qualifiers and
+        // deterministically among themselves, matching ComparableVersion's
+        // `qualifier-<name>` fallback ordering.
+        other => (7, other),
+    }
+}
+
+fn compare_maven_item(left: Option<&MavenItem>, right: Option<&MavenItem>) -> Ordering {
+    match (left, right) {
+        (Some(MavenItem::Number(a)), Some(MavenItem::Number(b))) => a
+            .len()
+            .cmp(&b.len())
+            .then_with(|| a.as_bytes().cmp(b.as_bytes())),
+        (Some(MavenItem::Qualifier(a)), Some(MavenItem::Qualifier(b))) => {
+            maven_qualifier_key(a).cmp(&maven_qualifier_key(b))
+        }
+        (Some(MavenItem::Number(_)), Some(MavenItem::Qualifier(_))) => Ordering::Greater,
+        (Some(MavenItem::Qualifier(_)), Some(MavenItem::Number(_))) => Ordering::Less,
+        (Some(MavenItem::Minus), Some(MavenItem::Number(_))) => Ordering::Less,
+        (Some(MavenItem::Minus), Some(MavenItem::Qualifier(_))) => Ordering::Greater,
+        (Some(MavenItem::Number(_)), Some(MavenItem::Minus)) => Ordering::Greater,
+        (Some(MavenItem::Qualifier(_)), Some(MavenItem::Minus)) => Ordering::Less,
+        (Some(MavenItem::Number(a)), None) => compare_numeric_to_zero(a),
+        (None, Some(MavenItem::Number(b))) => compare_numeric_to_zero(b).reverse(),
+        (Some(MavenItem::Qualifier(a)), None) => {
+            maven_qualifier_key(a).cmp(&maven_qualifier_key(""))
+        }
+        (None, Some(MavenItem::Qualifier(b))) => {
+            maven_qualifier_key("").cmp(&maven_qualifier_key(b))
+        }
+        (Some(MavenItem::Minus), None) | (None, Some(MavenItem::Minus)) => Ordering::Equal,
+        (Some(MavenItem::Minus), Some(MavenItem::Minus)) => Ordering::Equal,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+fn compare_maven_items(left: &[MavenItem], right: &[MavenItem]) -> Ordering {
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let order = match (left.get(index), right.get(index)) {
+            (Some(MavenItem::Minus), Some(MavenItem::Minus)) => {
+                compare_maven_items(&left[index + 1..], &right[index + 1..])
+            }
+            (Some(MavenItem::Minus), None) => compare_maven_items(&left[index + 1..], &[]),
+            (None, Some(MavenItem::Minus)) => compare_maven_items(&[], &right[index + 1..]),
+            pair => compare_maven_item(pair.0, pair.1),
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    Ordering::Equal
+}
+
+fn compare_numeric_to_zero(value: &str) -> Ordering {
+    if value == "0" {
+        Ordering::Equal
+    } else {
+        Ordering::Greater
+    }
+}
+
+fn maven_interval_matches(version: &MavenVersion, interval: &str) -> Option<bool> {
+    let lower_inclusive = interval.starts_with('[');
+    if !lower_inclusive && !interval.starts_with('(') {
+        return None;
+    }
+    let upper_inclusive = interval.ends_with(']');
+    if !upper_inclusive && !interval.ends_with(')') {
+        return None;
+    }
+    let inner = interval
+        .strip_prefix(['[', '('])
+        .and_then(|value| value.strip_suffix([']', ')']))?;
+    if !inner.contains(',') {
+        return Some(version == &MavenVersion::parse(inner)?);
+    }
+    let (lower, upper) = inner.split_once(',')?;
+    let lower_matches = if lower.trim().is_empty() {
+        true
+    } else {
+        match version.cmp(&MavenVersion::parse(lower)?) {
+            Ordering::Greater => true,
+            Ordering::Equal => lower_inclusive,
+            Ordering::Less => false,
+        }
+    };
+    let upper_matches = if upper.trim().is_empty() {
+        true
+    } else {
+        match version.cmp(&MavenVersion::parse(upper)?) {
+            Ordering::Less => true,
+            Ordering::Equal => upper_inclusive,
+            Ordering::Greater => false,
+        }
+    };
+    Some(lower_matches && upper_matches)
 }
 
 fn opaque_version_in_range(version: &str, range: &str) -> Option<bool> {
@@ -661,6 +876,29 @@ mod tests {
         assert_eq!(version_in_range("1.6.0", "[1.5]"), Some(false));
         assert_eq!(version_in_range("3.1.0", "[1.0,2.0),[3.0,)"), Some(true));
         assert_eq!(version_in_range("2.5.0", "[1.0,2.0),[3.0,)"), Some(false));
+    }
+
+    #[test]
+    fn maven_dialect_uses_maven_qualifiers_and_real_pack_build_versions() {
+        let dialect = VersionDialect::MavenRange;
+        assert_eq!(
+            version_in_range_with_dialect("2001.6.5-build.26", "[2001.6.4-build.120,)", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.0-rc1", "[1.0-beta,1.0)", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.0-final", "[1.0,1.0]", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.0-sp", "(,1.0]", dialect),
+            Some(false)
+        );
+        assert!(MavenVersion::parse("1.0.0-1").unwrap() < MavenVersion::parse("1.0.0.1").unwrap());
+        assert_eq!(MavenVersion::parse("1a1"), MavenVersion::parse("1-alpha-1"));
     }
 
     #[test]

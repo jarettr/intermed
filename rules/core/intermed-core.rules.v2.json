@@ -1,7 +1,7 @@
 {
   "schema": "intermed-rule-pack-v2",
   "id": "intermed-core",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "intermed",
   "rules": [
     {
@@ -43,10 +43,10 @@
     {
       "id": "loader-mismatch",
       "kind": "join",
-      "left": { "kind": "mod", "alias": "m", "select": ["subject", "attr:loader"] },
+      "left": { "kind": "mod", "alias": "m", "select": ["subject", "attr:loader", "attr:identity_certainty"] },
       "right": { "kind": "environment", "alias": "e", "select": ["attr:loader"] },
       "on": "TRUE",
-      "where": "m.subject IS NOT NULL AND e.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader != e.loader",
+      "where": "m.subject IS NOT NULL AND (m.identity_certainty IS NULL OR m.identity_certainty != 'undecidable') AND e.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader IN ('fabric', 'quilt', 'forge', 'neoforge') AND m.loader != e.loader",
       "finding": {
         "id": "loader-mismatch:{m.subject}",
         "severity": "error",
@@ -471,8 +471,8 @@
         "id": "unknown-source:{subject}",
         "severity": "warn",
         "category": "security",
-        "title": "Unknown mod provenance: {subject}",
-        "explanation": "This jar has no recognizable Fabric/Quilt/Forge manifest. Provenance and supply-chain trust cannot be established.",
+        "title": "Artifact identity could not be established: {subject}",
+        "explanation": "This jar has no recognizable Fabric/Quilt/Forge manifest. Its mod identity and distribution provenance could not be established; this is not by itself evidence that the artifact is unsafe.",
         "fix": "Prefer mods from Modrinth or CurseForge with verifiable metadata.",
         "tags": ["sbom", "provenance"]
       }
@@ -487,6 +487,7 @@
         "rule_id": "unsigned-jar",
         "severity": "note",
         "category": "security",
+        "visibility": "explain-only",
         "title": "Jar is not JAR-signed: {subject}",
         "explanation": "No META-INF/*.SF signature block was found. Most Fabric/Forge mods ship unsigned; this is informational only.",
         "fix": "Verify mod source manually if supply-chain trust matters.",

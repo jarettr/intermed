@@ -96,14 +96,13 @@ impl<'a> FingerprintManager<'a> {
 
         // Skip the write when the on-disk fingerprint already matches: a clean
         // fast-hit run must not rewrite an unchanged sidecar every time.
-        if let Some(existing) = self.load(collector_id, jar) {
-            if existing.mtime_secs == mtime_secs
-                && existing.mtime_nanos == mtime_nanos
-                && existing.size_bytes == size_bytes
-                && existing.sha256 == sha256
-            {
-                return Ok(());
-            }
+        if let Some(existing) = self.load(collector_id, jar)
+            && existing.mtime_secs == mtime_secs
+            && existing.mtime_nanos == mtime_nanos
+            && existing.size_bytes == size_bytes
+            && existing.sha256 == sha256
+        {
+            return Ok(());
         }
 
         if let Some(parent) = path.parent() {
@@ -132,20 +131,19 @@ impl<'a> FingerprintManager<'a> {
         mtime_nanos: u32,
         size_bytes: u64,
     ) -> Option<(String, bool)> {
-        if let Some(fp) = self.load(collector_id, jar) {
-            if fp.mtime_secs == mtime_secs
-                && fp.mtime_nanos == mtime_nanos
-                && fp.size_bytes == size_bytes
-                && !fingerprint_expired(&fp, self.reverify_ttl)
-            {
-                // Counted as a fast hit only once it yields a usable payload (see
-                // `get_or_scan`); a stale fingerprint must not inflate the metric.
-                return Some((fp.sha256, true));
-            }
-            // Metadata matched but the mapping is past its re-verify TTL: fall
-            // through to a real hash so a same-mtime+size rewrite cannot be
-            // trusted indefinitely. The fresh hash refreshes `last_verified_secs`.
+        if let Some(fp) = self.load(collector_id, jar)
+            && fp.mtime_secs == mtime_secs
+            && fp.mtime_nanos == mtime_nanos
+            && fp.size_bytes == size_bytes
+            && !fingerprint_expired(&fp, self.reverify_ttl)
+        {
+            // Counted as a fast hit only once it yields a usable payload (see
+            // `get_or_scan`); a stale fingerprint must not inflate the metric.
+            return Some((fp.sha256, true));
         }
+        // Metadata matched but the mapping is past its re-verify TTL: fall
+        // through to a real hash so a same-mtime+size rewrite cannot be
+        // trusted indefinitely. The fresh hash refreshes `last_verified_secs`.
         let sha256 = sha256_file(jar).ok()?;
         Some((sha256, false))
     }

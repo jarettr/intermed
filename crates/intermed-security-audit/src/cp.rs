@@ -160,10 +160,10 @@ fn extract_with_noak(class_bytes: &[u8]) -> Option<ClassEvidence> {
     for item in pool.iter() {
         match item {
             Item::Class(class_ref) => {
-                if let Ok(resolved) = pool.retrieve(class_ref.name) {
-                    if let Some(name) = mstr_to_string(resolved) {
-                        evidence.referenced_classes.insert(name);
-                    }
+                if let Ok(resolved) = pool.retrieve(class_ref.name)
+                    && let Some(name) = mstr_to_string(resolved)
+                {
+                    evidence.referenced_classes.insert(name);
                 }
             }
             Item::MethodRef(method_ref) => {
@@ -191,10 +191,10 @@ fn extract_with_noak(class_bytes: &[u8]) -> Option<ClassEvidence> {
                 );
             }
             Item::String(string_ref) => {
-                if let Ok(resolved) = pool.retrieve(string_ref.string) {
-                    if let Some(value) = mstr_to_string(resolved) {
-                        evidence.string_constants.insert(value);
-                    }
+                if let Ok(resolved) = pool.retrieve(string_ref.string)
+                    && let Some(value) = mstr_to_string(resolved)
+                {
+                    evidence.string_constants.insert(value);
                 }
             }
             _ => {}

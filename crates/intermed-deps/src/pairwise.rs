@@ -3,11 +3,47 @@
 use std::collections::{HashMap, HashSet};
 
 use intermed_doctor_core::RuleCtx;
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, CoverageRequirement, EvidenceEdge, Finding, FixCandidate, ProofKind, Severity,
+};
 use intermed_doctor_core::facts::{FactId, kind};
 
 use crate::graph::{is_platform_dep, platform_loader_family};
 use crate::semver::{VersionDialect, version_in_range_with_dialect};
+
+fn canonical_artifact_token(value: &str) -> String {
+    let prefix: String = value
+        .chars()
+        .take_while(|ch| !ch.is_ascii_digit())
+        .collect();
+    let prefix = prefix
+        .trim_end_matches(['-', '_', '.', ' '])
+        .trim_end_matches(['v', 'V'])
+        .trim_end_matches(['-', '_', '.', ' ']);
+    prefix
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn plausible_artifact_for<'a>(
+    dep_id: &str,
+    artifacts: &'a [(String, FactId)],
+) -> Option<&'a (String, FactId)> {
+    let wanted: String = dep_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    (wanted.len() >= 4)
+        .then(|| {
+            artifacts
+                .iter()
+                .find(|(name, _)| canonical_artifact_token(name) == wanted)
+        })
+        .flatten()
+}
 
 /// A dependency `provides` declaration (e.g. a Jar-in-Jar bundled library, or a
 /// mod that advertises an alias id), carrying the declared version when known so
@@ -135,7 +171,11 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     // All installed versions per id (a duplicated id keeps every version, so a
     // version check stays correct instead of silently picking one copy).
     let mut installed: HashMap<String, Vec<String>> = HashMap::new();
-    for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
+    for f in store
+        .by_kind(kind::MOD)
+        .chain(store.by_kind(kind::PLUGIN))
+        .filter(|fact| fact.attr("identity_certainty") != Some("undecidable"))
+    {
         installed
             .entry(f.subject.clone())
             .or_default()
@@ -177,6 +217,21 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         }
     }
 
+    // Physical archives whose loader identity could not be confirmed are not
+    // installed providers, but they are important counter-evidence to a claim of
+    // definite absence. Keep them as a separate plausible state.
+    let mut plausible_artifacts: Vec<(String, FactId)> = store
+        .by_kind(kind::CHECKSUM)
+        .filter(|fact| fact.attr("input_kind") != Some("runtime-log"))
+        .map(|fact| (fact.subject.clone(), fact.id))
+        .collect();
+    plausible_artifacts.extend(
+        store
+            .by_kind(kind::MOD)
+            .filter(|fact| fact.attr("identity_certainty") == Some("undecidable"))
+            .filter_map(|fact| fact.attr("file").map(|file| (file.to_string(), fact.id))),
+    );
+
     let env = store.by_kind(kind::ENVIRONMENT).next();
     let mc_version = env.and_then(|f| f.attr("mc_version").map(str::to_string));
     let env_loader = env.and_then(|f| f.attr("loader").map(str::to_string));
@@ -193,6 +248,34 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         let range = dep.attr("range").unwrap_or("*");
         let mandatory = dep.attr_bool("mandatory").unwrap_or(true);
         let relation = dep.attr("relation").unwrap_or("depends");
+
+        if dep.attr("identity_certainty") == Some("undecidable") {
+            if mandatory && !is_platform_dep(dep_id) && !is_ordering_relation(relation) {
+                out.push(
+                    Finding::builder(
+                        rule_id,
+                        format!("dependency-identity-undecidable:{modid}->{dep_id}"),
+                    )
+                    .severity(Severity::Note)
+                    .confidence(0.35)
+                    .category(Category::Dependency)
+                    .title(format!("Cannot select the active descriptor for {modid}"))
+                    .explanation(format!(
+                        "One descriptor candidate says {modid} requires {dep_id} ({range}), but \
+                         the target loader is unknown and this archive contains multiple loader \
+                         descriptors. The assertion is retained as context, not treated as a \
+                         confirmed missing or incompatible dependency."
+                    ))
+                    .evidence(EvidenceEdge::subject(dep.id))
+                    .affects(modid)
+                    .affects(dep_id)
+                    .tag("dependency")
+                    .tag("undecidable-identity")
+                    .build(),
+                );
+            }
+            continue;
+        }
         let dialect = dep
             .attr("version_dialect")
             .and_then(VersionDialect::parse)
@@ -322,52 +405,52 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         }
 
         if dep_id == "minecraft" {
-            if let Some(mc) = &mc_version {
-                if matches!(
+            if let Some(mc) = &mc_version
+                && matches!(
                     version_in_range_with_dialect(mc, range, dialect),
                     Some(false)
-                ) {
-                    out.push(
-                        Finding::builder(rule_id, format!("wrong-mc-version:{modid}"))
-                            .severity(Severity::Warn)
-                            .category(Category::Dependency)
-                            .title(format!("{modid} targets a different Minecraft version"))
-                            .explanation(format!(
-                                "{modid} requires Minecraft {range}, but the instance is {mc}."
-                            ))
-                            .evidence(EvidenceEdge::subject(dep.id))
-                            .affects(modid)
-                            .tag("dependency")
-                            .tag("minecraft-version")
-                            .build(),
-                    );
-                }
+                )
+            {
+                out.push(
+                    Finding::builder(rule_id, format!("wrong-mc-version:{modid}"))
+                        .severity(Severity::Warn)
+                        .category(Category::Dependency)
+                        .title(format!("{modid} targets a different Minecraft version"))
+                        .explanation(format!(
+                            "{modid} requires Minecraft {range}, but the instance is {mc}."
+                        ))
+                        .evidence(EvidenceEdge::subject(dep.id))
+                        .affects(modid)
+                        .tag("dependency")
+                        .tag("minecraft-version")
+                        .build(),
+                );
             }
             continue;
         }
 
         // Java runtime constraint (`depends java >=21`).
         if dep_id == "java" {
-            if let Some(java) = &java_version {
-                if matches!(
+            if let Some(java) = &java_version
+                && matches!(
                     version_in_range_with_dialect(java, range, dialect),
                     Some(false)
-                ) {
-                    out.push(
-                        Finding::builder(rule_id, format!("wrong-java-version:{modid}"))
-                            .severity(Severity::Warn)
-                            .category(Category::Dependency)
-                            .title(format!("{modid} needs a different Java version"))
-                            .explanation(format!(
-                                "{modid} requires Java {range}, but the runtime is {java}."
-                            ))
-                            .evidence(EvidenceEdge::subject(dep.id))
-                            .affects(modid)
-                            .tag("dependency")
-                            .tag("java-version")
-                            .build(),
-                    );
-                }
+                )
+            {
+                out.push(
+                    Finding::builder(rule_id, format!("wrong-java-version:{modid}"))
+                        .severity(Severity::Warn)
+                        .category(Category::Dependency)
+                        .title(format!("{modid} needs a different Java version"))
+                        .explanation(format!(
+                            "{modid} requires Java {range}, but the runtime is {java}."
+                        ))
+                        .evidence(EvidenceEdge::subject(dep.id))
+                        .affects(modid)
+                        .tag("dependency")
+                        .tag("java-version")
+                        .build(),
+                );
             }
             continue;
         }
@@ -377,14 +460,14 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         // we actually know the loader version — otherwise stay silent (a loader
         // *family* mismatch is the `loader-mismatch` rule's job, not a version one).
         if let Some(family) = platform_loader_family(dep_id) {
-            if let (Some(env_fam), Some(loader_ver)) = (&env_loader, &env_loader_version) {
-                if env_fam == family
-                    && matches!(
-                        version_in_range_with_dialect(loader_ver, range, dialect),
-                        Some(false)
-                    )
-                {
-                    out.push(
+            if let (Some(env_fam), Some(loader_ver)) = (&env_loader, &env_loader_version)
+                && env_fam == family
+                && matches!(
+                    version_in_range_with_dialect(loader_ver, range, dialect),
+                    Some(false)
+                )
+            {
+                out.push(
                         Finding::builder(rule_id, format!("wrong-loader-version:{modid}->{dep_id}"))
                             .severity(Severity::Warn)
                             .category(Category::Dependency)
@@ -398,7 +481,6 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                             .tag("loader-version")
                             .build(),
                     );
-                }
             }
             continue;
         }
@@ -469,6 +551,8 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 } else {
                     let dup = is_duplicated(dep_id);
                     let mut b = Finding::builder(rule_id, format!("wrong-version:{modid}->{dep_id}"))
+                        .coverage_requirement(CoverageRequirement::CompletePack)
+                        .proof_kind(ProofKind::DeterministicDerivation)
                         .severity(if mandatory { Severity::Error } else { Severity::Warn })
                         .confidence(if dup { 0.6 } else { 0.9 })
                         .category(Category::Dependency)
@@ -516,6 +600,8 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                             rule_id,
                             format!("provided-version-mismatch:{modid}->{dep_id}"),
                         )
+                        .coverage_requirement(CoverageRequirement::CompletePack)
+                        .proof_kind(ProofKind::DeterministicDerivation)
                         .severity(if mandatory { Severity::Error } else { Severity::Warn })
                         .category(Category::Dependency)
                         .title(format!("Provided {dep_id} does not satisfy {range}"))
@@ -565,8 +651,37 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                     );
                 }
                 ProviderStatus::Absent if mandatory => {
+                    if let Some((artifact, artifact_fact)) =
+                        plausible_artifact_for(dep_id, &plausible_artifacts)
+                    {
+                        out.push(
+                            Finding::builder(
+                                rule_id,
+                                format!("provider-identity-unresolved:{modid}->{dep_id}"),
+                            )
+                            .severity(Severity::Warn)
+                            .confidence(0.55)
+                            .category(Category::Dependency)
+                            .title(format!("Provider identity not confirmed: {dep_id}"))
+                            .explanation(format!(
+                                "{modid} requires {dep_id} ({range}). No confirmed provider identity \
+                                 was parsed, but `{artifact}` is a plausible matching artifact. It is \
+                                 therefore not valid to state that the dependency is not installed."
+                            ))
+                            .evidence(EvidenceEdge::subject(dep.id))
+                            .evidence(EvidenceEdge::supports(*artifact_fact))
+                            .affects(modid)
+                            .affects(dep_id)
+                            .tag("dependency")
+                            .tag("provider-unresolved")
+                            .build(),
+                        );
+                        continue;
+                    }
                     out.push(
                         Finding::builder(rule_id, format!("missing-dependency:{modid}->{dep_id}"))
+                            .coverage_requirement(CoverageRequirement::CompletePack)
+                            .proof_kind(ProofKind::DeterministicDerivation)
                             .severity(Severity::Error)
                             .category(Category::Dependency)
                             .title(format!("Missing dependency: {dep_id}"))

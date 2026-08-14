@@ -1,5 +1,7 @@
 //! Fact emission from mixin scan results.
 
+use std::collections::BTreeSet;
+
 use intermed_doctor_core::CollectCtx;
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::settings::MixinSettings;
@@ -62,6 +64,33 @@ pub fn emit_scan_with_settings(
     // Phase 4: runtime classpath coverage — one measurement fact per scan so
     // absence-based verdicts can be read against the coverage that produced them.
     if let Some(cov) = &scan.classpath_coverage {
+        let target_classes = scan
+            .application_sites
+            .iter()
+            .map(|site| site.target_class.as_str())
+            .collect::<BTreeSet<_>>();
+        let resolved_target_classes = scan
+            .application_sites
+            .iter()
+            .filter(|site| {
+                !matches!(
+                    site.target_resolution,
+                    crate::target_res::TargetResolution::MissingClass
+                        | crate::target_res::TargetResolution::Unchecked
+                )
+            })
+            .map(|site| site.target_class.as_str())
+            .collect::<BTreeSet<_>>();
+        let resolved_target_methods = scan
+            .application_sites
+            .iter()
+            .filter(|site| site.target_resolution.is_resolved())
+            .count();
+        let namespaces = scan
+            .application_sites
+            .iter()
+            .map(|site| site.namespace.as_str())
+            .collect::<BTreeSet<_>>();
         ctx.store
             .fact(extractor, kind::MIXIN_CLASSPATH_COVERAGE)
             .subject(scan.target.clone())
@@ -72,7 +101,27 @@ pub fn emit_scan_with_settings(
             .attr("loader", cov.loader)
             .attr("minecraft_classes", cov.minecraft_classes as i64)
             .attr("mod_classes", cov.mod_classes as i64)
+            .attr("minecraft_namespace", cov.minecraft_namespace.clone())
             .attr("missing_scopes", cov.missing_scopes.join(","))
+            .attr("configs_discovered", scan.configs_discovered as i64)
+            .attr("configs_parsed", scan.configs.len() as i64)
+            .attr("mixin_classes", scan.classes.len() as i64)
+            .attr("target_classes", target_classes.len() as i64)
+            .attr(
+                "target_classes_resolved",
+                resolved_target_classes.len() as i64,
+            )
+            .attr("target_methods", scan.application_sites.len() as i64)
+            .attr("target_methods_resolved", resolved_target_methods as i64)
+            .attr(
+                "namespaces",
+                namespaces.into_iter().collect::<Vec<_>>().join(","),
+            )
+            .attr(
+                "unresolved_targets",
+                (scan.application_sites.len() - resolved_target_methods) as i64,
+            )
+            .attr("truncations", scan.failures.len() as i64)
             .attr("summary", cov.summary())
             .source(SourceRef::file(scan.target.clone()))
             .emit();

@@ -110,7 +110,7 @@ Flag: `--metadata-level`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `level` | `detailed` | `normal`, `detailed`, or `full`. Mixin analysis is still gated by `--mixin-risk`. |
+| `level` | `standard` | `basic`, `standard`, or `full`. Legacy `normal` and `detailed` inputs are accepted as aliases but are never serialized. Any CLI `--mixin-level` activates Mixin analysis; `--mixin-risk` is the compatibility alias for `standard`. |
 
 Flags: `--mixin-level`, `--mixin-handler-effects`, `--mixin-recommendations`.
 

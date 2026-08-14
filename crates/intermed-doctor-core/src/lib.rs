@@ -35,7 +35,9 @@ pub mod settings;
 pub mod suppression;
 pub mod target;
 
-pub use collector::{CollectCtx, Collector, CollectorOutcome, CollectorStatus, DeferredCollector};
+pub use collector::{
+    CollectCtx, Collector, CollectorOutcome, CollectorStatus, DeferredCollector, GatedCollector,
+};
 pub use engine::{DiagnosticEngine, DiagnosticRun, EngineBuilder};
 pub use instance_layout::{
     LayoutKind, ResolvedLayout, find_mods_directory, resolve_game_root, resolve_layout,
@@ -138,6 +140,107 @@ mod tests {
         }
     }
 
+    struct RetentionFixtureCollector;
+    impl Collector for RetentionFixtureCollector {
+        fn id(&self) -> &'static str {
+            "retention-fixture"
+        }
+        fn layer(&self) -> Layer {
+            Layer::Mixin
+        }
+        fn applies(&self, _target: &Target) -> bool {
+            true
+        }
+        fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+            ctx.store
+                .fact(self.id(), facts::kind::LOG_SIGNAL)
+                .subject("MixinApplyError")
+                .emit();
+            ctx.store
+                .fact(self.id(), facts::kind::MIXIN_APPLICATION_SITE)
+                .subject("fixture-site")
+                .emit();
+            ctx.store
+                .fact(self.id(), facts::kind::MIXIN_HANDLER_BODY)
+                .subject("reflective-handler")
+                .emit();
+            ctx.store
+                .fact(self.id(), facts::kind::MIXIN_INJECTION_POINT)
+                .subject("external-predicate")
+                .emit();
+            for index in 0..128 {
+                ctx.store
+                    .fact(self.id(), facts::kind::MIXIN_HANDLER_BODY)
+                    .subject(format!("bulk-{index}"))
+                    .emit();
+            }
+            CollectorOutcome::active(132, "retention parity fixture")
+        }
+    }
+
+    /// Models built-in and out-of-tree consumers of predicates that snapshot
+    /// retention is allowed to drop. All four conclusions must be derived before
+    /// compaction regardless of the configured snapshot limit.
+    struct RetentionFixtureRule;
+    impl Rule for RetentionFixtureRule {
+        fn id(&self) -> &'static str {
+            "external-retention-fixture"
+        }
+        fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleError> {
+            let site = ctx
+                .store
+                .by_kind(facts::kind::MIXIN_APPLICATION_SITE)
+                .next();
+            let log = ctx.store.by_kind(facts::kind::LOG_SIGNAL).next();
+            let body = ctx
+                .store
+                .by_kind(facts::kind::MIXIN_HANDLER_BODY)
+                .find(|fact| fact.subject == "reflective-handler");
+            let external = ctx.store.by_kind(facts::kind::MIXIN_INJECTION_POINT).next();
+            let mut out = Vec::new();
+            if let (Some(site), Some(log)) = (site, log) {
+                out.push(
+                    Finding::builder(self.id(), "retention:runtime-confirmed-mixin")
+                        .severity(Severity::Error)
+                        .category(Category::Mixin)
+                        .title("runtime-confirmed mixin")
+                        .evidence(intermed_evidence::EvidenceEdge::supports(site.id))
+                        .evidence(intermed_evidence::EvidenceEdge::supports(log.id))
+                        .build(),
+                );
+                out.push(
+                    Finding::builder(self.id(), "retention:performance-mixin-correlation")
+                        .severity(Severity::Warn)
+                        .category(Category::Performance)
+                        .title("performance correlation")
+                        .evidence(intermed_evidence::EvidenceEdge::supports(site.id))
+                        .build(),
+                );
+            }
+            if let Some(body) = body {
+                out.push(
+                    Finding::builder(self.id(), "retention:reflective-mixin-security")
+                        .severity(Severity::Warn)
+                        .category(Category::Security)
+                        .title("reflective handler")
+                        .evidence(intermed_evidence::EvidenceEdge::supports(body.id))
+                        .build(),
+                );
+            }
+            if let Some(external) = external {
+                out.push(
+                    Finding::builder(self.id(), "retention:external-rule")
+                        .severity(Severity::Note)
+                        .category(Category::Mixin)
+                        .title("external predicate")
+                        .evidence(intermed_evidence::EvidenceEdge::supports(external.id))
+                        .build(),
+                );
+            }
+            Ok(out)
+        }
+    }
+
     #[test]
     fn engine_runs_collectors_then_rules() {
         let engine = DiagnosticEngine::builder()
@@ -200,5 +303,42 @@ mod tests {
                 .any(|error| error.stage == "rule" && error.component == "failing-rule")
         );
         assert_eq!(report.exit_code(), 2);
+    }
+
+    #[test]
+    fn tiny_snapshot_retention_does_not_change_finding_identities() {
+        fn diagnose(max_facts: usize) -> DiagnosticRun {
+            let mut settings = DiagnosisSettings::default();
+            settings.facts.retention.max_facts = max_facts;
+            DiagnosticEngine::builder()
+                .collector(RetentionFixtureCollector)
+                .rule(RetentionFixtureRule)
+                .settings(settings)
+                .build()
+                .diagnose_with_facts(&Target::with_kind(".", TargetKind::ModsDir))
+        }
+
+        let unbounded = diagnose(usize::MAX);
+        let bounded = diagnose(1);
+        let ids = |run: &DiagnosticRun| {
+            run.report
+                .findings
+                .iter()
+                .map(|finding| finding.id.clone())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(ids(&unbounded), ids(&bounded));
+        assert_eq!(ids(&bounded).len(), 4);
+        assert!(bounded.profile.facts_dropped > 0);
+        for finding in &bounded.report.findings {
+            assert!(
+                finding
+                    .evidence
+                    .iter()
+                    .all(|edge| bounded.facts.iter().any(|fact| fact.id == edge.fact)),
+                "cited evidence for {} must survive snapshot compaction",
+                finding.id
+            );
+        }
     }
 }

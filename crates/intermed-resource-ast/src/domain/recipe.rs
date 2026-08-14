@@ -211,12 +211,12 @@ fn collect_refs(
                 push_ref(tag, RefRelation::UsesTag, true, conditions, refs, ids);
             }
             // A bare `"id"` is used by some result schemas.
-            if !map.contains_key("item") && !map.contains_key("tag") {
-                if let Some(id) = map.get("id").and_then(Value::as_str) {
-                    if looks_like_resource_id(id) {
-                        push_ref(id, default_relation, false, conditions, refs, ids);
-                    }
-                }
+            if !map.contains_key("item")
+                && !map.contains_key("tag")
+                && let Some(id) = map.get("id").and_then(Value::as_str)
+                && looks_like_resource_id(id)
+            {
+                push_ref(id, default_relation, false, conditions, refs, ids);
             }
             for v in map.values() {
                 collect_refs(v, default_relation, conditions, refs, ids);

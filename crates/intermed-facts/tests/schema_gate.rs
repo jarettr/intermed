@@ -320,20 +320,19 @@ fn statically_emitted_attrs() -> BTreeMap<String, EmittedAttrs> {
                 continue;
             }
 
-            if pending_attr {
-                if let (Some((kind, start_line)), Some(attr)) =
+            if pending_attr
+                && let (Some((kind, start_line)), Some(attr)) =
                     (active.as_ref(), first_string_literal(line))
-                {
-                    out.entry(kind.clone())
-                        .or_insert_with(|| EmittedAttrs {
-                            attrs: BTreeMap::new(),
-                        })
-                        .insert(
-                            attr,
-                            format!("{}:{line_no} (fact at {start_line})", rel.display()),
-                        );
-                    pending_attr = false;
-                }
+            {
+                out.entry(kind.clone())
+                    .or_insert_with(|| EmittedAttrs {
+                        attrs: BTreeMap::new(),
+                    })
+                    .insert(
+                        attr,
+                        format!("{}:{line_no} (fact at {start_line})", rel.display()),
+                    );
+                pending_attr = false;
             }
 
             if line.contains(".fact(") {

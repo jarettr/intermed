@@ -325,10 +325,30 @@ fn doctor_mixin_risk_flag_controls_layer_f() {
     assert_success(&without);
     let report: serde_json::Value = serde_json::from_slice(&without.stdout).unwrap();
     assert!(report["fact_stats"].get("mixin_overlap").is_none());
+    let mixin_collector = report["collectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|collector| collector["layer_code"] == "F")
+        .expect("Layer F must be reported even when disabled");
+    assert_eq!(mixin_collector["status"], "disabled");
+    assert!(
+        mixin_collector["message"]
+            .as_str()
+            .unwrap()
+            .contains("--mixin-level")
+    );
 
     let with = run(["doctor", fixture.mods_str(), "--mixin-risk", "--json"]);
     assert_eq!(with.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&with.stdout).unwrap();
+    assert!(
+        report["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|collector| collector["layer_code"] == "F" && collector["status"] == "active")
+    );
     assert_eq!(report["fact_stats"]["mixin_overlap"], 1);
     assert!(
         report["findings"]
@@ -365,6 +385,98 @@ fn doctor_mixin_risk_flag_controls_layer_f() {
             .starts_with("mixin-overwrite-effect:")),
         "enhanced overwrite findings must attach recommendations via site_key"
     );
+}
+
+#[test]
+fn explicit_mixin_level_activates_layer_f_without_legacy_gate() {
+    let fixture = Fixture::new("mixin-level-activates");
+    fixture.write_mixin_overlap_mods();
+
+    for level in ["basic", "standard", "full"] {
+        let output = run([
+            "doctor",
+            fixture.mods_str(),
+            "--mixin-level",
+            level,
+            "--json",
+        ]);
+        assert_ne!(output.status.code(), Some(2), "level {level}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["fact_stats"]["mixin_overlap"], 1,
+            "--mixin-level {level} was accepted but Layer F did not run"
+        );
+        assert_eq!(report["analysis_configuration"]["mixin"]["enabled"], true);
+        assert_eq!(report["analysis_configuration"]["mixin"]["level"], level);
+        assert_eq!(
+            report["analysis_configuration"]["fingerprint"]["cache_mode"],
+            "local"
+        );
+        assert!(
+            report["analysis_configuration"]["fingerprint"]["effective_config_sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+        assert!(
+            report["analysis_configuration"]["fingerprint"]["rule_pack_sha256"]
+                .as_str()
+                .is_some_and(|digest| digest.len() == 64)
+        );
+        assert!(
+            !report["analysis_configuration"]["input_manifest"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            report["collectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|collector| collector["layer_code"] == "F"
+                    && matches!(collector["status"].as_str(), Some("active" | "incomplete")))
+        );
+    }
+
+    for (alias, canonical) in [("normal", "basic"), ("detailed", "standard")] {
+        let output = run([
+            "doctor",
+            fixture.mods_str(),
+            "--mixin-level",
+            alias,
+            "--json",
+        ]);
+        assert_ne!(output.status.code(), Some(2), "alias {alias}: {output:?}");
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            report["analysis_configuration"]["mixin"]["level"],
+            canonical
+        );
+    }
+}
+
+#[test]
+fn mixin_level_documentation_has_one_canonical_vocabulary() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let commands = std::fs::read_to_string(repo.join("docs/reference/commands.md")).unwrap();
+    let config = std::fs::read_to_string(repo.join("docs/reference/configuration.md")).unwrap();
+    let guide = std::fs::read_to_string(repo.join("docs/guides/mixins.md")).unwrap();
+
+    assert_eq!(
+        commands
+            .lines()
+            .filter(|line| line.starts_with("| `--mixin-level"))
+            .count(),
+        1,
+        "command reference must describe --mixin-level exactly once"
+    );
+    for document in [&commands, &config, &guide] {
+        assert!(document.contains("basic"));
+        assert!(document.contains("standard"));
+        assert!(document.contains("full"));
+        assert!(!document.contains("<normal\\|detailed\\|full>"));
+        assert!(!document.contains("default: `detailed`"));
+    }
 }
 
 #[test]
@@ -736,6 +848,31 @@ fn dump_config_prints_valid_toml_schema() {
     assert!(text.contains(r#"schema = "intermed-config-v1""#));
     assert!(text.contains("[performance]"));
     assert!(text.contains("[security]"));
+}
+
+#[test]
+fn dump_config_is_effective_and_cli_jobs_beats_environment() {
+    let fixture = Fixture::new("effective-config");
+    let output = Command::new(env!("CARGO_BIN_EXE_intermed"))
+        .env("INTERMED_JOBS", "4")
+        .args([
+            "doctor",
+            fixture.root.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--mixin-level",
+            "full",
+            "--dump-config",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("[runtime]\njobs = 1"), "{text}");
+    assert!(
+        text.contains("[mixin]\nenabled = true\nlevel = \"full\""),
+        "{text}"
+    );
 }
 
 #[test]

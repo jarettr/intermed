@@ -22,7 +22,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, Severity,
+    Category, CoverageRequirement, EvidenceEdge, Finding, FindingVisibility, FixCandidate,
+    ProofKind, RuntimeRefutability, Severity,
 };
 use intermed_doctor_core::facts::{FactId, FactStore, kind};
 
@@ -434,6 +435,19 @@ fn range_shape_findings(
 /// dependency on an installed mod that itself owns resource namespaces, yet
 /// references none of them — a hint the dependency may be stale or code-only.
 fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str) -> Vec<Finding> {
+    let usage_index_incomplete = store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
+        fact.attr("layer") == Some("fact-store")
+            && fact.attr("dropped_kinds").is_some_and(|kinds| {
+                kinds.split(',').any(|entry| {
+                    entry.starts_with("bytecode_reference:")
+                        || entry.starts_with("implicit_dependency_edge:")
+                        || entry.starts_with("resource_definition:")
+                })
+            })
+    });
+    if usage_index_incomplete {
+        return Vec::new();
+    }
     // Mods that ship at least one resource definition (i.e. content/data mods).
     let mut ships_resources: BTreeSet<&str> = BTreeSet::new();
     for f in store.by_kind(kind::RESOURCE_DEFINITION) {
@@ -448,6 +462,19 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
             owns_namespaces.insert(w);
         }
     }
+    let mut owned_packages: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for fact in store.by_kind(kind::PACKAGE_OWNER) {
+        if let Some(package) = fact.attr("package") {
+            owned_packages
+                .entry(fact.subject.as_str())
+                .or_default()
+                .push(package);
+        }
+    }
+    let bytecode_references: Vec<_> = store
+        .by_kind(kind::BYTECODE_REFERENCE)
+        .filter_map(|fact| Some((fact.subject.as_str(), fact.attr("target_package")?)))
+        .collect();
 
     let mut out = Vec::new();
     for dep in &model.declared {
@@ -461,10 +488,26 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
             continue; // the dependency isn't an installed data mod.
         }
         // Does the consumer implicitly reference the dependency at all?
-        let references_it = model.implicit.iter().any(|imp| {
+        let resource_references_it = model.implicit.iter().any(|imp| {
             imp.from == dep.from && (imp.provider_mod == dep.to || imp.provider_ns == dep.to)
         });
-        if references_it {
+        let bytecode_references_it = owned_packages.get(dep.to.as_str()).is_some_and(|packages| {
+            bytecode_references
+                .iter()
+                .any(|(from, referenced_package)| {
+                    *from == dep.from
+                        && packages.iter().any(|package| {
+                            *referenced_package == *package
+                                || referenced_package
+                                    .strip_prefix(*package)
+                                    .is_some_and(|suffix| suffix.starts_with('.'))
+                                || package
+                                    .strip_prefix(*referenced_package)
+                                    .is_some_and(|suffix| suffix.starts_with('.'))
+                        })
+                })
+        });
+        if resource_references_it || bytecode_references_it {
             continue;
         }
         out.push(
@@ -472,6 +515,9 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
                 rule_id,
                 format!("dependency-declared-but-unused:{}->{}", dep.from, dep.to),
             )
+            .coverage_requirement(CoverageRequirement::CompletePack)
+            .proof_kind(ProofKind::Heuristic)
+            .runtime_refutability(RuntimeRefutability::DependencyUse)
             .severity(Severity::Note)
             .visibility(FindingVisibility::ExplainOnly)
             .confidence(0.25)
@@ -483,7 +529,7 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
             .explanation(format!(
                 "{from} declares a mandatory dependency on {to}, and both ship resources, yet \
                  {from}'s resources reference none of {to}'s namespaces. The dependency may be \
-                 code-only (which this layer cannot see) or stale. This is a low-confidence hint, \
+                 reached by the bounded resource or bytecode reference indexes, or stale. This is a low-confidence hint, \
                  not a defect.",
                 from = dep.from,
                 to = dep.to,
@@ -665,6 +711,40 @@ mod tests {
         assert!(
             f.iter()
                 .all(|x| !x.id.starts_with("dependency-version-range"))
+        );
+    }
+
+    #[test]
+    fn ordinary_bytecode_reference_proves_code_only_dependency_usage() {
+        let mut store = FactStore::new();
+        mod_fact(&mut store, "addon", "1.0.0");
+        mod_fact(&mut store, "create", "0.5.1");
+        declared(&mut store, "addon", "create", ">=0.5.0 <0.6.0");
+        for (kind_name, subject, writer) in [
+            (kind::RESOURCE_DEFINITION, "data/addon/x.json", "addon"),
+            (kind::NAMESPACE_OWNER, "create", "create"),
+        ] {
+            store
+                .fact("resource", kind_name)
+                .subject(subject)
+                .attr("writer", writer)
+                .emit();
+        }
+        store
+            .fact("metadata", kind::PACKAGE_OWNER)
+            .subject("create")
+            .attr("package", "com.simibubi.create")
+            .emit();
+        store
+            .fact("metadata", kind::BYTECODE_REFERENCE)
+            .subject("addon")
+            .attr("target_package", "com.simibubi.create")
+            .emit();
+
+        assert!(
+            run(&store)
+                .iter()
+                .all(|finding| !finding.id.starts_with("dependency-declared-but-unused:"))
         );
     }
 

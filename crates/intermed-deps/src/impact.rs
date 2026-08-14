@@ -176,13 +176,13 @@ pub fn update_impact(
         match version_in_range_with_dialect(to, &dep.range, dep.version_dialect) {
             Some(true) => {
                 // Accepts `to`. If it rejected `from`, the bump fixes it.
-                if let Some(from_v) = from {
-                    if matches!(
+                if let Some(from_v) = from
+                    && matches!(
                         version_in_range_with_dialect(from_v, &dep.range, dep.version_dialect),
                         Some(false)
-                    ) {
-                        now_satisfied.push(entry);
-                    }
+                    )
+                {
+                    now_satisfied.push(entry);
                 }
             }
             Some(false) => breaks.push(entry),

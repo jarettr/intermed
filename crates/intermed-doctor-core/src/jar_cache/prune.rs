@@ -99,12 +99,11 @@ fn should_prune_fingerprint(path: &Path, max_age_secs: u64) -> bool {
 /// caller can invalidate its in-memory `disk_usage` cache when needed.
 pub(crate) fn maybe_prune(root: &Path, config: &JarCacheConfig) -> io::Result<u64> {
     let marker = root.join(".prune-marker");
-    if let Ok(meta) = fs::metadata(&marker) {
-        if let Ok(modified) = meta.modified() {
-            if modified.elapsed().unwrap_or(config.prune_interval) < config.prune_interval {
-                return Ok(0);
-            }
-        }
+    if let Ok(meta) = fs::metadata(&marker)
+        && let Ok(modified) = meta.modified()
+        && modified.elapsed().unwrap_or(config.prune_interval) < config.prune_interval
+    {
+        return Ok(0);
     }
     let freed = prune_stale_entries(root, config)?;
     let _ = fs::write(&marker, b"");

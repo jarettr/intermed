@@ -94,18 +94,17 @@ fn is_rule_file(path: &Path) -> bool {
         return false;
     }
     // Non-pack JSON under rules/: registry indexes, JSON Schema, etc.
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        if name == "community-registry.json"
+    if let Some(name) = path.file_name().and_then(|n| n.to_str())
+        && (name == "community-registry.json"
             || name.ends_with("-registry.json")
-            || name.ends_with(".schema.json")
-        {
-            return false;
-        }
+            || name.ends_with(".schema.json"))
+    {
+        return false;
     }
-    if let Ok(text) = std::fs::read_to_string(path) {
-        if text.contains("\"intermed-rule-registry-v1\"") {
-            return false;
-        }
+    if let Ok(text) = std::fs::read_to_string(path)
+        && text.contains("\"intermed-rule-registry-v1\"")
+    {
+        return false;
     }
     true
 }
@@ -200,6 +199,7 @@ fn log_signal_rules() -> Vec<RuleSpec> {
                     rule_id: None,
                     severity: severity.to_string(),
                     category: "log".to_string(),
+                    visibility: "default".to_string(),
                     title: signal_title(sig).to_string(),
                     explanation: "Detected at line {attr:line}: {attr:excerpt}".to_string(),
                     fix: None,

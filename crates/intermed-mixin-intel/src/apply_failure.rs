@@ -145,10 +145,25 @@ enum ClassIndexSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MinecraftClassNamespace {
-    Named,
+    MojmapNamed,
+    YarnNamed,
     Intermediary,
-    /// Official/obfuscated, bundled, or otherwise not comparable to mixin names.
+    /// Mojang distribution names (`a`, `bqf`, ...); requires an official mapping edge.
+    OfficialObfuscated,
+    /// Bundler, mixed, or otherwise unrecognized class-name population.
     Unsupported,
+}
+
+impl MinecraftClassNamespace {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::MojmapNamed => "mojmap-named",
+            Self::YarnNamed => "yarn-named",
+            Self::Intermediary => "intermediary",
+            Self::OfficialObfuscated => "official-obfuscated",
+            Self::Unsupported => "unsupported-or-mixed",
+        }
+    }
 }
 
 impl TargetClassIndex {
@@ -236,6 +251,11 @@ impl TargetClassIndex {
             })
             .count();
         let total = self.minecraft_classes.len();
+        let default_package_obfuscated = self
+            .minecraft_classes
+            .iter()
+            .filter(|name| !name.contains('/') && name.len() <= 8)
+            .count();
         // Require both a meaningful population and namespace dominance. Official
         // Mojang jars retain a small set of readable bootstrap/API classes under
         // `net/minecraft` while the overwhelming majority are short obfuscated
@@ -250,10 +270,105 @@ impl TargetClassIndex {
         if intermediary >= MIN_NAMESPACE_CLASSES && intermediary > named && intermediary_dominates {
             MinecraftClassNamespace::Intermediary
         } else if named >= MIN_NAMESPACE_CLASSES && named > intermediary && named_dominates {
-            MinecraftClassNamespace::Named
+            let mojmap_anchors = [
+                "net/minecraft/world/entity/Entity",
+                "net/minecraft/client/Minecraft",
+                "net/minecraft/world/level/Level",
+            ]
+            .iter()
+            .filter(|name| self.minecraft_classes.contains(**name))
+            .count();
+            let yarn_anchors = [
+                "net/minecraft/entity/Entity",
+                "net/minecraft/client/MinecraftClient",
+                "net/minecraft/world/World",
+            ]
+            .iter()
+            .filter(|name| self.minecraft_classes.contains(**name))
+            .count();
+            if mojmap_anchors >= 2 && mojmap_anchors > yarn_anchors {
+                MinecraftClassNamespace::MojmapNamed
+            } else if yarn_anchors >= 2 && yarn_anchors > mojmap_anchors {
+                MinecraftClassNamespace::YarnNamed
+            } else {
+                MinecraftClassNamespace::Unsupported
+            }
+        } else if default_package_obfuscated >= MIN_NAMESPACE_CLASSES
+            && default_package_obfuscated.saturating_mul(100)
+                >= total.saturating_mul(MIN_NAMESPACE_PERCENT)
+        {
+            MinecraftClassNamespace::OfficialObfuscated
         } else {
             MinecraftClassNamespace::Unsupported
         }
+    }
+
+    fn namespace_comparable(&self, target: &str, mappings: Option<&TinyMappings>) -> bool {
+        if !is_minecraft_target(target) {
+            return true;
+        }
+        let direct = target.replace('.', "/");
+        if self.classes.contains_key(&direct)
+            || mappings
+                .and_then(|mapping| mapping.to_intermediary_class(target))
+                .is_some_and(|mapped| self.classes.contains_key(&mapped))
+        {
+            // Positive class presence is safe even when the population is too
+            // small to identify the whole artifact's namespace. Namespace
+            // certainty gates absence, not an exact present-class match.
+            return true;
+        }
+        let target_namespace = minecraft_class_namespace(target);
+        match self.minecraft_class_namespace() {
+            MinecraftClassNamespace::Intermediary => {
+                target_namespace == MinecraftClassNamespace::Intermediary
+                    || mappings
+                        .is_some_and(|mapping| mapping.to_intermediary_class(target).is_some())
+            }
+            MinecraftClassNamespace::MojmapNamed => {
+                target_namespace == MinecraftClassNamespace::MojmapNamed
+            }
+            MinecraftClassNamespace::YarnNamed => {
+                target_namespace == MinecraftClassNamespace::YarnNamed
+            }
+            MinecraftClassNamespace::OfficialObfuscated => mappings
+                .and_then(|mapping| mapping.translate_class_to(target, "official"))
+                .is_some_and(|mapped| self.classes.contains_key(&mapped)),
+            MinecraftClassNamespace::Unsupported => false,
+        }
+    }
+
+    fn resolve_target_slash(&self, target: &str, mappings: Option<&TinyMappings>) -> String {
+        if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated
+            && let Some(mapped) =
+                mappings.and_then(|mapping| mapping.translate_class_to(target, "official"))
+        {
+            return mapped;
+        }
+        if let Some(mapped) = mappings.and_then(|mapping| mapping.to_intermediary_class(target))
+            && self.classes.contains_key(&mapped)
+        {
+            return mapped;
+        }
+        if self.minecraft_class_namespace() == MinecraftClassNamespace::Intermediary {
+            resolve_target_slash(target, mappings)
+        } else {
+            target.replace('.', "/")
+        }
+    }
+
+    fn resolve_target_method_name(
+        &self,
+        owner: &str,
+        method: &str,
+        mappings: Option<&TinyMappings>,
+    ) -> String {
+        if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
+            return mappings
+                .and_then(|mapping| mapping.translate_method_to(owner, method, "official"))
+                .unwrap_or_else(|| method.to_string());
+        }
+        method.to_string()
     }
 
     /// Count of call sites in `method` matching the simple name `member_simple`.
@@ -350,7 +465,10 @@ impl TargetClassIndex {
         if name.is_empty() {
             return TargetResolution::Unchecked;
         }
-        let slash = resolve_target_slash(dotted, mappings);
+        if !self.namespace_comparable(dotted, mappings) {
+            return TargetResolution::Unchecked;
+        }
+        let slash = self.resolve_target_slash(dotted, mappings);
         let Some(members) = self.classes.get(&slash) else {
             // Class not indexed: only conclusive for a Minecraft class under MC
             // coverage; otherwise the absence is just a coverage gap.
@@ -360,21 +478,32 @@ impl TargetClassIndex {
                 TargetResolution::Unchecked
             };
         };
-        if !members.method_names.contains(name) {
+        let resolved_name = self.resolve_target_method_name(dotted, name, mappings);
+        if !members.method_names.contains(&resolved_name) {
             return TargetResolution::MissingMethod;
+        }
+        // Class/method identity is mapped, but descriptors in an obfuscated jar
+        // require type-symbol translation too. Until that edge is complete, a
+        // name match is useful evidence but descriptor absence is inconclusive.
+        if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
+            return TargetResolution::NameOnlyMatch;
         }
         let Some(descriptor) = descriptor else {
             return TargetResolution::NameOnlyMatch;
         };
         if members
             .methods
-            .contains(&(name.to_string(), descriptor.to_string()))
+            .contains(&(resolved_name.clone(), descriptor.to_string()))
         {
             return TargetResolution::ExactMatch;
         }
         // Name present, descriptor not: distinguish a lone signature mismatch from an
         // ambiguous overload set (multiple same-named methods, none matching ours).
-        let overloads = members.methods.iter().filter(|(n, _)| n == name).count();
+        let overloads = members
+            .methods
+            .iter()
+            .filter(|(n, _)| n == &resolved_name)
+            .count();
         if overloads >= 2 {
             TargetResolution::AmbiguousOverload
         } else {
@@ -397,12 +526,16 @@ impl TargetClassIndex {
         mappings: Option<&TinyMappings>,
     ) -> crate::selector::SelectorVerification {
         use crate::selector::{SelectorKind, SelectorVerification, classify_selector};
-        let slash = resolve_target_slash(dotted, mappings);
+        if !self.namespace_comparable(dotted, mappings) {
+            return SelectorVerification::Unchecked;
+        }
+        let slash = self.resolve_target_slash(dotted, mappings);
         let method = method_simple_name(target_method);
+        let resolved_method = self.resolve_target_method_name(dotted, method, mappings);
         let Some(members) = self.classes.get(&slash) else {
             return SelectorVerification::Unchecked;
         };
-        if !members.method_names.contains(method) {
+        if !members.method_names.contains(&resolved_method) {
             return SelectorVerification::TargetMethodMissing;
         }
         match classify_selector(at_target) {
@@ -413,7 +546,10 @@ impl TargetClassIndex {
                     return SelectorVerification::Unsupported;
                 }
                 let member = at_member_simple_name(at_member);
-                match self.call_site_count(&slash, method, member) {
+                if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
+                    return SelectorVerification::Unchecked;
+                }
+                match self.call_site_count(&slash, &resolved_method, member) {
                     // No call-site data for this method body ⇒ cannot verify.
                     None => SelectorVerification::Unchecked,
                     Some(0) => SelectorVerification::NoMatch,
@@ -437,11 +573,14 @@ impl TargetClassIndex {
         method: &str,
         mappings: Option<&TinyMappings>,
     ) -> Option<&MethodFrame> {
-        let slash = resolve_target_slash(dotted, mappings);
+        if !self.namespace_comparable(dotted, mappings) {
+            return None;
+        }
+        let slash = self.resolve_target_slash(dotted, mappings);
         self.classes
             .get(&slash)?
             .frames
-            .get(method_simple_name(method))
+            .get(&self.resolve_target_method_name(dotted, method_simple_name(method), mappings))
     }
 
     fn field_descriptors(&self, slash: &str, name: &str) -> Vec<String> {
@@ -560,6 +699,26 @@ fn minecraft_target_namespace(dotted: &str) -> Namespace {
     }
 }
 
+fn minecraft_class_namespace(target: &str) -> MinecraftClassNamespace {
+    let slash = target.replace('.', "/");
+    if slash.starts_with("net/minecraft/class_") {
+        MinecraftClassNamespace::Intermediary
+    } else if slash.starts_with("net/minecraft/world/entity/")
+        || slash.starts_with("net/minecraft/world/level/")
+        || slash == "net/minecraft/client/Minecraft"
+        || slash.starts_with("net/minecraft/server/level/")
+    {
+        MinecraftClassNamespace::MojmapNamed
+    } else if slash.starts_with("net/minecraft/entity/")
+        || slash == "net/minecraft/client/MinecraftClient"
+        || slash == "net/minecraft/world/World"
+    {
+        MinecraftClassNamespace::YarnNamed
+    } else {
+        MinecraftClassNamespace::Unsupported
+    }
+}
+
 /// Whether a `remap=false` Minecraft target resolves verbatim under `runtime`.
 ///
 /// Unobfuscated targets (`com.mojang.*` libraries — see [`is_intermediary_obfuscated`])
@@ -594,12 +753,11 @@ fn method_simple_name(resolved: &str) -> &str {
 /// bridged to their intermediary slash names so they can be matched against an
 /// obfuscated Minecraft jar index.
 fn resolve_target_slash(target: &str, mappings: Option<&TinyMappings>) -> String {
-    if let Some(map) = mappings {
-        if is_named_minecraft(target) {
-            if let Some(inter) = map.to_intermediary_class(target) {
-                return inter;
-            }
-        }
+    if let Some(map) = mappings
+        && is_named_minecraft(target)
+        && let Some(inter) = map.to_intermediary_class(target)
+    {
+        return inter;
     }
     target.replace('.', "/")
 }
@@ -665,7 +823,8 @@ fn detect_for_class(
     }
 
     for inj in &class.injected_methods {
-        let slash = resolve_target_slash(&inj.target, global_mappings);
+        let comparable = index.namespace_comparable(&inj.target, global_mappings);
+        let slash = index.resolve_target_slash(&inj.target, global_mappings);
 
         // remap = false takes the reference verbatim, so it resolves only when the
         // target is *already* written in the loader's runtime namespace. It is
@@ -701,27 +860,29 @@ fn detect_for_class(
         // Ordinal-out-of-range: an `@At(ordinal = N)` is unsatisfiable when the
         // target method has fewer than N+1 matching call sites. Only acts when we
         // found ≥1 matching site (a zero-match is a namespace miss, not proof).
-        if let (Some(ordinal), false) = (inj.at_ordinal, inj.at_target_member.is_empty()) {
-            if ordinal >= 0 {
-                let method = method_simple_name(&inj.resolved);
-                let member = at_member_simple_name(&inj.at_target_member);
-                if let Some(count) = index.call_site_count(&slash, method, member) {
-                    if count >= 1 && ordinal as u32 >= count {
-                        out.push(ApplyFailure {
-                            kind: ApplyFailureKind::OrdinalOutOfRange,
-                            mod_id: class.mod_id.clone(),
-                            mixin: class.class_name.clone(),
-                            target: inj.target.clone(),
-                            member: format!("{member}#{ordinal}"),
-                            detail: format!(
-                                "@At(ordinal = {ordinal}) selects call site {ordinal} of `{member}` \
+        if let (Some(ordinal), false) = (inj.at_ordinal, inj.at_target_member.is_empty())
+            && ordinal >= 0
+            && index.minecraft_class_namespace() != MinecraftClassNamespace::OfficialObfuscated
+        {
+            let method = method_simple_name(&inj.resolved);
+            let member = at_member_simple_name(&inj.at_target_member);
+            if let Some(count) = index.call_site_count(&slash, method, member)
+                && count >= 1
+                && ordinal as u32 >= count
+            {
+                out.push(ApplyFailure {
+                    kind: ApplyFailureKind::OrdinalOutOfRange,
+                    mod_id: class.mod_id.clone(),
+                    mixin: class.class_name.clone(),
+                    target: inj.target.clone(),
+                    member: format!("{member}#{ordinal}"),
+                    detail: format!(
+                        "@At(ordinal = {ordinal}) selects call site {ordinal} of `{member}` \
                                  in `{}`, but only {count} matching site(s) exist",
-                                inj.resolved
-                            ),
-                            confirmed: true,
-                        });
-                    }
-                }
+                        inj.resolved
+                    ),
+                    confirmed: true,
+                });
             }
         }
 
@@ -733,7 +894,9 @@ fn detect_for_class(
         // mixins targeting vanilla-inherited methods).
         if index.contains_class(&slash) {
             let name = method_simple_name(&inj.resolved);
-            if !name.is_empty() && index.method_resolves(&slash, name) == Some(false) {
+            let resolved_name =
+                index.resolve_target_method_name(&inj.target, name, global_mappings);
+            if !name.is_empty() && index.method_resolves(&slash, &resolved_name) == Some(false) {
                 let require = inj.meta.require.unwrap_or(0) >= 1;
                 out.push(ApplyFailure {
                     // require >= 1 makes an unmatched target a hard load failure.
@@ -758,7 +921,7 @@ fn detect_for_class(
                     confirmed: require,
                 });
             }
-        } else if is_minecraft_class(&slash) && index.has_minecraft_coverage() {
+        } else if comparable && is_minecraft_target(&inj.target) && index.has_minecraft_coverage() {
             // We have a Minecraft index (`--minecraft-jar`) yet the class is
             // absent — a real missing target.
             out.push(ApplyFailure {
@@ -781,8 +944,14 @@ fn detect_for_class(
         if shadow.kind != MemberKind::Field {
             continue;
         }
-        let slash = resolve_target_slash(&shadow.target, global_mappings);
+        if !index.namespace_comparable(&shadow.target, global_mappings) {
+            continue;
+        }
+        let slash = index.resolve_target_slash(&shadow.target, global_mappings);
         if !index.contains_class(&slash) {
+            continue;
+        }
+        if index.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
             continue;
         }
         let descs = index.field_descriptors(&slash, &shadow.name);
@@ -1139,8 +1308,35 @@ mod tests {
         }
         assert_eq!(
             index.minecraft_class_namespace(),
-            MinecraftClassNamespace::Unsupported
+            MinecraftClassNamespace::OfficialObfuscated
         );
+    }
+
+    #[test]
+    fn official_namespace_uses_explicit_tiny_symbol_edges_without_false_absence() {
+        let mut index = TargetClassIndex::new();
+        index.ingest_minecraft_class(&fixtures::class_with_method("a", "b", "()V"));
+        for n in 0..40 {
+            index.minecraft_classes.insert(format!("x{n}"));
+        }
+        index.mark_minecraft_coverage_complete();
+        assert_eq!(
+            index.minecraft_class_namespace(),
+            MinecraftClassNamespace::OfficialObfuscated
+        );
+        let mappings = TinyMappings::parse(
+            "tiny\t2\t0\tofficial\tintermediary\tnamed\n\
+             c\ta\tnet/minecraft/class_1297\tnet/minecraft/world/entity/Entity\n\
+             \tm\t()V\tb\tmethod_5773\ttick\n",
+        )
+        .unwrap();
+        let record = record_targeting("consumer", "net.minecraft.world.entity.Entity", "tick()V");
+        let failures = detect_apply_failures(&[record], &index, &BTreeSet::new(), Some(&mappings));
+        assert!(failures.iter().all(|failure| {
+            failure.kind != ApplyFailureKind::TargetClassMissing
+                && failure.kind != ApplyFailureKind::TargetMethodMissing
+                && failure.kind != ApplyFailureKind::RequireUnsatisfied
+        }));
     }
 
     #[test]
@@ -1149,11 +1345,17 @@ mod tests {
         for n in 0..40 {
             named
                 .minecraft_classes
-                .insert(format!("net/minecraft/world/Named{n}"));
+                .insert(format!("net/minecraft/world/entity/Named{n}"));
         }
+        named
+            .minecraft_classes
+            .insert("net/minecraft/world/entity/Entity".into());
+        named
+            .minecraft_classes
+            .insert("net/minecraft/client/Minecraft".into());
         assert_eq!(
             named.minecraft_class_namespace(),
-            MinecraftClassNamespace::Named
+            MinecraftClassNamespace::MojmapNamed
         );
 
         let mut intermediary = TargetClassIndex::new();
@@ -1169,16 +1371,54 @@ mod tests {
     }
 
     #[test]
+    fn yarn_named_index_cannot_prove_mojmap_target_absent() {
+        let mut index = TargetClassIndex::new();
+        for n in 0..40 {
+            index
+                .minecraft_classes
+                .insert(format!("net/minecraft/entity/YarnEntity{n}"));
+        }
+        index
+            .minecraft_classes
+            .insert("net/minecraft/entity/Entity".into());
+        index
+            .minecraft_classes
+            .insert("net/minecraft/client/MinecraftClient".into());
+        index.mark_minecraft_coverage_complete();
+        assert_eq!(
+            index.minecraft_class_namespace(),
+            MinecraftClassNamespace::YarnNamed
+        );
+        let record = record_targeting("consumer", "net.minecraft.world.entity.Entity", "tick()V");
+        let failures = detect_apply_failures(&[record], &index, &BTreeSet::new(), None);
+        assert!(failures.iter().all(|failure| {
+            failure.kind != ApplyFailureKind::TargetClassMissing
+                && failure.kind != ApplyFailureKind::TargetMethodMissing
+        }));
+    }
+
+    #[test]
     fn complete_explicit_minecraft_scope_makes_class_absence_conclusive() {
         let mut index = TargetClassIndex::new();
         index.ingest_minecraft_class(&fixtures::class_with_method(
-            "net/minecraft/Present",
+            "net/minecraft/world/entity/Present",
             "present",
             "()V",
         ));
+        for n in 0..40 {
+            index
+                .minecraft_classes
+                .insert(format!("net/minecraft/world/entity/Named{n}"));
+        }
+        index
+            .minecraft_classes
+            .insert("net/minecraft/world/entity/Entity".into());
+        index
+            .minecraft_classes
+            .insert("net/minecraft/client/Minecraft".into());
         index.mark_minecraft_coverage_complete();
         assert!(index.has_minecraft_coverage());
-        assert_eq!(index.class_scope_counts(), (1, 0));
+        assert_eq!(index.class_scope_counts(), (43, 0));
 
         let rec = record_targeting("alpha", "net.minecraft.client.Minecraft", "run()V");
         let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
@@ -1193,21 +1433,37 @@ mod tests {
     fn explicit_minecraft_members_override_same_named_mod_class() {
         let mut combined = TargetClassIndex::new();
         combined.ingest_class(&fixtures::class_with_method(
-            "net/minecraft/Shared",
+            "net/minecraft/world/entity/Shared",
             "modOnly",
             "()V",
         ));
         let mut minecraft = TargetClassIndex::new();
         minecraft.ingest_minecraft_class(&fixtures::class_with_method(
-            "net/minecraft/Shared",
+            "net/minecraft/world/entity/Shared",
             "gameMethod",
             "()V",
         ));
+        for n in 0..40 {
+            minecraft
+                .minecraft_classes
+                .insert(format!("net/minecraft/world/entity/Named{n}"));
+        }
+        minecraft
+            .minecraft_classes
+            .insert("net/minecraft/world/entity/Entity".into());
+        minecraft
+            .minecraft_classes
+            .insert("net/minecraft/client/Minecraft".into());
         minecraft.mark_minecraft_coverage_complete();
         combined.merge_explicit_minecraft(&minecraft);
 
         assert_eq!(
-            combined.resolve_method("net.minecraft.Shared", "gameMethod", Some("()V"), None),
+            combined.resolve_method(
+                "net.minecraft.world.entity.Shared",
+                "gameMethod",
+                Some("()V"),
+                None
+            ),
             crate::target_res::TargetResolution::ExactMatch
         );
     }

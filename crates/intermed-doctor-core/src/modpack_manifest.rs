@@ -252,28 +252,28 @@ struct CurseProject {
 fn find_manifest(target: &Target) -> Option<(std::path::PathBuf, DiscoveredManifest)> {
     for root in target.candidate_roots() {
         let modrinth = root.join("modrinth.index.json");
-        if modrinth.is_file() {
-            if let Some(parsed) = parse_modrinth(&modrinth) {
-                return Some((
-                    root.clone(),
-                    DiscoveredManifest {
-                        locator: "modrinth.index.json".to_string(),
-                        parsed,
-                    },
-                ));
-            }
+        if modrinth.is_file()
+            && let Some(parsed) = parse_modrinth(&modrinth)
+        {
+            return Some((
+                root.clone(),
+                DiscoveredManifest {
+                    locator: "modrinth.index.json".to_string(),
+                    parsed,
+                },
+            ));
         }
         let curse = root.join("manifest.json");
-        if curse.is_file() {
-            if let Some(parsed) = parse_curseforge(&curse) {
-                return Some((
-                    root.clone(),
-                    DiscoveredManifest {
-                        locator: "manifest.json".to_string(),
-                        parsed,
-                    },
-                ));
-            }
+        if curse.is_file()
+            && let Some(parsed) = parse_curseforge(&curse)
+        {
+            return Some((
+                root.clone(),
+                DiscoveredManifest {
+                    locator: "manifest.json".to_string(),
+                    parsed,
+                },
+            ));
         }
     }
     None

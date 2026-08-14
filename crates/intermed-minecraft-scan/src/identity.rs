@@ -12,7 +12,6 @@
 //! Paper → NeoForge. The first manifest that yields an id wins.
 
 use std::fs::File;
-use std::io::Read;
 use std::path::Path;
 
 use zip::ZipArchive;
@@ -39,10 +38,11 @@ impl ArtifactIdentity {
 
 /// Read a UTF-8 text entry from a zip archive by exact name.
 fn read_zip_text(archive: &mut ZipArchive<File>, name: &str) -> Option<String> {
-    let mut entry = archive.by_name(name).ok()?;
-    let mut buf = String::new();
-    entry.read_to_string(&mut buf).ok()?;
-    Some(buf)
+    intermed_doctor_core::bounded_zip::read_zip_text_opt(
+        archive,
+        name,
+        intermed_doctor_core::bounded_zip::cap_for_entry(name),
+    )
 }
 
 fn forge_identity(text: &str, loader: &str) -> Option<ArtifactIdentity> {
@@ -87,10 +87,10 @@ fn yaml_plugin_identity(text: &str, loader: &str) -> Option<ArtifactIdentity> {
 
 /// Detect a jar's identity by probing its loader manifests in precedence order.
 pub fn detect_from_zip(archive: &mut ZipArchive<File>) -> ArtifactIdentity {
-    if let Some(text) = read_zip_text(archive, "fabric.mod.json") {
-        if let Some(id) = json_identity(&text, "fabric") {
-            return id;
-        }
+    if let Some(text) = read_zip_text(archive, "fabric.mod.json")
+        && let Some(id) = json_identity(&text, "fabric")
+    {
+        return id;
     }
     if let Some(text) = read_zip_text(archive, "quilt.mod.json") {
         // Quilt nests under `quilt_loader`; fall back to flat `id` form too.
@@ -113,25 +113,25 @@ pub fn detect_from_zip(archive: &mut ZipArchive<File>) -> ArtifactIdentity {
             };
         }
     }
-    if let Some(text) = read_zip_text(archive, "META-INF/mods.toml") {
-        if let Some(id) = forge_identity(&text, "forge") {
-            return resolve_identity_version(archive, id);
-        }
+    if let Some(text) = read_zip_text(archive, "META-INF/mods.toml")
+        && let Some(id) = forge_identity(&text, "forge")
+    {
+        return resolve_identity_version(archive, id);
     }
-    if let Some(text) = read_zip_text(archive, "plugin.yml") {
-        if let Some(id) = yaml_plugin_identity(&text, "bukkit") {
-            return id;
-        }
+    if let Some(text) = read_zip_text(archive, "plugin.yml")
+        && let Some(id) = yaml_plugin_identity(&text, "bukkit")
+    {
+        return id;
     }
-    if let Some(text) = read_zip_text(archive, "paper-plugin.yml") {
-        if let Some(id) = yaml_plugin_identity(&text, "paper") {
-            return id;
-        }
+    if let Some(text) = read_zip_text(archive, "paper-plugin.yml")
+        && let Some(id) = yaml_plugin_identity(&text, "paper")
+    {
+        return id;
     }
-    if let Some(text) = read_zip_text(archive, "META-INF/neoforge.mods.toml") {
-        if let Some(id) = forge_identity(&text, "neoforge") {
-            return resolve_identity_version(archive, id);
-        }
+    if let Some(text) = read_zip_text(archive, "META-INF/neoforge.mods.toml")
+        && let Some(id) = forge_identity(&text, "neoforge")
+    {
+        return resolve_identity_version(archive, id);
     }
     ArtifactIdentity::default()
 }

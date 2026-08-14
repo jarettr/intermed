@@ -60,6 +60,16 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
         p.bold(&report.target.path),
         report.target.kind.label()
     );
+    let fp = &report.analysis_configuration.fingerprint;
+    if let Some(commit) = &fp.git_commit {
+        let short = commit.get(..12).unwrap_or(commit);
+        let dirty = if fp.git_dirty == Some(true) {
+            "+dirty"
+        } else {
+            ""
+        };
+        let _ = writeln!(out, "Build: {short}{dirty} · cache={}", fp.cache_mode);
+    }
 
     // Environment line
     let env = &report.environment;
@@ -91,6 +101,15 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     if !env_bits.is_empty() {
         let _ = writeln!(out, "Env:    {}", p.dim(&env_bits.join("  ")));
     }
+    let s = &report.summary;
+    let _ = writeln!(
+        out,
+        "Status: {} confirmed · {} review · {} incomplete · {} context",
+        p.bold(&s.confirmed_problems.to_string()),
+        p.bold(&s.needs_review.to_string()),
+        p.bold(&s.incomplete_analysis.to_string()),
+        s.context,
+    );
     out.push('\n');
 
     if !report.operational_errors.is_empty() {
@@ -125,7 +144,8 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     // A family with this many members collapses to a group summary; smaller
     // families print full per-finding detail so individual issues stay readable.
     const GROUP_THRESHOLD: usize = 3;
-    for group in &groups {
+    const DEFAULT_GROUP_BUDGET: usize = 40;
+    for group in groups.iter().take(DEFAULT_GROUP_BUDGET) {
         if group.len() >= GROUP_THRESHOLD {
             render_group(&mut out, &p, group);
         } else {
@@ -133,6 +153,14 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
                 render_finding(&mut out, &p, f);
             }
         }
+    }
+    if groups.len() > DEFAULT_GROUP_BUDGET {
+        let _ = writeln!(
+            out,
+            "{} {} additional finding families are retained in HTML/JSON and explain output.",
+            p.dim("note:"),
+            p.bold(&(groups.len() - DEFAULT_GROUP_BUDGET).to_string())
+        );
     }
     if visible_findings.is_empty() {
         let _ = writeln!(out, "{}", p.paint("1;32", "✓ No actionable findings."));

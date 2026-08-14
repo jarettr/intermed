@@ -25,7 +25,7 @@ function __fish_intermed_using_subcommand
 end
 
 complete -c intermed -n "__fish_intermed_needs_command" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_needs_command" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_needs_command" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_needs_command" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_needs_command" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_needs_command" -s h -l help -d 'Print help (see more with \'--help\')'
@@ -81,8 +81,8 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l log-paralle
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l security-corroborated-confidence -d 'Confidence for reflection-corroborated security facts (default: 0.4)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l minecraft-jar -d 'Minecraft client/server jar to index. Powers two layers: mixin apply-failure verification against vanilla classes (Layer F), and a vanilla resource index (Layer M) so `minecraft:` references resolve and tags expand against real vanilla data instead of being assumed present' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l minecraft-mappings -d 'Yarn/Mojmap Tiny v2 mappings (`mappings.tiny`) for named↔intermediary bridging during mixin apply-failure checks with `--minecraft-jar`' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mixin-level -d 'Mixin analysis preset: `normal` (overlaps/risk only), `detailed` (+ recommendations), `full` (+ per-handler intelligence findings)' -r -f -a "normal\t''
-detailed\t''
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mixin-level -d 'Mixin analysis preset: `basic` (overlaps/risk only), `standard` (+ recommendations), `full` (+ per-handler intelligence findings)' -r -f -a "basic\t''
+standard\t''
 full\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l db -d 'Persist this run to a DuckDB analytics file (requires `--features duckdb`)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack -d 'Extra declarative rule packs: file path or installed pack id (repeatable)' -r
@@ -90,7 +90,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack-d
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack-trusted-keys -d 'Trusted publisher keys file for verifying signed rule pack overlays' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l rule-pack-registry -d 'Registry index path or URL for resolving `--rule-pack` ids' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mixin-risk -d 'Enable Layer-F Mixin risk scanning during doctor'
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mixin-risk -d 'Compatibility shorthand for `--mixin-level standard`'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l no-color -d 'Disable ANSI colour even on a TTY'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l telemetry-include-log-excerpts -d 'Include up to 20 redacted, truncated log-signal excerpts in explicitly requested telemetry. Requires `--telemetry-out` or `--telemetry-endpoint`'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l exit-zero -d 'Exit 0 whenever the run completes, regardless of findings'
@@ -104,12 +104,12 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l db-best-eff
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l core-rule-pack-only -d 'Use only the embedded core rule pack (ignore installed/community overlays)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l allow-insecure-registry -d 'Allow `http://` rule-pack registries/packs (insecure; HTTPS is required by default)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l allow-unsigned-rules -d 'Accept unsigned, or signed-but-unpinned, remote rule packs'
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and not __fish_seen_subcommand_from scan explain overlay help" -s h -l help -d 'Print help'
@@ -124,7 +124,7 @@ full\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l ast -d 'Show the Layer-M typed AST view (domain, semantic diff, references) for `--path`. Requires `--path`'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l no-color -d 'Accepted for script consistency; VFS output currently has no ANSI colour'
-complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from scan" -s h -l help -d 'Print help'
@@ -135,7 +135,7 @@ full\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l ast -d 'Show the Layer-M typed AST view (domain, semantic diff, references) for `--path`. Requires `--path`'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l no-color -d 'Accepted for script consistency; VFS output currently has no ANSI colour'
-complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help'
@@ -144,7 +144,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l include-unsafe-winners -d 'Also stage order-dependent collisions by picking a lexical winner. These are previews, NOT safe fixes: the manifest marks them safe_to_apply=false. By default only deterministic, order-independent merges are written'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l explain-plan -d 'Print the semantic overlay plan (`intermed-overlay-plan-v2`: safe / review / unsafe buckets) to stdout and exit — read-only, writes nothing'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l no-color -d 'Accepted for script consistency; VFS output currently has no ANSI colour'
-complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from overlay" -s h -l help -d 'Print help'
@@ -153,7 +153,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from help" -f -a "overlay" -d 'Write a read-only overlay preview directory from detected collisions'
 complete -c intermed -n "__fish_intermed_using_subcommand vfs; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -s h -l help -d 'Print help'
@@ -166,27 +166,27 @@ complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_s
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and not __fish_seen_subcommand_from graph resolve why why-missing implicit path help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from graph" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from resolve" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from why-missing" -s h -l help -d 'Print help'
@@ -194,14 +194,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from implicit" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from path" -s h -l help -d 'Print help'
@@ -213,7 +213,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from help" -f -a "path" -d 'Find a dependency chain between two mods (`deps path <from> <to>`)'
 complete -c intermed -n "__fish_intermed_using_subcommand deps; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish_seen_subcommand_from remove update help" -s h -l help -d 'Print help'
@@ -223,14 +223,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand impact; and not __fish
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from remove" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l json -d 'Emit machine-readable JSON instead of text'
-complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand impact; and __fish_seen_subcommand_from update" -s h -l help -d 'Print help'
@@ -245,19 +245,19 @@ html\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l graph-out -d 'Write graph export to file (stdout when omitted for dot/graphml)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l no-color -d 'Accepted for script consistency; Mixin Map output currently has no ANSI colour'
-complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand mixin-map" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l spark-report -d 'Explicit spark report JSON (`intermed-spark-report-v1`)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l no-color -d 'Accepted for script consistency; Spark Map output currently has no ANSI colour'
-complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand spark-map" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -s h -l help -d 'Print help'
@@ -268,7 +268,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_se
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and not __fish_seen_subcommand_from discover run report eval help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -l out -d 'Output lock path' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from discover" -s h -l help -d 'Print help'
@@ -276,13 +276,13 @@ complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l out -d 'Output directory for the run artifact (`lab-run.json`)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l lab-excerpt-max -d 'Maximum characters kept from a failure log excerpt (default: 280)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from run" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -l out -d 'Output directory for `matrix.json` + `index.html`' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -s h -l help -d 'Print help'
@@ -294,7 +294,7 @@ warn\t''
 error\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l out -d 'Output accuracy report path (`intermed-rule-accuracy-v3`)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -s h -l help -d 'Print help'
@@ -304,7 +304,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from help" -f -a "eval" -d 'Score Doctor predictions against lab ground truth (precision/recall)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and not __fish_seen_subcommand_from check generate sign verify update registry install explain help" -s h -l help -d 'Print help'
@@ -322,7 +322,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l require-signature -d 'Require a valid Ed25519 signature on v2 packs'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l trace -d 'Dry-run: evaluate each rule against facts JSON and print a trace table'
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from check" -s h -l help -d 'Print help'
@@ -332,20 +332,20 @@ datalog\t''
 explain\t'Columnar query-engine `EXPLAIN` (logical + physical plan + engines) per rule'"
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -l out -d 'Write to file instead of stdout' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from generate" -s h -l help -d 'Print help (see more with \'--help\')'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l key -d 'Ed25519 seed file (32 raw bytes or base64 text)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l out -d 'Output signed pack path (default: overwrite input)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from sign" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -l trusted-keys -d 'Trusted publisher public keys (one base64 key per line)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from verify" -s h -l help -d 'Print help'
@@ -356,14 +356,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l allow-insecure-registry -d 'Allow `http://` registries/packs (insecure; HTTPS is required by default)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l allow-unsigned-rules -d 'Accept unsigned, or signed-but-unpinned, remote rule packs'
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from update" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l registry -d 'Registry index JSON or URL. Defaults to the embedded InterMed registry' -r
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l allow-insecure-registry -d 'Allow `http://` registries (insecure; HTTPS is required by default)'
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from registry" -s h -l help -d 'Print help'
@@ -374,14 +374,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l allow-insecure-registry -d 'Allow `http://` registries/packs (insecure; HTTPS is required by default)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l allow-unsigned-rules -d 'Accept unsigned, or signed-but-unpinned, remote rule packs'
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from install" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l rule -d 'Explain only this rule id (default: every lowerable rule)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l facts -d 'A `doctor --dump-facts` JSON file: enables EXPLAIN ANALYZE on those real facts' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help'
@@ -395,7 +395,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from help" -f -a "explain" -d 'Show the query-engine plan (EXPLAIN, and EXPLAIN ANALYZE with `--facts`) per rule'
 complete -c intermed -n "__fish_intermed_using_subcommand rules; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -s h -l help -d 'Print help'
@@ -403,14 +403,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_see
 complete -c intermed -n "__fish_intermed_using_subcommand db; and not __fish_seen_subcommand_from query help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -l db -d 'DuckDB analytics database file' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from query" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from help" -f -a "query" -d 'Run a read-only SQL query against the analytics store'
 complete -c intermed -n "__fish_intermed_using_subcommand db; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fish_seen_subcommand_from conflicts patterns diff prune help" -s h -l help -d 'Print help'
@@ -422,14 +422,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand history; and not __fis
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l db -d 'DuckDB analytics database file' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l since -d 'Relative look-back window (`30d`, `7d`, `24h`). Default: 30d' -r
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from conflicts" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l db -d 'DuckDB analytics database file' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l limit -d 'Maximum patterns to show (highest severity / most recurring first)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from patterns" -s h -l help -d 'Print help'
@@ -438,14 +438,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_se
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l run-b -r
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l json -d 'Emit structured JSON (`intermed-history-diff-v1`) instead of TSV'
-complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from diff" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l db -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l keep -d 'Keep runs within this window (`90d`, `30d`). Older runs are deleted' -r
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from prune" -s h -l help -d 'Print help'
@@ -455,7 +455,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_se
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from help" -f -a "prune" -d 'Delete analytics runs older than a retention window'
 complete -c intermed -n "__fish_intermed_using_subcommand history; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -s h -l help -d 'Print help'
@@ -464,14 +464,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and not __fish_seen_subcommand_from mixin-risk mixin-overlaps help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -l db -d 'DuckDB analytics database file' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-risk" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l db -d 'DuckDB analytics database file' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l limit -d 'Number of rows to return (default: 10)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from mixin-overlaps" -s h -l help -d 'Print help'
@@ -479,7 +479,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_see
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from help" -f -a "mixin-overlaps" -d 'Top-N most frequent mixin overlaps (by mod set + target)'
 complete -c intermed -n "__fish_intermed_using_subcommand trends; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -s h -l help -d 'Print help'
@@ -489,19 +489,19 @@ complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and not __fish_seen_subcommand_from stats prune clear help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -l cache-dir -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from stats" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -l cache-dir -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from prune" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -l cache-dir -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from clear" -s h -l help -d 'Print help'
@@ -510,7 +510,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from help" -f -a "clear" -d 'Delete all cached jar payloads and fingerprints'
 complete -c intermed -n "__fish_intermed_using_subcommand cache; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and not __fish_seen_subcommand_from export help" -s h -l help -d 'Print help'
@@ -521,14 +521,14 @@ complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_
 cyclonedx-json\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -l out -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from export" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from help" -f -a "export" -d 'Export SPDX or CycloneDX SBOM from jar metadata'
 complete -c intermed -n "__fish_intermed_using_subcommand sbom; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -s h -l help -d 'Print help'
@@ -536,7 +536,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_s
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and not __fish_seen_subcommand_from report help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -s o -l out -d 'Output directory for `intermed-atlauncher-demo-summary.md`, `intermed-demo-report.html`, and JSON' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -l dump-config -d 'Print the effective default config as TOML and exit (no subcommand required)'
+complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand demo; and __fish_seen_subcommand_from report" -s h -l help -d 'Print help'

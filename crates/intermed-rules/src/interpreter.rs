@@ -391,20 +391,20 @@ fn evaluate_correlation<'a>(
 
         let mut related: Vec<&Fact> = Vec::new();
         if let Some((left_term, buckets)) = &related_index {
-            if let Some(join_val) = resolve_term(left_term, &expr_ctx) {
-                if let Some(candidates) = buckets.get(&join_val) {
-                    for candidate in candidates {
-                        bindings.insert("related".to_string(), candidate);
-                        let related_ctx = ExprCtx {
-                            bindings: &bindings,
-                            settings,
-                            vars: None,
-                        };
-                        if eval_bool(match_on, &related_ctx) {
-                            related.push(candidate);
-                        }
-                        bindings.remove("related");
+            if let Some(join_val) = resolve_term(left_term, &expr_ctx)
+                && let Some(candidates) = buckets.get(&join_val)
+            {
+                for candidate in candidates {
+                    bindings.insert("related".to_string(), candidate);
+                    let related_ctx = ExprCtx {
+                        bindings: &bindings,
+                        settings,
+                        vars: None,
+                    };
+                    if eval_bool(match_on, &related_ctx) {
+                        related.push(candidate);
                     }
+                    bindings.remove("related");
                 }
             }
         } else {
@@ -544,10 +544,10 @@ pub fn group_distinct_findings<'a>(
     // Gather members per matched group (same predicate the engine matched on).
     let mut groups: BTreeMap<String, Vec<&Fact>> = BTreeMap::new();
     for fact in ctx.store.all().iter().filter(|f| matches_where_v1(f, spec)) {
-        if let Some(key) = term_value(fact, group_by) {
-            if wanted.contains(key.as_str()) {
-                groups.entry(key).or_default().push(fact);
-            }
+        if let Some(key) = term_value(fact, group_by)
+            && wanted.contains(key.as_str())
+        {
+            groups.entry(key).or_default().push(fact);
         }
     }
 
@@ -679,6 +679,12 @@ fn build_finding(
     let mut b = Finding::builder(rule_id, id)
         .severity(severity)
         .category(category)
+        .visibility(match spec.finding.visibility.as_str() {
+            "verbose" => intermed_doctor_core::evidence::FindingVisibility::Verbose,
+            "explain-only" => intermed_doctor_core::evidence::FindingVisibility::ExplainOnly,
+            "overlay-only" => intermed_doctor_core::evidence::FindingVisibility::OverlayOnly,
+            _ => intermed_doctor_core::evidence::FindingVisibility::Default,
+        })
         .title(title)
         .explanation(explanation)
         .confidence(default_confidence(category));
@@ -837,11 +843,11 @@ fn apply_related_evidence(
             settings,
             vars: None,
         };
-        if let Some(join_val) = resolve_term(left_term, &primary_ctx) {
-            if let Some(matches) = index.get(&join_val) {
-                for candidate in matches {
-                    builder = add(builder, candidate);
-                }
+        if let Some(join_val) = resolve_term(left_term, &primary_ctx)
+            && let Some(matches) = index.get(&join_val)
+        {
+            for candidate in matches {
+                builder = add(builder, candidate);
             }
         }
         return builder;

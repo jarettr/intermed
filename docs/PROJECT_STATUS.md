@@ -1,23 +1,37 @@
 # Project status
 
-InterMed 0.1.4-alpha is an alpha static analyzer. Its CLI, schemas, rules, and
+InterMed 0.1.5-alpha is an alpha static analyzer. Its CLI, schemas, rules, and
 reports are usable, but compatibility is not yet promised across every Minecraft
 or loader release and machine-facing formats may change before 1.0.
 
 ## What has been validated
 
-The August 2026 corpus run covered 12 complete Modrinth packs: 2,289 declared
-artifacts (5.6 GB materialized), Minecraft 1.12.2, 1.19.2, 1.20.1, and 1.21.1,
-and Fabric, Forge, and NeoForge packs. The bounded static analysis completed for
-all 12 packs without an operational error; the largest observed peak was about
-3.2 GiB RSS with a restricted worker count. Unit, integration, backend-parity,
-negative-fixture, archive-boundary, and CLI end-to-end tests cover the contracts
-used by that run.
+A fresh 0.1.5 release-candidate pass on 2026-08-14 covered five materialized
+Modrinth packs: 1,166 mod archives and 4.01 GiB on disk across Minecraft 1.19.2,
+1.20.1, and 1.21.1 with Fabric, Forge, and NeoForge. Every run used its original
+`.mrpack` as authoritative environment evidence. BMC4 additionally used
+`--mixin-level full`, a Minecraft 1.20.1 client jar, Tiny mappings, and `--jobs 2`.
+The other runs used `--jobs 4`. All five completed without an operational error.
 
-This is validation of execution, resource bounds, report integrity, and known
-fixtures. It is not a claim that every one of the 60,690 corpus findings was
-independently confirmed by launching Minecraft. Precision and recall per rule
-still require the Compatibility Lab measurement loop described in the roadmap.
+| Pack | Target | Archives | Generated / retained / snapshot-dropped facts | Findings (Error / Warn) | Time | Peak RSS |
+|---|---|---:|---:|---:|---:|---:|
+| Prominence II | Fabric 1.20.1 | 436 | 520,613 / 13,848 / 506,765 | 1,925 (1 / 65) | 37 s | 1,311 MiB |
+| Create+ | Forge 1.19.2 | 286 | 166,477 / 7,330 / 159,147 | 861 (5 / 44) | 19 s | 566 MiB |
+| FOM | NeoForge 1.21.1 | 101 | 62,496 / 2,239 / 60,257 | 277 (0 / 28) | 16 s | 394 MiB |
+| Pixelmon | NeoForge 1.21.1 | 13 | 83,691 / 296 / 83,395 | 34 (0 / 9) | 33 s | 332 MiB |
+| Better MC Forge BMC4, full Mixin | Forge 1.20.1 | 330 | 383,613 / 29,486 / 354,127 | 7,865 (8 / 493) | 43 s | 1,801 MiB |
+
+“Snapshot-dropped” means facts removed only after every registered rule finished;
+it is not collection-time truncation. Tiny-limit regression fixtures verify that
+bounded and unbounded snapshots produce identical finding identities for runtime-
+confirmed Mixin failures, performance/Mixin correlation, reflective handler
+security correlation, and an external rule consuming a droppable predicate.
+
+This is validation of execution, retention correctness, report integrity, and
+known fixtures. It is not a claim that every one of the 10,962 findings was
+independently confirmed by launching Minecraft.
+Precision and recall per rule still require the Compatibility Lab measurement
+loop described in the roadmap.
 
 ## Supported use
 

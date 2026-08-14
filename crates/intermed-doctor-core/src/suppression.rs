@@ -35,10 +35,10 @@ pub fn apply_semantic_override_suppression(findings: &mut Vec<Finding>) -> usize
     let mut winner_by_path: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for (i, f) in findings.iter().enumerate() {
-        if f.machine_tags.iter().any(|t| t == "semantic-override") {
-            if let Some((_, path)) = f.id.split_once(':') {
-                winner_by_path.insert(path.to_string(), i);
-            }
+        if f.machine_tags.iter().any(|t| t == "semantic-override")
+            && let Some((_, path)) = f.id.split_once(':')
+        {
+            winner_by_path.insert(path.to_string(), i);
         }
     }
     if winner_by_path.is_empty() {
@@ -55,10 +55,10 @@ pub fn apply_semantic_override_suppression(findings: &mut Vec<Finding>) -> usize
         let Some((_, path)) = rest.split_once(':') else {
             continue;
         };
-        if let Some(&winner) = winner_by_path.get(path) {
-            if winner != j {
-                folds.push((winner, j));
-            }
+        if let Some(&winner) = winner_by_path.get(path)
+            && winner != j
+        {
+            folds.push((winner, j));
         }
     }
 
@@ -70,12 +70,28 @@ pub fn apply_semantic_override_suppression(findings: &mut Vec<Finding>) -> usize
         let loser_evidence = findings[loser].evidence.clone();
         let loser_rule = findings[loser].rule_id.clone();
         let loser_tags = findings[loser].machine_tags.clone();
+        let loser_requirements = findings[loser].coverage_requirements.clone();
+        let loser_refutability = findings[loser].runtime_refutability.clone();
+        let loser_proof = findings[loser].proof_kind;
         let w = &mut findings[winner];
         w.evidence.extend(loser_evidence);
         for tag in loser_tags {
             if !w.machine_tags.contains(&tag) {
                 w.machine_tags.push(tag);
             }
+        }
+        for requirement in loser_requirements {
+            if !w.coverage_requirements.contains(&requirement) {
+                w.coverage_requirements.push(requirement);
+            }
+        }
+        for refutability in loser_refutability {
+            if !w.runtime_refutability.contains(&refutability) {
+                w.runtime_refutability.push(refutability);
+            }
+        }
+        if w.proof_kind.is_none() {
+            w.proof_kind = loser_proof;
         }
         if loser_rule != w.rule_id && !w.rule_sources.contains(&loser_rule) {
             w.rule_sources.push(loser_rule);
@@ -161,10 +177,10 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
 /// (`create:crushing/tuff`) or its namespace (mod-scoped script removal).
 fn recipe_is_scripted(path: &str, scripted: &std::collections::BTreeSet<String>) -> bool {
     let key = ResourceKey::from_path(path);
-    if let Some(id) = &key.object_id {
-        if scripted.contains(&id.to_string()) {
-            return true;
-        }
+    if let Some(id) = &key.object_id
+        && scripted.contains(&id.to_string())
+    {
+        return true;
     }
     // Mod-scoped removal (`removeByModid("create")`) names the namespace only.
     key.namespace

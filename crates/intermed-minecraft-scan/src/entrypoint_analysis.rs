@@ -36,6 +36,10 @@ const EVENT_BUS_SUBSCRIBER: &[&str] = &[
     "Lnet/neoforged/fml/common/EventBusSubscriber;",
 ];
 
+/// Keep ordinary call/reference evidence bounded even for shaded library jars.
+/// The sorted set also makes emitted facts deterministic across ZIP ordering.
+const MAX_REFERENCED_PACKAGES: usize = 1_024;
+
 /// Structural facts extracted from one entrypoint class.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(crate) struct EntrypointAnalysis {
@@ -80,10 +84,10 @@ pub(crate) fn analyze_entrypoint_class(bytes: &[u8]) -> Option<EntrypointAnalysi
         {
             a.registers_listeners = true;
             a.entrypoint_type = Some("event_bus_subscriber");
-            if let Some(param) = method.descriptor.parameters.first() {
-                if let Some(name) = object_simple_name(&param.field_type) {
-                    push_unique(&mut a.events, name);
-                }
+            if let Some(param) = method.descriptor.parameters.first()
+                && let Some(name) = object_simple_name(&param.field_type)
+            {
+                push_unique(&mut a.events, name);
             }
             if let Some(p) = subscribe_priority(ann) {
                 a.priority = Some(a.priority.map_or(p, |cur| cur.max(p)));
@@ -250,6 +254,8 @@ const CAPABILITY_REFS: &[(&str, &str)] = &[
 pub(crate) struct JarIntel {
     pub events: Vec<String>,
     pub capabilities: Vec<String>,
+    pub referenced_packages: Vec<String>,
+    pub references_truncated: bool,
 }
 
 /// Scan up to [`MAX_CLASSES_SCANNED`] of a jar's classes for event subscriptions
@@ -262,6 +268,7 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
 ) -> JarIntel {
     let mut events = Vec::new();
     let mut caps: BTreeSet<&'static str> = BTreeSet::new();
+    let mut referenced_packages = BTreeSet::new();
     let limit = archive.len().min(MAX_CLASSES_SCANNED);
     for i in 0..limit {
         let (dotted, bytes) = {
@@ -283,11 +290,23 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
             (dotted, bytes)
         };
         let is_entry = entrypoint_classes.contains(&dotted);
-        scan_class_signals(&bytes, is_entry, &mut events, &mut caps);
+        scan_class_signals(
+            &bytes,
+            is_entry,
+            &mut events,
+            &mut caps,
+            &mut referenced_packages,
+        );
     }
+    let references_truncated = referenced_packages.len() > MAX_REFERENCED_PACKAGES;
     JarIntel {
         events,
         capabilities: caps.into_iter().map(str::to_string).collect(),
+        referenced_packages: referenced_packages
+            .into_iter()
+            .take(MAX_REFERENCED_PACKAGES)
+            .collect(),
+        references_truncated,
     }
 }
 
@@ -298,6 +317,7 @@ fn scan_class_signals(
     is_entry: bool,
     events: &mut Vec<String>,
     caps: &mut BTreeSet<&'static str>,
+    referenced_packages: &mut BTreeSet<String>,
 ) {
     if bytes.len() < 4 || bytes[..4] != [0xCA, 0xFE, 0xBA, 0xBE] {
         return;
@@ -355,6 +375,12 @@ fn scan_class_signals(
             _ => None,
         };
         if let Some(class_ref) = class_ref {
+            if !is_platform_class(&class_ref) {
+                let package = class_ref.split('/').take(3).collect::<Vec<_>>().join(".");
+                if package.matches('.').count() >= 1 {
+                    referenced_packages.insert(package);
+                }
+            }
             for (needle, token) in CAPABILITY_REFS {
                 if class_ref.contains(needle) {
                     caps.insert(token);
@@ -362,6 +388,22 @@ fn scan_class_signals(
             }
         }
     }
+}
+
+fn is_platform_class(class_name: &str) -> bool {
+    [
+        "java/",
+        "javax/",
+        "jdk/",
+        "sun/",
+        "kotlin/",
+        "scala/",
+        "net/minecraft/",
+        "com/mojang/",
+        "org/spongepowered/",
+    ]
+    .iter()
+    .any(|prefix| class_name.starts_with(prefix))
 }
 
 /// Cheap structural cost of a method body, used to flag heavy event handlers.

@@ -37,7 +37,7 @@ beta — 26/100 (1 class(es), 1 target(s), 1 site(s))
 alpha — 21/100 (1 class(es), 1 target(s), 1 site(s))
 
 Interactions:
-alpha ↔ beta on net.minecraft.client.render.WorldRenderer (Both inject into site `m0()V@HEAD` on `net.minecraft.client.render.WorldRenderer`)
+alpha ↔ beta on net.minecraft.client.render.WorldRenderer (Both inject into site `m0()V@HEAD` on `net.minecraft.client.render.WorldRenderer`; co-location alone does not prove order-sensitive behavior)
 
 Conflict edges:
 same-injection-point — alpha.mixin.RenderMixin (beta.mixin.RenderMixin) @ net.minecraft.client.render.WorldRenderer

@@ -29,7 +29,7 @@ Schema `intermed-doctor-report-v1`. Top-level keys:
 | `fact_stats` | A histogram of fact kinds the run produced. |
 | `collectors` | Which analysis collectors ran, their layer, status, and fact count. |
 | `rules` | Which rules fired and how many findings each produced. |
-| `deferred_layers` | Analyses that did not run (e.g. mixin without `--mixin-risk`). |
+| `deferred_layers` | Analyses that are not implemented for the selected target. Disabled, skipped, active, and incomplete collectors are recorded separately in `analysis_configuration`. |
 | `profile` | Phase timings, when `--profile` is set. |
 
 Each finding:
@@ -78,7 +78,7 @@ A single self-contained file — inline CSS and JS, no network. Tabs:
 - **Facts** — the predicate histogram and a sample of raw facts.
 - **Performance** — hot mods and methods, and phase timings.
 
-The depth of the Mixin and Resource tabs follows `--mixin-risk` and
+The depth of the Mixin and Resource tabs follows `--mixin-level` and
 `--resource-level`.
 
 ## Other artifacts

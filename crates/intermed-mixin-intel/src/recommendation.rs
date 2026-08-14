@@ -382,16 +382,16 @@ pub fn recommend_for_scan_with_context(
             });
         }
         // ModifyExpressionValue + ModifyReturnValue combination warning.
-        if combo_sites.contains(&(effect.target.clone(), effect.method.clone())) {
-            if let Some(rec) = recommend_for_modifier_combo(effect) {
-                out.push(MixinRecommendationRecord {
-                    mod_id: effect.mod_id.clone(),
-                    mixin_class: effect.mixin_class.clone(),
-                    target: effect.target.clone(),
-                    site_key: effect.site_key.clone(),
-                    recommendation: rec,
-                });
-            }
+        if combo_sites.contains(&(effect.target.clone(), effect.method.clone()))
+            && let Some(rec) = recommend_for_modifier_combo(effect)
+        {
+            out.push(MixinRecommendationRecord {
+                mod_id: effect.mod_id.clone(),
+                mixin_class: effect.mixin_class.clone(),
+                target: effect.target.clone(),
+                site_key: effect.site_key.clone(),
+                recommendation: rec,
+            });
         }
         // Subsystem-aware advice.
         for rec in recommend_for_subsystem(effect) {

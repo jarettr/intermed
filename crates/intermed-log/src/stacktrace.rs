@@ -38,6 +38,9 @@ pub struct Stacktrace {
     pub exception: Exception,
     /// The `Caused by:` chain, outermost first (each with its own frames).
     pub caused_by: Vec<Exception>,
+    /// Exceptions attached with `Suppressed:`. They are context, never promoted
+    /// above the deepest causal link.
+    pub suppressed: Vec<Exception>,
     /// Distinct mods this trace names, with how they were found.
     pub mod_refs: Vec<ModRef>,
 }
@@ -56,6 +59,7 @@ struct Patterns {
     frame: Regex,
     more: Regex,
     caused_by: Regex,
+    suppressed: Regex,
     mixin_config: Regex,
     mod_phrase: Regex,
 }
@@ -72,6 +76,10 @@ fn patterns() -> &'static Patterns {
         more: Regex::new(r"^\s*\.\.\.\s+\d+\s+more\s*$").unwrap(),
         caused_by: Regex::new(
             r"^(?:.*?[\]:>]\s+)?Caused by:\s*([a-zA-Z_][\w.$]*(?:Exception|Error|Throwable))(?::\s*(.*))?\s*$",
+        )
+        .unwrap(),
+        suppressed: Regex::new(
+            r"^\s*(?:.*?[\]:>]\s+)?Suppressed:\s*([a-zA-Z_][\w.$]*(?:Exception|Error|Throwable))(?::\s*(.*))?\s*$",
         )
         .unwrap(),
         // A mixin config file: `somemod.mixins.json` or `mixins.somemod.json`.
@@ -123,6 +131,13 @@ pub fn parse_stacktraces(text: &str) -> Vec<Stacktrace> {
         };
         let header_line = i;
         let mut caused_by: Vec<Exception> = Vec::new();
+        let mut suppressed: Vec<Exception> = Vec::new();
+        enum CurrentLink {
+            Top,
+            Cause,
+            Suppressed,
+        }
+        let mut current_link = CurrentLink::Top;
         i += 1;
         // Consume frames / `... N more` / nested `Caused by:` belonging to this
         // trace. Frames are routed to the currently-open exception link so a
@@ -130,13 +145,22 @@ pub fn parse_stacktraces(text: &str) -> Vec<Stacktrace> {
         while i < lines.len() {
             let line = lines[i];
             if let Some(c) = p.frame.captures(line) {
-                let sink = caused_by.last_mut().unwrap_or(&mut exception);
+                let sink = match current_link {
+                    CurrentLink::Top => &mut exception,
+                    CurrentLink::Cause => caused_by.last_mut().unwrap_or(&mut exception),
+                    CurrentLink::Suppressed => suppressed.last_mut().unwrap_or(&mut exception),
+                };
                 sink.frames.push(c[1].to_string());
                 i += 1;
             } else if p.more.is_match(line) {
                 i += 1; // `... N more`
             } else if let Some(cc) = p.caused_by.captures(line) {
                 caused_by.push(exception_from(&cc));
+                current_link = CurrentLink::Cause;
+                i += 1;
+            } else if let Some(suppressed_match) = p.suppressed.captures(line) {
+                suppressed.push(exception_from(&suppressed_match));
+                current_link = CurrentLink::Suppressed;
                 i += 1;
             } else {
                 break;
@@ -146,6 +170,7 @@ pub fn parse_stacktraces(text: &str) -> Vec<Stacktrace> {
             line: header_line,
             exception,
             caused_by,
+            suppressed,
             mod_refs: Vec::new(),
         };
         trace.mod_refs = extract_mod_refs(&trace, p);
@@ -188,6 +213,12 @@ fn extract_mod_refs(trace: &Stacktrace, p: &Patterns) -> Vec<ModRef> {
 fn trace_texts(trace: &Stacktrace) -> Vec<String> {
     let mut texts = Vec::new();
     for ex in std::iter::once(&trace.exception).chain(trace.caused_by.iter()) {
+        if let Some(m) = &ex.message {
+            texts.push(m.clone());
+        }
+        texts.extend(ex.frames.iter().cloned());
+    }
+    for ex in &trace.suppressed {
         if let Some(m) = &ex.message {
             texts.push(m.clone());
         }

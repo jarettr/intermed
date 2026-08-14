@@ -3,7 +3,7 @@
 A `doctor` report has three parts: a header, the findings, and a summary line.
 
 ```
-InterMed Doctor v0.1.4-alpha
+InterMed Doctor v0.1.5-alpha
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 
@@ -94,10 +94,11 @@ If the id does not match, `--explain` lists the closest ids it does have.
 
 ## Partial and deferred analysis
 
-Not every analysis runs on every command. Opt-in ones — mixins (`--mixin-risk`),
-performance (`--performance --spark-report`) — are listed under `deferred_layers` in
-the JSON report when they did not run, so a clean-looking report is never mistaken
-for a complete one.
+Not every analysis runs on every command. Opt-in ones — mixins (`--mixin-level basic|standard|full`, with `--mixin-risk` as a standard-level alias),
+performance (`--performance --spark-report`) — are recorded in
+`analysis_configuration.collectors` as `disabled`, `skipped`, `active`, or
+`incomplete`, with a reason. `deferred_layers` is reserved for genuinely
+unimplemented analysis, so a clean-looking report is never mistaken for a complete one.
 
 A run can also be *partial* for a reason it could not control — a jar it could not
 read, a modpack manifest whose jars are not on disk. When that happens the report

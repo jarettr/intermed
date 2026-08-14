@@ -5,7 +5,8 @@
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, EvidenceEdge, Finding, FixCandidate, Relation, Severity,
+    Category, CoverageRequirement, EvidenceEdge, Finding, FindingVisibility, FixCandidate,
+    ProofKind, Relation, RuntimeRefutability, Severity,
 };
 use intermed_doctor_core::facts::{FactId, kind};
 
@@ -345,11 +346,11 @@ fn capability_context(
         let mut caps = Vec::new();
         let mut ids = Vec::new();
         for f in ctx.store.by_kind(kind::MOD_CAPABILITY) {
-            if f.subject == *mod_id {
-                if let Some(cap) = f.attr("capability") {
-                    caps.push(cap.to_string());
-                    ids.push(f.id);
-                }
+            if f.subject == *mod_id
+                && let Some(cap) = f.attr("capability")
+            {
+                caps.push(cap.to_string());
+                ids.push(f.id);
             }
         }
         if !caps.is_empty() {
@@ -527,35 +528,48 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             let member = f.attr("member").unwrap_or("");
             let detail = f.attr("detail").unwrap_or("mixin apply failure");
             let mixin = f.attr("mixin").unwrap_or(&f.subject);
-            out.push(
-                Finding::builder(
-                    RULE_ID,
-                    format!("mixin-apply:{kind}:{}:{target}:{member}", f.subject),
-                )
-                .severity(if confirmed {
-                    Severity::Error
-                } else {
-                    Severity::Warn
-                })
-                .category(Category::Mixin)
-                .title(if confirmed {
-                    format!("Mixin will not apply: `{mixin}` -> {target}")
-                } else {
-                    format!("Mixin may not apply: `{mixin}` -> {target}")
-                })
-                .explanation(format!("`{}` ({mixin}): {detail}.", f.subject))
-                .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.clone())
-                .fix(FixCandidate::advice(
-                    "Verify the target class/method exists in the installed version; rebuild the \
+            let mut builder = Finding::builder(
+                RULE_ID,
+                format!("mixin-apply:{kind}:{}:{target}:{member}", f.subject),
+            )
+            .coverage_requirement(CoverageRequirement::CompleteClasspath)
+            .proof_kind(if confirmed {
+                ProofKind::DeterministicDerivation
+            } else {
+                ProofKind::Heuristic
+            })
+            .severity(if confirmed {
+                Severity::Error
+            } else {
+                Severity::Warn
+            })
+            .category(Category::Mixin)
+            .title(if confirmed {
+                format!("Mixin will not apply: `{mixin}` -> {target}")
+            } else {
+                format!("Mixin may not apply: `{mixin}` -> {target}")
+            })
+            .explanation(format!("`{}` ({mixin}): {detail}.", f.subject))
+            .evidence(EvidenceEdge::subject(f.id))
+            .affects(f.subject.clone())
+            .fix(FixCandidate::advice(
+                "Verify the target class/method exists in the installed version; rebuild the \
                      mixin against the correct Minecraft/mod mappings, or run with --minecraft-jar \
                      for full apply verification.",
-                ))
-                .tag("mixin")
-                .tag("apply-failure")
-                .confidence(if confirmed { 0.95 } else { 0.6 })
-                .build(),
-            );
+            ))
+            .tag("mixin")
+            .tag("apply-failure")
+            .confidence(if confirmed { 0.95 } else { 0.6 });
+            builder = match *kind {
+                "mixin_apply_target_class_missing" => {
+                    builder.runtime_refutability(RuntimeRefutability::ClassPresence)
+                }
+                "mixin_apply_target_method_missing" => {
+                    builder.runtime_refutability(RuntimeRefutability::ExactMethodPresence)
+                }
+                _ => builder,
+            };
+            out.push(builder.build());
         }
     }
     out
@@ -1271,10 +1285,21 @@ fn risk_cluster_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .tag("mixin")
             .tag("risk-cluster")
             .tag(cluster_kind)
+            // A cluster is a navigation/roll-up object. The primary site-level
+            // apply, selector, signature, or composition finding owns urgency;
+            // repeating the same severity on every target cluster makes the
+            // default report look like it contains a second set of incidents.
+            .visibility(FindingVisibility::Verbose)
             .confidence(confidence);
         if let Some(ids) = sites_by_target.get(target) {
-            for id in ids {
+            // The cluster fact is the proof summary. A bounded sample of raw
+            // sites enables drill-down without attaching tens of thousands of
+            // evidence edges to one navigation finding on large packs.
+            for id in ids.iter().take(24) {
                 builder = builder.evidence(EvidenceEdge::new(*id, Relation::Supports, 0.85));
+            }
+            if ids.len() > 24 {
+                builder = builder.tag("evidence-sample-bounded");
             }
         }
         out.push(builder.build());
@@ -1397,6 +1422,7 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 .affects(f.subject.as_str())
                 .tag("mixin")
                 .tag("handler-intelligence")
+                .visibility(FindingVisibility::Verbose)
                 .confidence(0.88)
                 .build(),
         );
@@ -1462,13 +1488,13 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 rsub.domain()
             ));
         }
-        if let Some(handler) = &effect.handler_effect {
-            if handler.complexity_score >= 55 {
-                explanation.push_str(&format!(
-                    " Handler complexity score is {}/100.",
-                    handler.complexity_score
-                ));
-            }
+        if let Some(handler) = &effect.handler_effect
+            && handler.complexity_score >= 55
+        {
+            explanation.push_str(&format!(
+                " Handler complexity score is {}/100.",
+                handler.complexity_score
+            ));
         }
         if hist_boost > 0 {
             explanation.push_str(
@@ -1557,6 +1583,7 @@ fn enhanced_overwrite_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 .tag("mixin")
                 .tag("overwrite")
                 .tag("mixin-effect")
+                .visibility(FindingVisibility::Verbose)
                 .confidence(if hot_path { 0.78 } else { 0.72 });
         for rec in &recs {
             let (text, confidence) = recommendation_as_fix(rec);

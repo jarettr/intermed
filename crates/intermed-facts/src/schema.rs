@@ -95,14 +95,14 @@ pub fn expected_type(kind: &str, attr: &str) -> Option<AttrType> {
 pub fn schema_violations(fact: &Fact) -> Vec<String> {
     let mut out = Vec::new();
     for (attr, value) in &fact.attributes {
-        if let Some(expected) = expected_type(&fact.kind, attr) {
-            if !expected.matches(value) {
-                out.push(format!(
-                    "{}.{attr}: expected {}, got {value:?}",
-                    fact.kind,
-                    expected.label()
-                ));
-            }
+        if let Some(expected) = expected_type(&fact.kind, attr)
+            && !expected.matches(value)
+        {
+            out.push(format!(
+                "{}.{attr}: expected {}, got {value:?}",
+                fact.kind,
+                expected.label()
+            ));
         }
     }
     out

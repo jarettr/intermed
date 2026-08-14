@@ -65,7 +65,7 @@ pub struct MixinSettings {
 
 impl Default for MixinSettings {
     fn default() -> Self {
-        Self::from_level(MixinLevel::Detailed)
+        Self::from_level(MixinLevel::Standard)
     }
 }
 
@@ -75,11 +75,22 @@ impl Default for MixinSettings {
 pub enum MixinLevel {
     /// Overlaps, risk scores, and high-risk overwrites only.
     #[default]
-    Normal,
+    Basic,
     /// Adds effect summaries and safer-mixin recommendations.
-    Detailed,
+    Standard,
     /// Full bytecode handler intelligence (can be noisy on large packs).
     Full,
+}
+
+impl MixinLevel {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Standard => "standard",
+            Self::Full => "full",
+        }
+    }
 }
 
 impl MixinSettings {
@@ -87,12 +98,12 @@ impl MixinSettings {
     #[must_use]
     pub fn from_level(level: MixinLevel) -> Self {
         match level {
-            MixinLevel::Normal => Self {
+            MixinLevel::Basic => Self {
                 level,
                 handler_effects: false,
                 recommendations: false,
             },
-            MixinLevel::Detailed => Self {
+            MixinLevel::Standard => Self {
                 level,
                 handler_effects: true,
                 recommendations: true,
@@ -126,7 +137,7 @@ impl MixinSettings {
     /// Whether per-injection effect summary findings should emit.
     #[must_use]
     pub fn effect_summary_findings(self) -> bool {
-        self.level != MixinLevel::Normal
+        self.level != MixinLevel::Basic
     }
 }
 

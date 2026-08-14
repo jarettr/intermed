@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 
 use clap::CommandFactory;
 use clap_complete::generate_to;
@@ -21,6 +22,41 @@ fn write_man_page(path: PathBuf, roff: Vec<u8>) {
 fn main() {
     println!("cargo:rerun-if-changed=src/command.rs");
     println!("cargo:rerun-if-env-changed=INTERMED_GENERATE_CLI_DOCS");
+
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join(".git/HEAD").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        repo.join(".git/index").display()
+    );
+    for path in ["Cargo.toml", "Cargo.lock", "crates", "rules"] {
+        println!("cargo:rerun-if-changed={}", repo.join(path).display());
+    }
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo)
+        .output()
+        && output.status.success()
+    {
+        println!(
+            "cargo:rustc-env=INTERMED_GIT_COMMIT={}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        );
+    }
+    if let Ok(status) = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&repo)
+        .output()
+        && status.status.success()
+    {
+        println!(
+            "cargo:rustc-env=INTERMED_GIT_DIRTY={}",
+            !status.stdout.is_empty()
+        );
+    }
 
     if std::env::var_os("INTERMED_GENERATE_CLI_DOCS").is_some() {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

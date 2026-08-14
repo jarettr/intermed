@@ -6,6 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{fs::File, io::Read};
 
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{
@@ -45,7 +46,17 @@ impl Collector for EnvironmentCollector {
             .map(|info| (info, "explicit-pack-manifest"))
             .unwrap_or_else(|| detect_loader_with_source(game_root, surface, ctx.target));
         let host_launcher = detect_host_launcher(surface, layout);
-        let mc = detect_mc_version(surface, game_root, layout);
+        let runtime_evidence = detect_runtime_environment(surface, game_root);
+        let explicit_mc = ctx
+            .settings
+            .pack_manifest
+            .as_deref()
+            .and_then(mc_from_manifest_locator);
+        let instance_mc = detect_mc_version(surface, game_root, layout);
+        let mc = explicit_mc
+            .clone()
+            .or_else(|| instance_mc.clone())
+            .or_else(|| runtime_evidence.as_ref().and_then(|e| e.minecraft.clone()));
 
         let mut b = ctx
             .store
@@ -72,6 +83,16 @@ impl Collector for EnvironmentCollector {
         }
         if let Some(m) = &mc {
             b = b.attr("mc_version", m.as_str());
+            b = b.attr(
+                "mc_version_source",
+                if explicit_mc.is_some() {
+                    "explicit-pack-manifest"
+                } else if instance_mc.is_some() {
+                    "instance-manifest"
+                } else {
+                    "runtime-log"
+                },
+            );
         }
         if let Some(host) = &host_launcher {
             b = b.attr("host_launcher", host.as_str());
@@ -82,14 +103,33 @@ impl Collector for EnvironmentCollector {
         b.emit();
         emitted += 1;
 
-        if let Some(java) = detect_java_version() {
+        if let Some(java) = runtime_evidence.as_ref().and_then(|e| e.java.clone()) {
             ctx.store
                 .fact(self.id(), kind::JAVA_RUNTIME)
                 .attr("version", java.as_str())
-                .confidence(0.8)
+                .attr("source", "runtime-log")
+                .source(intermed_doctor_core::facts::SourceRef::file(
+                    runtime_evidence
+                        .as_ref()
+                        .map(|e| e.source.clone())
+                        .unwrap_or_default(),
+                ))
+                .confidence(0.98)
                 .emit();
             emitted += 1;
         }
+
+        let mut analysis = ctx
+            .store
+            .fact(self.id(), kind::ANALYSIS_ENVIRONMENT)
+            .subject("intermed-process")
+            .attr("os", std::env::consts::OS)
+            .confidence(1.0);
+        if let Some(java) = detect_java_version() {
+            analysis = analysis.attr("java", java);
+        }
+        analysis.emit();
+        emitted += 1;
 
         CollectorOutcome::active(emitted, "environment detected")
     }
@@ -123,6 +163,18 @@ fn detect_loader_with_source(
 ) -> (LoaderInfo, &'static str) {
     if let Some(from_pack) = loader_from_pack_metadata(surface, root) {
         return from_pack;
+    }
+    if let Some(runtime) = detect_runtime_environment(surface, root)
+        && let Some(loader) = runtime.loader
+    {
+        return (
+            LoaderInfo {
+                loader: Some(loader),
+                component: runtime.loader_component,
+                version: runtime.loader_version,
+            },
+            "runtime-log",
+        );
     }
 
     let has = |base: &Path, rel: &str| base.join(rel).exists();
@@ -327,10 +379,9 @@ fn loader_from_manifest_locator(path: &Path) -> Option<LoaderInfo> {
         &mut archive,
         "modrinth.index.json",
         intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
-    ) {
-        if let Some(info) = loader_from_modrinth_text(&text) {
-            return Some(info);
-        }
+    ) && let Some(info) = loader_from_modrinth_text(&text)
+    {
+        return Some(info);
     }
     let text = intermed_doctor_core::bounded_zip::read_zip_text_opt(
         &mut archive,
@@ -338,6 +389,37 @@ fn loader_from_manifest_locator(path: &Path) -> Option<LoaderInfo> {
         intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
     )?;
     loader_from_curseforge_text(&text)
+}
+
+fn mc_from_manifest_locator(path: &Path) -> Option<String> {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    if matches!(file_name, Some("modrinth.index.json" | "manifest.json")) {
+        let text = std::fs::read_to_string(path).ok()?;
+        return mc_from_manifest_text(&text);
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    for entry in ["modrinth.index.json", "manifest.json"] {
+        if let Some(text) = intermed_doctor_core::bounded_zip::read_zip_text_opt(
+            &mut archive,
+            entry,
+            intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+        ) && let Some(version) = mc_from_manifest_text(&text)
+        {
+            return Some(version);
+        }
+    }
+    None
+}
+
+fn mc_from_manifest_text(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value
+        .pointer("/dependencies/minecraft")
+        .or_else(|| value.pointer("/minecraft/version"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 fn loader_from_component_uid(uid: &str, version: &str) -> Option<LoaderInfo> {
@@ -552,6 +634,137 @@ fn detect_java_version() -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+#[derive(Debug, Clone)]
+struct RuntimeEnvironmentEvidence {
+    source: String,
+    java: Option<String>,
+    minecraft: Option<String>,
+    loader: Option<Loader>,
+    loader_component: Option<String>,
+    loader_version: Option<String>,
+}
+
+/// Read a bounded set of target-owned runtime logs. Host process state is never
+/// consulted here: every returned value is forensic evidence from the target.
+fn detect_runtime_environment(
+    surface: &Path,
+    game_root: &Path,
+) -> Option<RuntimeEnvironmentEvidence> {
+    for path in runtime_log_candidates(surface, game_root) {
+        let Ok(file) = File::open(&path) else {
+            continue;
+        };
+        let mut text = String::new();
+        if file
+            .take(16 * 1024 * 1024)
+            .read_to_string(&mut text)
+            .is_err()
+        {
+            continue;
+        }
+        let mut evidence = RuntimeEnvironmentEvidence {
+            source: path.display().to_string(),
+            java: None,
+            minecraft: None,
+            loader: None,
+            loader_component: None,
+            loader_version: None,
+        };
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if evidence.java.is_none() {
+                evidence.java = value_after_marker(line, &lower, "java version:")
+                    .or_else(|| value_after_quoted_marker(line, &lower, "java version"));
+            }
+            if evidence.minecraft.is_none() {
+                evidence.minecraft = value_after_marker(line, &lower, "minecraft version:")
+                    .or_else(|| {
+                        value_between_markers(line, &lower, "loading minecraft ", " with ")
+                    });
+            }
+            if evidence.loader.is_none() {
+                for (needle, loader, component) in [
+                    ("neoforge", Loader::NeoForge, "neoforge"),
+                    ("fabric loader", Loader::Fabric, "fabric-loader"),
+                    ("quilt loader", Loader::Quilt, "quilt-loader"),
+                    ("minecraft forge", Loader::Forge, "forge"),
+                ] {
+                    if let Some(at) = lower.find(needle) {
+                        evidence.loader = Some(loader);
+                        evidence.loader_component = Some(component.to_string());
+                        evidence.loader_version = first_version_token(&line[at + needle.len()..]);
+                        break;
+                    }
+                }
+            }
+        }
+        if evidence.java.is_some() || evidence.minecraft.is_some() || evidence.loader.is_some() {
+            return Some(evidence);
+        }
+    }
+    None
+}
+
+fn runtime_log_candidates(surface: &Path, game_root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for root in [surface, game_root] {
+        for relative in [
+            "logs/latest.log",
+            "logs/debug.log",
+            "latest.log",
+            "debug.log",
+        ] {
+            let path = root.join(relative);
+            if path.is_file() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        let crash_dir = root.join("crash-reports");
+        if let Ok(entries) = std::fs::read_dir(crash_dir) {
+            let mut crashes: Vec<_> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file())
+                .collect();
+            crashes.sort_by_key(|path| {
+                std::cmp::Reverse(path.metadata().and_then(|m| m.modified()).ok())
+            });
+            for path in crashes.into_iter().take(4) {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    paths
+}
+
+fn value_after_marker(original: &str, lower: &str, marker: &str) -> Option<String> {
+    let at = lower.find(marker)? + marker.len();
+    first_version_token(&original[at..])
+}
+
+fn value_after_quoted_marker(original: &str, lower: &str, marker: &str) -> Option<String> {
+    let at = lower.find(marker)? + marker.len();
+    let tail = &original[at..];
+    let start = tail.find('"')? + 1;
+    let end = tail[start..].find('"')?;
+    Some(tail[start..start + end].to_string())
+}
+
+fn value_between_markers(original: &str, lower: &str, start: &str, end: &str) -> Option<String> {
+    let from = lower.find(start)? + start.len();
+    let to = lower[from..].find(end)? + from;
+    Some(original[from..to].trim().to_string())
+}
+
+fn first_version_token(text: &str) -> Option<String> {
+    text.split(|ch: char| ch.is_whitespace() || matches!(ch, ',' | ';' | '(' | ')' | '[' | ']'))
+        .map(|token| token.trim_matches(|ch: char| matches!(ch, ':' | '=' | '"' | '\'')))
+        .find(|token| !token.is_empty() && token.chars().any(|ch| ch.is_ascii_digit()))
+        .map(str::to_string)
+}
+
 fn dir_has_prefixed_jar(root: &Path, prefix: &str) -> bool {
     std::fs::read_dir(root)
         .map(|rd| {
@@ -654,6 +867,21 @@ mod tests {
     }
 
     #[test]
+    fn explicit_pack_manifest_supplies_exact_minecraft_version() {
+        let root = temp("mr-explicit-minecraft");
+        let manifest = root.join("modrinth.index.json");
+        touch(
+            &manifest,
+            br#"{"dependencies":{"minecraft":"1.21.1","neoforge":"21.1.248"}}"#,
+        );
+        assert_eq!(
+            mc_from_manifest_locator(&manifest).as_deref(),
+            Some("1.21.1")
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn pack_manifest_outranks_launcher_manifest() {
         let root = temp("pack-priority");
         touch(
@@ -667,6 +895,62 @@ mod tests {
         let (info, source) = loader_from_pack_metadata(&root, &root).expect("loader");
         assert_eq!(info.loader, Some(Loader::Fabric));
         assert_eq!(source, "pack-manifest");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn runtime_log_supplies_target_java_loader_and_minecraft() {
+        let root = temp("runtime-environment");
+        touch(
+            &root.join("logs/latest.log"),
+            b"Java Version: 21.0.7\nLoading Minecraft 1.21.1 with NeoForge 21.1.248\n",
+        );
+
+        let evidence = detect_runtime_environment(&root, &root).expect("runtime evidence");
+        assert_eq!(evidence.java.as_deref(), Some("21.0.7"));
+        assert_eq!(evidence.minecraft.as_deref(), Some("1.21.1"));
+        assert_eq!(evidence.loader, Some(Loader::NeoForge));
+        assert_eq!(evidence.loader_version.as_deref(), Some("21.1.248"));
+
+        let target = Target {
+            path: root.clone(),
+            kind: TargetKind::Instance,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let (loader, source) = detect_loader_with_source(&root, &root, &target);
+        assert_eq!(loader.loader, Some(Loader::NeoForge));
+        assert_eq!(source, "runtime-log");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn analyzer_java_is_never_emitted_as_target_java() {
+        let root = temp("host-java-separation");
+        let target = Target {
+            path: root.clone(),
+            kind: TargetKind::Instance,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let mut store = intermed_doctor_core::facts::FactStore::new();
+        let settings = intermed_doctor_core::DiagnosisSettings::default();
+        let mut ctx = intermed_doctor_core::CollectCtx {
+            target: &target,
+            store: &mut store,
+            jar_cache: None,
+            settings: &settings,
+        };
+        EnvironmentCollector.collect(&mut ctx);
+
+        assert_eq!(store.by_kind(kind::JAVA_RUNTIME).count(), 0);
+        assert_eq!(store.by_kind(kind::ANALYSIS_ENVIRONMENT).count(), 1);
         fs::remove_dir_all(root).ok();
     }
 

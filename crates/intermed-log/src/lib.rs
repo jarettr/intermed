@@ -9,17 +9,21 @@
 //! Collector and rule live together because the failure-signature vocabulary is
 //! one body of knowledge.
 
-use std::path::PathBuf;
+use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::{Path, PathBuf};
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, Severity,
+};
 use intermed_doctor_core::facts::{FactId, SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, Layer, RuleCtx, Target, TargetKind,
 };
 
-use rayon::prelude::*;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 
+pub mod runtime;
 pub mod stacktrace;
 
 /// Line count above which a single log is scanned in parallel. Regex matching is
@@ -47,6 +51,10 @@ pub mod signal {
     pub const LITHIUM_CONFLICT: &str = "LithiumConflict";
     pub const CREATE_ERROR: &str = "CreateError";
     pub const NEOFORGE_LOAD_ERROR: &str = "NeoForgeLoadError";
+    pub const RESOURCE_MODEL_FAILURE: &str = "ResourceModelFailure";
+    pub const RESOURCE_BLOCKSTATE_FAILURE: &str = "ResourceBlockstateFailure";
+    pub const RUNTIME_EXCEPTION: &str = "RuntimeException";
+    pub const NATIVE_WINDOW_ERROR: &str = "NativeWindowError";
 }
 
 struct Pattern {
@@ -87,7 +95,7 @@ fn patterns() -> &'static [Pattern] {
         Pattern {
             signal: signal::MOD_LOADING_FAILURE,
             severity: Severity::Error,
-            regex: r"(?i)(Failed to load mod|ModResolutionException|Could not execute entrypoint)",
+            regex: r"(?i)(Failed to load mod\b|ModResolutionException|Could not execute entrypoint)",
             title: "A mod failed to load",
         },
         Pattern {
@@ -147,7 +155,7 @@ fn patterns() -> &'static [Pattern] {
         Pattern {
             signal: signal::CREATE_ERROR,
             severity: Severity::Error,
-            regex: r"(?i)(com\.simibubi\.create|Create mod|contraption.*failed|Registrate|Flywheel.*(error|exception)|Unable to launch Create)",
+            regex: r"(?i)(Unable to launch Create|Flywheel.*(error|exception)|(?:Create|Registrate|contraption).*(failed|exception))",
             title: "Create / Flywheel initialization failure",
         },
         Pattern {
@@ -155,6 +163,24 @@ fn patterns() -> &'static [Pattern] {
             severity: Severity::Error,
             regex: r"(?i)(ModLoadingException|Loading errors encountered|Failed to create mod instance)",
             title: "NeoForge / Forge mod loading exception",
+        },
+        Pattern {
+            signal: signal::RESOURCE_MODEL_FAILURE,
+            severity: Severity::Warn,
+            regex: r"(?i)(Failed to load model\b|Unable to bake model\b)",
+            title: "Resource model failed to load",
+        },
+        Pattern {
+            signal: signal::RESOURCE_BLOCKSTATE_FAILURE,
+            severity: Severity::Warn,
+            regex: r"(?i)(Failed to load blockstate\b|Exception loading blockstate\b)",
+            title: "Resource blockstate failed to load",
+        },
+        Pattern {
+            signal: signal::NATIVE_WINDOW_ERROR,
+            severity: Severity::Error,
+            regex: r"(?i)(GLFW error|GL error off-thread|OpenGL error)",
+            title: "Native window / graphics API error",
         },
     ]
 }
@@ -165,6 +191,9 @@ fn patterns() -> &'static [Pattern] {
 /// so log findings stay consistent regardless of rule engine.
 #[must_use]
 pub fn signal_severity(sig: &str) -> Severity {
+    if sig == signal::RUNTIME_EXCEPTION {
+        return Severity::Error;
+    }
     patterns()
         .iter()
         .find(|p| p.signal == sig)
@@ -175,6 +204,9 @@ pub fn signal_severity(sig: &str) -> Severity {
 /// Human title for a [`signal`] kind.
 #[must_use]
 pub fn signal_title(sig: &str) -> &'static str {
+    if sig == signal::RUNTIME_EXCEPTION {
+        return "Runtime exception chain";
+    }
     patterns()
         .iter()
         .find(|p| p.signal == sig)
@@ -191,6 +223,9 @@ pub fn signal_fix(sig: &str) -> Option<FixCandidate> {
 // ── Collector ──────────────────────────────────────────────────────────────
 
 pub struct LogCollector;
+
+const MAX_LOG_FILES: usize = 32;
+const MAX_LOG_BYTES: u64 = 64 * 1024 * 1024;
 
 impl Collector for LogCollector {
     fn id(&self) -> &'static str {
@@ -214,30 +249,337 @@ impl Collector for LogCollector {
 
         let mut emitted = 0usize;
         let mut scanned = 0usize;
+        let mut incomplete = false;
         for file in &files {
-            let Ok(text) = std::fs::read_to_string(file) else {
+            let Ok((text, truncated, sha256)) = read_log_bounded(file) else {
                 continue;
             };
-            scanned += 1;
-            let locator = file.display().to_string();
-            // The expensive part (regex matching every line) is fanned out; the
-            // emit stays sequential and in line order, so the fact set is byte-for
-            // -byte identical to a single-threaded scan.
-            for hit in scan_lines(&text, &compiled, ctx.settings.log.parallel_line_threshold) {
+            ctx.store
+                .fact(self.id(), kind::CHECKSUM)
+                .subject(file.display().to_string())
+                .attr("algorithm", "sha256")
+                .attr("hex", sha256)
+                .attr("input_kind", "runtime-log")
+                .source(SourceRef::file(file.display().to_string()))
+                .emit();
+            emitted += 1;
+            if truncated {
+                incomplete = true;
                 ctx.store
-                    .fact(self.id(), kind::LOG_SIGNAL)
-                    .subject(hit.signal)
-                    .attr("line", (hit.lineno as i64) + 1)
-                    .attr("excerpt", hit.excerpt)
-                    .source(SourceRef::at_line(locator.clone(), (hit.lineno as u32) + 1))
-                    .confidence(0.85)
+                    .fact(self.id(), kind::SCAN_TRUNCATED)
+                    .subject(file.display().to_string())
+                    .attr("layer", "log")
+                    .attr(
+                        "reason",
+                        format!("log exceeds {MAX_LOG_BYTES} bytes; analyzed bounded tail"),
+                    )
+                    .attr("relevant_entry", true)
+                    .source(SourceRef::file(file.display().to_string()))
                     .emit();
                 emitted += 1;
             }
-            emitted += emit_mod_mentions(ctx, self.id(), &text, &locator);
+            scanned += 1;
+            let locator = file.display().to_string();
+            if ctx.target.kind.is_log() {
+                emitted += emit_forensic_environment(ctx, self.id(), &text, &locator);
+            }
+            // Normalize flattened and multiline encodings once for every Layer-D
+            // path, including the legacy crash/mod-reference facts. Otherwise
+            // the RuntimeEvent graph and correlation rules could disagree about
+            // the same physical log.
+            let normalized_lines = runtime::expand_flattened_lines(&text);
+            let source_coordinates = normalized_lines
+                .iter()
+                .map(|line| (line.physical_line, line.normalized_fragment))
+                .collect::<Vec<_>>();
+            let normalized = normalized_lines
+                .into_iter()
+                .map(|line| line.text.trim().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            emitted += emit_runtime_events(ctx, self.id(), &text, &locator, &compiled);
+            emitted +=
+                emit_mod_mentions(ctx, self.id(), &normalized, &source_coordinates, &locator);
         }
-        CollectorOutcome::active(emitted, format!("{scanned} log file(s) scanned"))
+        let summary = format!("{scanned} log file(s) scanned");
+        if incomplete {
+            CollectorOutcome::incomplete(emitted, summary)
+        } else {
+            CollectorOutcome::active(emitted, summary)
+        }
     }
+}
+
+fn emit_forensic_environment(
+    ctx: &mut CollectCtx<'_>,
+    extractor: &'static str,
+    text: &str,
+    locator: &str,
+) -> usize {
+    let capture = |pattern: &str, group: usize| {
+        Regex::new(pattern)
+            .ok()?
+            .captures(text)?
+            .get(group)
+            .map(|value| value.as_str().to_string())
+    };
+    let java = capture(
+        r#"(?im)(?:Java Version|Java version|Java):\s*[\"']?([0-9][0-9A-Za-z._+-]*)"#,
+        1,
+    )
+    .or_else(|| capture(r#"(?im)^java version\s+[\"']([^\"']+)"#, 1));
+    let minecraft = capture(
+        r"(?im)Loading Minecraft\s+([0-9][0-9A-Za-z._+-]*)\s+with\s+(?:NeoForge|Forge|Fabric Loader|Quilt Loader)",
+        1,
+    )
+    .or_else(|| capture(r"(?im)Minecraft Version:\s*([^\s]+)", 1));
+    let loader_candidates = [
+        (
+            "neoforge",
+            r"(?im)(?:with\s+NeoForge|NeoForge(?: Version)?[: ]+)\s*([0-9][0-9A-Za-z._+-]*)?",
+        ),
+        (
+            "forge",
+            r"(?im)(?:with\s+Forge|Forge(?: Version)?[: ]+)\s*([0-9][0-9A-Za-z._+-]*)?",
+        ),
+        (
+            "fabric",
+            r"(?im)(?:with\s+Fabric Loader|Fabric Loader(?: Version)?[: ]+)\s*([0-9][0-9A-Za-z._+-]*)?",
+        ),
+        (
+            "quilt",
+            r"(?im)(?:with\s+Quilt Loader|Quilt Loader(?: Version)?[: ]+)\s*([0-9][0-9A-Za-z._+-]*)?",
+        ),
+    ];
+    let loader = loader_candidates.iter().find_map(|(family, pattern)| {
+        Regex::new(pattern).ok()?.captures(text).map(|captures| {
+            (
+                *family,
+                captures.get(1).map(|value| value.as_str().to_string()),
+            )
+        })
+    });
+
+    let mut emitted = 0;
+    if java.is_some() || minecraft.is_some() || loader.is_some() {
+        let mut environment = ctx
+            .store
+            .fact(extractor, kind::ENVIRONMENT)
+            .subject("runtime-log")
+            .attr("evidence_source", "runtime-log")
+            .source(SourceRef::file(locator.to_string()))
+            .confidence(0.98);
+        if let Some(version) = minecraft {
+            environment = environment
+                .attr("mc_version", version)
+                .attr("mc_version_source", "runtime-log");
+        }
+        if let Some((family, version)) = loader {
+            environment = environment
+                .attr("loader", family)
+                .attr("loader_source", "runtime-log");
+            if let Some(version) = version {
+                environment = environment.attr("loader_version", version);
+            }
+        }
+        environment.emit();
+        emitted += 1;
+    }
+    if let Some(java) = java {
+        ctx.store
+            .fact(extractor, kind::JAVA_RUNTIME)
+            .subject("runtime-log")
+            .attr("version", java)
+            .attr("source", "runtime-log")
+            .source(SourceRef::file(locator.to_string()))
+            .confidence(0.98)
+            .emit();
+        emitted += 1;
+    }
+    emitted
+}
+
+fn emit_runtime_events(
+    ctx: &mut CollectCtx<'_>,
+    extractor: &'static str,
+    text: &str,
+    locator: &str,
+    compiled: &[(Regex, &Pattern)],
+) -> usize {
+    let owners = ctx
+        .store
+        .by_kind(kind::PACKAGE_OWNER)
+        .filter_map(|fact| {
+            fact.attr("package")
+                .map(|package| (package.to_string(), fact.subject.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut emitted = 0usize;
+    for event in runtime::normalize_events(text, locator) {
+        let level = event.level.as_deref().unwrap_or("UNKNOWN");
+        let interesting =
+            matches!(level, "WARN" | "ERROR" | "FATAL") || !event.exception_chain.is_empty();
+        if !interesting {
+            continue;
+        }
+        let line = event.source_line;
+        let combined = std::iter::once(event.message.as_str())
+            .chain(event.continuation_lines.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let deepest_index = event
+            .exception_chain
+            .iter()
+            .rposition(|node| !node.suppressed);
+        let deepest = deepest_index.and_then(|index| event.exception_chain.get(index));
+        let crash_relevance = if deepest.is_some() && matches!(level, "ERROR" | "FATAL" | "UNKNOWN")
+        {
+            "causal"
+        } else if matches!(level, "ERROR" | "FATAL") {
+            "contributing"
+        } else {
+            "background"
+        };
+        let runtime_fact = ctx
+            .store
+            .fact(extractor, kind::RUNTIME_EVENT)
+            .subject(event.occurrence_id.clone())
+            .attr("occurrence_id", event.occurrence_id.clone())
+            .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+            .attr("timestamp", event.timestamp.clone().unwrap_or_default())
+            .attr("thread", event.thread.clone().unwrap_or_default())
+            .attr("level", level)
+            .attr("logger", event.logger.clone().unwrap_or_default())
+            .attr("message", truncate(&event.message, 1000))
+            .attr("continuation_count", event.continuation_lines.len() as i64)
+            .attr("normalized_fragment", i64::from(event.source_fragment))
+            .attr("crash_relevance", crash_relevance)
+            .attr(
+                "relevance_score",
+                if crash_relevance == "causal" {
+                    100i64
+                } else if crash_relevance == "contributing" {
+                    65
+                } else {
+                    15
+                },
+            )
+            .source(SourceRef::at_line(locator.to_string(), line))
+            .confidence(1.0)
+            .emit();
+        emitted += 1;
+        if deepest.is_some() && matches!(level, "ERROR" | "FATAL" | "UNKNOWN") {
+            ctx.store
+                .fact(extractor, kind::CRASH_ANCHOR)
+                .subject(event.occurrence_id.clone())
+                .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                .attr("normalized_fragment", i64::from(event.source_fragment))
+                .attr("anchor_type", "exception-chain")
+                .attr(
+                    "root_cause_exception",
+                    deepest
+                        .map(|node| node.throwable_type.as_str())
+                        .unwrap_or(""),
+                )
+                .attr("runtime_event_fact", runtime_fact.0 as i64)
+                .source(SourceRef::at_line(locator.to_string(), line))
+                .confidence(0.98)
+                .emit();
+            emitted += 1;
+        }
+
+        for (node_index, throwable) in event.exception_chain.iter().enumerate() {
+            ctx.store
+                .fact(extractor, kind::THROWABLE_NODE)
+                .subject(event.occurrence_id.clone())
+                .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                .attr("normalized_fragment", i64::from(event.source_fragment))
+                .attr("index", node_index as i64)
+                .attr("type", throwable.throwable_type.clone())
+                .attr("message", throwable.message.clone().unwrap_or_default())
+                .attr(
+                    "cause",
+                    throwable.cause.map(|index| index as i64).unwrap_or(-1),
+                )
+                .attr("deepest", Some(node_index) == deepest_index)
+                .attr("suppressed", throwable.suppressed)
+                .source(SourceRef::at_line(locator.to_string(), line))
+                .confidence(1.0)
+                .emit();
+            emitted += 1;
+            for (frame_index, frame) in throwable.frames.iter().enumerate() {
+                let owner = owners
+                    .iter()
+                    .filter(|(package, _)| class_under_package(&frame.class, package))
+                    .max_by_key(|(package, _)| package.len())
+                    .map(|(_, owner)| owner.as_str())
+                    .unwrap_or("");
+                ctx.store
+                    .fact(extractor, kind::STACK_FRAME)
+                    .subject(event.occurrence_id.clone())
+                    .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                    .attr("normalized_fragment", i64::from(event.source_fragment))
+                    .attr("throwable_index", node_index as i64)
+                    .attr("frame_index", frame_index as i64)
+                    .attr("class", frame.class.clone())
+                    .attr("method", frame.method.clone())
+                    .attr("source", frame.source.clone().unwrap_or_default())
+                    .attr("source_line", frame.line.map(i64::from).unwrap_or(-1))
+                    .attr("classification", frame.classification.as_str())
+                    .attr("mod_id", owner)
+                    .source(SourceRef::at_line(locator.to_string(), line))
+                    .confidence(if owner.is_empty() { 0.8 } else { 0.98 })
+                    .emit();
+                emitted += 1;
+            }
+        }
+
+        let matches = compiled
+            .iter()
+            .filter(|(regex, _)| regex.is_match(&combined))
+            .map(|(_, pattern)| *pattern)
+            .collect::<Vec<_>>();
+        let selected = matches
+            .iter()
+            .max_by_key(|pattern| signal_specificity(pattern.signal))
+            .copied();
+        let (sig, confidence) = selected
+            .map(|pattern| (pattern.signal, 0.9))
+            .or_else(|| deepest.map(|_| (signal::RUNTIME_EXCEPTION, 0.98)))
+            .unwrap_or(("", 0.0));
+        if !sig.is_empty() {
+            let root_type = deepest
+                .map(|node| node.throwable_type.as_str())
+                .unwrap_or("");
+            ctx.store
+                .fact(extractor, kind::LOG_SIGNAL)
+                .subject(sig)
+                .attr("line", line as i64)
+                .attr("event_id", event.occurrence_id)
+                .attr("semantic_fingerprint", event.semantic_fingerprint)
+                .attr("normalized_fragment", i64::from(event.source_fragment))
+                .attr("event_type", sig)
+                .attr("level", level)
+                .attr("root_cause_exception", root_type)
+                .attr("crash_relevance", crash_relevance)
+                .attr(
+                    "relevance_score",
+                    if crash_relevance == "causal" {
+                        100i64
+                    } else if crash_relevance == "contributing" {
+                        65
+                    } else {
+                        15
+                    },
+                )
+                .attr("excerpt", truncate(&combined.replace('\n', " | "), 500))
+                .source(SourceRef::at_line(locator.to_string(), line))
+                .confidence(confidence)
+                .emit();
+            emitted += 1;
+        }
+    }
+    emitted
 }
 
 /// Parse stack traces in one log file and emit a `log_mentions_mod` fact for each
@@ -247,6 +589,7 @@ fn emit_mod_mentions(
     ctx: &mut CollectCtx<'_>,
     extractor: &'static str,
     text: &str,
+    source_coordinates: &[(u32, u32)],
     locator: &str,
 ) -> usize {
     use std::collections::BTreeMap;
@@ -273,6 +616,10 @@ fn emit_mod_mentions(
         .collect();
     let mut emitted = 0;
     for trace in stacktrace::parse_stacktraces(text) {
+        let (physical_line, normalized_fragment) = source_coordinates
+            .get(trace.line)
+            .copied()
+            .unwrap_or_else(|| (u32::try_from(trace.line + 1).unwrap_or(u32::MAX), 0));
         let root = trace.caused_by.last().unwrap_or(&trace.exception);
         let root_mod = trace
             .mod_refs
@@ -290,15 +637,13 @@ fn emit_mod_mentions(
             .attr("root_cause_mod", root_mod)
             .attr("phase", infer_crash_phase(&trace))
             .attr("severity", crash_severity(&root.class))
-            .attr("line", (trace.line as i64) + 1);
+            .attr("line", i64::from(physical_line))
+            .attr("normalized_fragment", i64::from(normalized_fragment));
         if !frame_classes.is_empty() {
             crash = crash.attr("frame_classes", frame_classes.join(","));
         }
         crash
-            .source(SourceRef::at_line(
-                locator.to_string(),
-                (trace.line as u32) + 1,
-            ))
+            .source(SourceRef::at_line(locator.to_string(), physical_line))
             .confidence(if root_mod == "unknown" { 0.75 } else { 0.85 })
             .emit();
         emitted += 1;
@@ -313,11 +658,9 @@ fn emit_mod_mentions(
                 .attr("exception", trace.exception.class.clone())
                 .attr("root_cause_exception", root.class.clone())
                 .attr("blame_score", blame_score)
-                .attr("line", (trace.line as i64) + 1)
-                .source(SourceRef::at_line(
-                    locator.to_string(),
-                    (trace.line as u32) + 1,
-                ))
+                .attr("line", i64::from(physical_line))
+                .attr("normalized_fragment", i64::from(normalized_fragment))
+                .source(SourceRef::at_line(locator.to_string(), physical_line))
                 .confidence(blame_score as f32);
             if let Some((version, environment, capabilities)) = metadata.get(&mref.mod_id) {
                 mention = mention
@@ -340,10 +683,8 @@ fn emit_mod_mentions(
                 .attr("severity", crash_severity(&root.class))
                 .attr("blame_score", blame_score)
                 .attr("via", mref.via)
-                .source(SourceRef::at_line(
-                    locator.to_string(),
-                    (trace.line as u32) + 1,
-                ))
+                .attr("normalized_fragment", i64::from(normalized_fragment))
+                .source(SourceRef::at_line(locator.to_string(), physical_line))
                 .confidence(blame_score as f32);
             if let Some((version, environment, capabilities)) = metadata.get(&mref.mod_id) {
                 error = error
@@ -422,15 +763,19 @@ fn frame_culprit_class(frame: &str) -> Option<&str> {
 fn culprit_frame_classes(trace: &stacktrace::Stacktrace) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     // Root cause's own frames are the most relevant; then the outer exceptions.
-    let exceptions = std::iter::once(&trace.exception).chain(trace.caused_by.iter());
+    let exceptions = trace
+        .caused_by
+        .iter()
+        .rev()
+        .chain(std::iter::once(&trace.exception));
     for ex in exceptions {
         for frame in &ex.frames {
-            if let Some(class) = frame_culprit_class(frame) {
-                if !out.iter().any(|c| c == class) {
-                    out.push(class.to_string());
-                    if out.len() >= 12 {
-                        return out;
-                    }
+            if let Some(class) = frame_culprit_class(frame)
+                && !out.iter().any(|c| c == class)
+            {
+                out.push(class.to_string());
+                if out.len() >= 12 {
+                    return out;
                 }
             }
         }
@@ -439,29 +784,42 @@ fn culprit_frame_classes(trace: &stacktrace::Stacktrace) -> Vec<String> {
 }
 
 /// One matched log line: the first pattern it hit and a truncated excerpt.
+#[cfg(test)]
 struct LineHit {
     lineno: usize,
     signal: &'static str,
-    excerpt: String,
+}
+
+fn signal_specificity(signal: &str) -> u8 {
+    match signal {
+        signal::OUT_OF_MEMORY | signal::JVM_CRASH => 100,
+        signal::MIXIN_APPLY_ERROR | signal::NATIVE_WINDOW_ERROR => 90,
+        signal::RESOURCE_MODEL_FAILURE | signal::RESOURCE_BLOCKSTATE_FAILURE => 80,
+        signal::NEOFORGE_LOAD_ERROR | signal::MOD_LOADING_FAILURE => 70,
+        signal::CLASS_NOT_FOUND | signal::NO_CLASS_DEF_FOUND => 60,
+        _ => 50,
+    }
 }
 
 /// Match every line against the compiled patterns (first match wins per line),
 /// returning hits in line order. Parallelised for large logs; the result is
 /// order-stable and independent of the worker count.
+#[cfg(test)]
 fn scan_lines(
     text: &str,
     compiled: &[(Regex, &'static Pattern)],
     parallel_line_threshold: usize,
 ) -> Vec<LineHit> {
+    use rayon::prelude::*;
     let lines: Vec<&str> = text.lines().collect();
     let match_line = |(lineno, line): (usize, &&str)| -> Option<LineHit> {
         compiled
             .iter()
-            .find(|(re, _)| re.is_match(line))
+            .filter(|(re, _)| re.is_match(line))
+            .max_by_key(|(_, pattern)| signal_specificity(pattern.signal))
             .map(|(_, p)| LineHit {
                 lineno,
                 signal: p.signal,
-                excerpt: truncate(line, 200),
             })
     };
     if lines.len() >= parallel_line_threshold {
@@ -479,8 +837,7 @@ fn scan_lines(
 
 fn target_has_logs(target: &Target) -> bool {
     matches!(target.kind, TargetKind::Server | TargetKind::Instance)
-        // Honor launcher layouts: logs may live under `<instance>/.minecraft`.
-        && target.candidate_roots().iter().any(|r| r.join("logs").is_dir())
+        && !log_files(target).is_empty()
 }
 
 fn log_files(target: &Target) -> Vec<PathBuf> {
@@ -489,29 +846,125 @@ fn log_files(target: &Target) -> Vec<PathBuf> {
     }
     let mut out = Vec::new();
     for root in target.candidate_roots() {
-        let logs = root.join("logs");
-        for name in ["latest.log", "debug.log"] {
-            let p = logs.join(name);
-            if p.is_file() {
-                out.push(p);
-            }
+        for directory in [root.join("logs"), root.join("crash-reports")] {
+            collect_log_candidates(&directory, 0, 3, &mut out);
         }
-        // Most recent crash report, if any.
-        let crashes = root.join("crash-reports");
-        if let Ok(rd) = std::fs::read_dir(&crashes) {
-            let mut reports: Vec<PathBuf> = rd
-                .flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("txt"))
-                .collect();
-            reports.sort();
-            if let Some(last) = reports.pop() {
-                out.push(last);
+        // Some launchers and reconstructed incidents keep a useful launcher log
+        // directly under the instance. Inspect direct children only.
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if path.is_file() && is_direct_log_candidate(&path) {
+                    out.push(path);
+                }
             }
         }
     }
+    out.sort();
     out.dedup();
+    out.sort_by(|left, right| {
+        log_priority(right)
+            .cmp(&log_priority(left))
+            .then_with(|| modified_time(right).cmp(&modified_time(left)))
+            .then_with(|| left.cmp(right))
+    });
+    out.truncate(MAX_LOG_FILES);
     out
+}
+
+fn collect_log_candidates(
+    directory: &Path,
+    depth: usize,
+    max_depth: usize,
+    out: &mut Vec<PathBuf>,
+) {
+    if depth > max_depth || out.len() >= MAX_LOG_FILES * 4 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_file() && is_log_candidate(&path) {
+            out.push(path);
+        } else if path.is_dir() {
+            collect_log_candidates(&path, depth + 1, max_depth, out);
+        }
+    }
+}
+
+fn is_log_candidate(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("log" | "txt")
+    )
+}
+
+/// Direct instance files need stronger evidence than an extension: launchers put
+/// unrelated configuration text (notably `options.txt`) beside the game.
+fn is_direct_log_candidate(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".log")
+        || ((name.starts_with("crash-")
+            || name.starts_with("crash_")
+            || name.contains("launcher-log"))
+            && name.ends_with(".txt"))
+}
+
+fn log_priority(path: &Path) -> u8 {
+    match path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+    {
+        "latest.log" => 4,
+        "debug.log" => 3,
+        name if name.starts_with("crash-") || name.starts_with("crash_") => 2,
+        _ => 1,
+    }
+}
+
+fn modified_time(path: &Path) -> std::time::SystemTime {
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+fn read_log_bounded(path: &Path) -> std::io::Result<(String, bool, String)> {
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let truncated = length > MAX_LOG_BYTES;
+    let mut digest = Sha256::new();
+    let mut bytes = Vec::with_capacity(length.min(MAX_LOG_BYTES) as usize);
+    if truncated {
+        let mut hash_buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut hash_buffer)?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&hash_buffer[..read]);
+        }
+        file.seek(SeekFrom::Start(length - MAX_LOG_BYTES))?;
+        file.take(MAX_LOG_BYTES).read_to_end(&mut bytes)?;
+    } else {
+        file.read_to_end(&mut bytes)?;
+        digest.update(&bytes);
+    }
+    if truncated && let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+        bytes.drain(..=newline);
+    }
+    Ok((
+        String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+        format!("{:x}", digest.finalize()),
+    ))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -533,7 +986,7 @@ impl intermed_doctor_core::Rule for LogSignalRule {
         "log-signal"
     }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        let mut out = Vec::new();
+        let mut out = incident_findings(ctx);
         for fact in ctx.store.by_kind(kind::LOG_SIGNAL) {
             let sig = fact.subject.as_str();
             let line = fact
@@ -541,14 +994,44 @@ impl intermed_doctor_core::Rule for LogSignalRule {
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".into());
             let excerpt = fact.attr("excerpt").unwrap_or("");
-            let mut b = Finding::builder(self.id(), format!("log:{sig}:{line}"))
-                .severity(signal_severity(sig))
+            let relevance = fact.attr("crash_relevance").unwrap_or("unknown");
+            let severity = if relevance == "background" {
+                signal_severity(sig).min(Severity::Note)
+            } else {
+                signal_severity(sig)
+            };
+            let occurrence = fact.attr("event_id").unwrap_or(&line);
+            let represented_by_incident = ctx
+                .store
+                .by_kind(kind::CRASH_ANCHOR)
+                .any(|anchor| anchor.subject == occurrence);
+            let mut b = Finding::builder(self.id(), format!("log:{sig}:{occurrence}"))
+                .severity(if represented_by_incident {
+                    Severity::Note
+                } else {
+                    severity
+                })
+                .confidence(if relevance == "causal" {
+                    0.98
+                } else if relevance == "contributing" {
+                    0.8
+                } else {
+                    0.45
+                })
                 .category(Category::Log)
                 .title(signal_title(sig))
-                .explanation(format!("Detected at line {line}: {excerpt}"))
+                .explanation(format!(
+                    "Detected at line {line} ({relevance} to the crash): {excerpt}"
+                ))
                 .evidence(EvidenceEdge::subject(fact.id))
                 .tag("log")
-                .tag(sig);
+                .tag(sig)
+                .tag(format!("crash-relevance:{relevance}"));
+            if represented_by_incident {
+                b = b
+                    .visibility(FindingVisibility::ExplainOnly)
+                    .tag("incident-detail");
+            }
             if let Some(fix) = fix_for(sig) {
                 b = b.fix(fix);
             }
@@ -558,6 +1041,119 @@ impl intermed_doctor_core::Rule for LogSignalRule {
         out.extend(crash_blame_findings(ctx));
         Ok(out)
     }
+}
+
+fn incident_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
+    let mut out = Vec::new();
+    for anchor in ctx.store.by_kind(kind::CRASH_ANCHOR) {
+        let event_id = anchor.subject.as_str();
+        let event = ctx
+            .store
+            .by_kind(kind::RUNTIME_EVENT)
+            .find(|fact| fact.subject == event_id);
+        let throwable = ctx
+            .store
+            .by_kind(kind::THROWABLE_NODE)
+            .filter(|fact| fact.subject == event_id)
+            .find(|fact| fact.attr_bool("deepest") == Some(true));
+        let Some(root) = throwable else {
+            continue;
+        };
+        let root_type = root.attr("type").unwrap_or("Throwable");
+        let message = root.attr("message").unwrap_or("");
+        let outer = ctx
+            .store
+            .by_kind(kind::THROWABLE_NODE)
+            .filter(|fact| fact.subject == event_id)
+            .min_by_key(|fact| fact.attr_int("index").unwrap_or(i64::MAX))
+            .and_then(|fact| fact.attr("type"))
+            .unwrap_or(root_type);
+
+        let mut frames = ctx
+            .store
+            .by_kind(kind::STACK_FRAME)
+            .filter(|fact| fact.subject == event_id)
+            .collect::<Vec<_>>();
+        frames.sort_by_key(|fact| {
+            (
+                fact.attr_int("throwable_index").unwrap_or(i64::MAX),
+                fact.attr_int("frame_index").unwrap_or(i64::MAX),
+            )
+        });
+        let mut callee_to_caller = Vec::<String>::new();
+        for frame in &frames {
+            let Some(mod_id) = frame.attr("mod_id").filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if callee_to_caller.last().is_none_or(|last| last != mod_id) {
+                callee_to_caller.push(mod_id.to_string());
+            }
+        }
+        let mut caller_to_callee = callee_to_caller.clone();
+        caller_to_callee.reverse();
+        let ownership = if caller_to_callee.is_empty() {
+            "No frame could be assigned to an installed artifact.".to_string()
+        } else {
+            format!(
+                "The ownership path from caller to callee is {}.",
+                caller_to_callee.join(" -> ")
+            )
+        };
+        let wrapper = if outer != root_type {
+            format!(" `{outer}` is retained as the outer runtime context, not the root cause.")
+        } else {
+            String::new()
+        };
+        let fatal = root_type.contains("OutOfMemory") || root_type.contains("VirtualMachineError");
+        let mut finding = Finding::builder("log-signal", format!("incident:{event_id}"))
+            .severity(if fatal {
+                Severity::Fatal
+            } else {
+                Severity::Error
+            })
+            .confidence(0.99)
+            .category(Category::Log)
+            .title(format!(
+                "Primary crash cause: {root_type}{}",
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {message}")
+                }
+            ))
+            .explanation(format!(
+                "The deepest causal exception is `{root_type}`{}.{wrapper} {ownership}",
+                if message.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with message `{message}`")
+                }
+            ))
+            .evidence(EvidenceEdge::subject(anchor.id))
+            .evidence(EvidenceEdge::supports(root.id))
+            .tag("incident")
+            .tag("crash-relevance:causal")
+            .tag("exception-chain");
+        if let Some(event) = event {
+            finding = finding.evidence(EvidenceEdge::supports(event.id));
+        }
+        for frame in frames.iter().take(12) {
+            finding = finding.evidence(EvidenceEdge::supports(frame.id));
+        }
+        if root_type.contains("IllegalStateException")
+            && message.to_ascii_lowercase().contains("off-thread")
+        {
+            finding = finding.fix(FixCandidate::advice(
+                "Inspect the first mod-owned caller for an API call made from the wrong thread; \
+                 verify thread confinement before changing dependency versions.",
+            ));
+        }
+        if root_type.contains("OutOfMemory") {
+            finding = finding.tag(signal::OUT_OF_MEMORY);
+        }
+        out.push(finding.build());
+    }
+    out
 }
 
 /// `true` when `class` lives under (or is) package `pkg`, e.g. `com.foo.M.X` under
@@ -818,6 +1414,68 @@ mod tests {
     }
 
     #[test]
+    fn normal_create_info_is_not_failure_and_model_error_has_resource_taxonomy() {
+        let dir = std::env::temp_dir().join(format!("imd-log-taxonomy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("latest.log");
+        std::fs::write(
+            &log,
+            "[12:00:00] [Render thread/INFO]: Create 6.0.10 initializing!\n\
+             [12:00:01] [Render thread/INFO]: Loaded 61 train hat configurations\n\
+             [12:00:02] [Render thread/ERROR]: ModelManager: Failed to load model create_radar:block/foo\n",
+        )
+        .unwrap();
+        let report = DiagnosticEngine::builder()
+            .collector(LogCollector)
+            .rule(LogSignalRule)
+            .build()
+            .diagnose(&Target::with_kind(log.clone(), TargetKind::LogFile));
+        assert!(report.findings.iter().all(|finding| {
+            !finding
+                .machine_tags
+                .iter()
+                .any(|tag| tag == signal::CREATE_ERROR || tag == signal::MOD_LOADING_FAILURE)
+        }));
+        assert!(report.findings.iter().any(|finding| {
+            finding
+                .machine_tags
+                .iter()
+                .any(|tag| tag == signal::RESOURCE_MODEL_FAILURE)
+        }));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn forensic_log_environment_outranks_analyzer_host() {
+        let dir = std::env::temp_dir().join(format!("imd-log-env-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("latest.log");
+        std::fs::write(
+            &log,
+            "Java Version: 21.0.7\nLoading Minecraft 1.21.1 with NeoForge 21.1.248\n",
+        )
+        .unwrap();
+        let report = DiagnosticEngine::builder()
+            .collector(LogCollector)
+            .build()
+            .diagnose(&Target::with_kind(log, TargetKind::LogFile));
+        assert_eq!(report.environment.java_version.as_deref(), Some("21.0.7"));
+        assert_eq!(
+            report.environment.minecraft_version.as_deref(),
+            Some("1.21.1")
+        );
+        assert_eq!(
+            report.environment.loader,
+            Some(intermed_doctor_core::Loader::NeoForge)
+        );
+        assert_eq!(
+            report.environment.loader_source.as_deref(),
+            Some("runtime-log")
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn prism_instance_game_root_logs_are_collected() {
         // Prism/MultiMC layout: instance dir is the target, but logs live under
         // `<instance>/.minecraft/logs`. The collector must follow game_root.
@@ -947,6 +1605,141 @@ mod tests {
         assert_eq!(error.subject, "alpha");
         assert_eq!(error.attr("version"), Some("1.2.3"));
         assert!(error.attr_f64("blame_score").unwrap() >= 0.9);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn incident_ranks_deepest_runtime_cause_and_mod_transition() {
+        use intermed_doctor_core::facts::FactStore;
+        use intermed_doctor_core::{CollectCtx, Collector, Rule, RuleCtx, default_settings};
+
+        let dir = std::env::temp_dir().join(format!("imd-causal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("latest.log");
+        std::fs::write(
+            &log,
+            "[12:00:00] [Render thread/ERROR]: net.minecraft.ReportedException: charTyped event handler\n\
+             \tat com.simibubi.create.AllKeys.isKeyDown(AllKeys.java:10)\n\
+             \tat com.createdieselgenerators.EntityFilterItem.appendHoverText(EntityFilterItem.java:42)\n\
+             Caused by: java.lang.IllegalStateException: Encountered GL error off-thread GLFW 65539\n\
+             \tat com.simibubi.create.AllKeys.shiftDown(AllKeys.java:11)\n",
+        )
+        .unwrap();
+        let target = Target::with_kind(log, TargetKind::LogFile);
+        let mut store = FactStore::new();
+        for (mod_id, package) in [
+            ("create", "com.simibubi.create"),
+            ("createdieselgenerators", "com.createdieselgenerators"),
+        ] {
+            store
+                .fact("metadata", kind::PACKAGE_OWNER)
+                .subject(mod_id)
+                .attr("package", package)
+                .emit();
+        }
+        let mut collect = CollectCtx {
+            target: &target,
+            store: &mut store,
+            jar_cache: None,
+            settings: default_settings(),
+        };
+        LogCollector.collect(&mut collect);
+        let findings = LogSignalRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        let incident = findings
+            .iter()
+            .find(|finding| finding.id.starts_with("incident:"))
+            .expect("incident conclusion");
+        assert!(incident.title.contains("IllegalStateException"));
+        assert!(incident.explanation.contains("ReportedException"));
+        assert!(incident.explanation.contains("create"));
+        assert!(incident.explanation.contains("createdieselgenerators"));
+        assert!(incident.confidence >= 0.98);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn flattened_runtime_facts_preserve_physical_source_line() {
+        use intermed_doctor_core::facts::FactStore;
+        use intermed_doctor_core::{CollectCtx, Collector, default_settings};
+
+        let dir = std::env::temp_dir().join(format!("imd-flat-line-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("latest.log");
+        std::fs::write(
+            &log,
+            "[12:00:00] [main/ERROR]: java.lang.RuntimeException: outer at com.example.Mod.run(Mod.java:1) Caused by: java.lang.IllegalStateException: root at com.example.Mod.root(Mod.java:2)",
+        )
+        .unwrap();
+        let target = Target::with_kind(log, TargetKind::LogFile);
+        let mut store = FactStore::new();
+        let mut collect = CollectCtx {
+            target: &target,
+            store: &mut store,
+            jar_cache: None,
+            settings: default_settings(),
+        };
+        LogCollector.collect(&mut collect);
+        let runtime_kinds = [
+            kind::RUNTIME_EVENT,
+            kind::CRASH_ANCHOR,
+            kind::THROWABLE_NODE,
+            kind::STACK_FRAME,
+            kind::LOG_CRASH,
+        ];
+        let facts = runtime_kinds
+            .iter()
+            .flat_map(|kind| store.by_kind(kind))
+            .collect::<Vec<_>>();
+        assert!(!facts.is_empty());
+        assert!(facts.iter().all(|fact| fact.source.line == Some(1)));
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact.attr_int("normalized_fragment") == Some(0))
+        );
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn repeated_incidents_from_different_files_do_not_merge() {
+        use intermed_doctor_core::facts::FactStore;
+        use intermed_doctor_core::{CollectCtx, Collector, Rule, RuleCtx, default_settings};
+
+        let dir = std::env::temp_dir().join(format!("imd-repeat-{}", std::process::id()));
+        let logs = dir.join("logs");
+        let crashes = dir.join("crash-reports");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&crashes).unwrap();
+        let event = "[12:00:00] [main/ERROR]: java.lang.IllegalStateException: repeated\n";
+        std::fs::write(logs.join("latest.log"), event).unwrap();
+        std::fs::write(crashes.join("crash-repeat.txt"), event).unwrap();
+        let target = Target::with_kind(&dir, TargetKind::Instance);
+        let mut store = FactStore::new();
+        let mut collect = CollectCtx {
+            target: &target,
+            store: &mut store,
+            jar_cache: None,
+            settings: default_settings(),
+        };
+        LogCollector.collect(&mut collect);
+        let events = store.by_kind(kind::RUNTIME_EVENT).collect::<Vec<_>>();
+        assert_eq!(events.len(), 2);
+        assert_ne!(events[0].subject, events[1].subject);
+        assert_eq!(
+            events[0].attr("semantic_fingerprint"),
+            events[1].attr("semantic_fingerprint")
+        );
+        let findings = LogSignalRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        let incident_ids = findings
+            .iter()
+            .filter(|finding| finding.id.starts_with("incident:"))
+            .map(|finding| finding.id.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(incident_ids.len(), 2);
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1134,4 +1927,12 @@ mod tests {
         assert_eq!(small_hits[0].signal, signal::OUT_OF_MEMORY);
         assert_eq!(small_hits[1].lineno, 3);
     }
+}
+#[test]
+fn direct_text_discovery_rejects_options_but_accepts_crash_reports() {
+    assert!(!is_direct_log_candidate(Path::new("options.txt")));
+    assert!(is_direct_log_candidate(Path::new("latest.log")));
+    assert!(is_direct_log_candidate(Path::new(
+        "crash-2026-08-14_12.00.00-client.txt"
+    )));
 }

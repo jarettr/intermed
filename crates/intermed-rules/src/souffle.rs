@@ -68,10 +68,10 @@ pub fn souffle_program() -> String {
     let pack = default_core_pack_v2();
     let mut out = String::from(FACT_SCHEMA);
     for (i, rule) in pack.rules.iter().enumerate() {
-        if let Lowering::Ir(ir) = rule_to_ir(rule) {
-            if let Some(clause) = to_datalog(&ir, &rel_name(i)) {
-                out.push_str(&clause);
-            }
+        if let Lowering::Ir(ir) = rule_to_ir(rule)
+            && let Some(clause) = to_datalog(&ir, &rel_name(i))
+        {
+            out.push_str(&clause);
         }
     }
     out
@@ -150,10 +150,10 @@ fn run_souffle(pack: &RulePack, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, RuleP
         // Build + run one program with a relation per Souffle rule.
         let mut program = String::from(FACT_SCHEMA);
         for (i, rule) in &souffle_rules {
-            if let Lowering::Ir(ir) = rule_to_ir(rule) {
-                if let Some(clause) = to_datalog(&ir, &rel_name(*i)) {
-                    program.push_str(&clause);
-                }
+            if let Lowering::Ir(ir) = rule_to_ir(rule)
+                && let Some(clause) = to_datalog(&ir, &rel_name(*i))
+            {
+                program.push_str(&clause);
             }
         }
         let program_path = root.join("intermed_core.dl");

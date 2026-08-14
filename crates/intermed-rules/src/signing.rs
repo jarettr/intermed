@@ -63,14 +63,13 @@ struct CanonicalPack<'a> {
 }
 
 /// SHA256 hex digest of the canonical signing bytes.
-#[must_use]
-pub fn canonical_digest(pack: &RulePack) -> String {
-    let bytes = canonical_bytes(pack);
+pub fn canonical_digest(pack: &RulePack) -> Result<String, SigningError> {
+    let bytes = canonical_bytes(pack)?;
     let hash = Sha256::digest(&bytes);
-    hex::encode(hash)
+    Ok(hex::encode(hash))
 }
 
-fn canonical_bytes(pack: &RulePack) -> Vec<u8> {
+fn canonical_bytes(pack: &RulePack) -> Result<Vec<u8>, SigningError> {
     let body = CanonicalPack {
         schema: &pack.schema,
         id: &pack.id,
@@ -78,7 +77,8 @@ fn canonical_bytes(pack: &RulePack) -> Vec<u8> {
         publisher: pack.publisher.as_deref().unwrap_or(""),
         rules: &pack.rules,
     };
-    serde_json::to_vec(&body).unwrap_or_default()
+    serde_json::to_vec(&body)
+        .map_err(|error| SigningError::Message(format!("canonicalize rule pack: {error}")))
 }
 
 /// Sign a validated v2 pack, stamping the current UTC time.
@@ -101,7 +101,8 @@ pub fn sign_rule_pack(
         )));
     }
     let verifying_key = signing_key.verifying_key();
-    let signature = signing_key.sign(&canonical_bytes(pack));
+    let bytes = canonical_bytes(pack)?;
+    let signature = signing_key.sign(&bytes);
     Ok(RulePackSignature {
         algorithm: SIGNATURE_ALGORITHM.to_string(),
         public_key: B64.encode(verifying_key.as_bytes()),
@@ -138,8 +139,9 @@ pub fn verify_rule_pack_signature(
         ));
     }
     let signature = decode_signature(&sig.value)?;
+    let bytes = canonical_bytes(pack)?;
     public_key
-        .verify(&canonical_bytes(pack), &signature)
+        .verify(&bytes, &signature)
         .map_err(|e| SigningError::Message(format!("signature invalid: {e}")))?;
     Ok(())
 }
@@ -414,7 +416,8 @@ pub fn default_registry() -> RuleRegistry {
             id: pack.id.clone(),
             version: pack.version.clone(),
             url: "embedded://intermed-core-datalog".to_string(),
-            sha256: canonical_digest(&pack),
+            sha256: canonical_digest(&pack)
+                .expect("embedded core rule pack must have canonical JSON"),
             publisher: pack
                 .publisher
                 .clone()
@@ -587,7 +590,7 @@ pub fn fetch_pack_for_entry_with_policy(
             entry.url
         )));
     };
-    if canonical_digest(&pack) != entry.sha256 {
+    if canonical_digest(&pack)? != entry.sha256 {
         return Err(SigningError::Message(
             "pack digest does not match registry sha256".into(),
         ));

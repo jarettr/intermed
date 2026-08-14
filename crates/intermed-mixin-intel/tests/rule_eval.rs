@@ -1,6 +1,6 @@
 //! Rule-layer tests: facts → [`MixinRiskRule`] findings with recommendations.
 
-use intermed_doctor_core::evidence::Severity;
+use intermed_doctor_core::evidence::{FindingVisibility, Severity};
 use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{CollectCtx, Collector, Rule, RuleCtx, Target, TargetKind};
 use intermed_mixin_intel::fixtures;
@@ -68,6 +68,7 @@ fn overwrite_finding_attaches_inject_recommendation_via_site_key() {
         .iter()
         .find(|f| f.id.starts_with("mixin-overwrite-effect:"))
         .expect("enhanced overwrite finding");
+    assert_eq!(overwrite.visibility, FindingVisibility::Verbose);
     assert!(overwrite.explanation.contains("@Inject"));
     assert!(!overwrite.fix_candidates.is_empty());
     assert!(
@@ -295,6 +296,7 @@ fn risk_cluster_fact_becomes_a_finding_citing_failing_sites() {
         .find(|f| f.id == "mixin-cluster:cluster-net.example.Foo")
         .expect("risk cluster finding");
     assert_eq!(cluster.severity, Severity::Warn);
+    assert_eq!(cluster.visibility, FindingVisibility::Verbose);
     // The failing application-site fact is cited as supporting evidence.
     assert!(
         cluster.evidence.iter().any(|e| e.fact == site),

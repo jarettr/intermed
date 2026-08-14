@@ -152,10 +152,11 @@ pub fn eval_bool(expr: &str, ctx: &ExprCtx<'_>) -> bool {
 /// Resolve a term like `m.loader`, `attr:file`, or `subject` from bindings.
 pub fn resolve_term(term: &str, ctx: &ExprCtx<'_>) -> Option<String> {
     // Computed aggregate vars (`count`, `writer_count`, …) are bare identifiers.
-    if !term.contains('.') && !term.contains(':') {
-        if let Some(v) = ctx.vars.and_then(|vars| vars.get(term)) {
-            return Some(v.clone());
-        }
+    if !term.contains('.')
+        && !term.contains(':')
+        && let Some(v) = ctx.vars.and_then(|vars| vars.get(term))
+    {
+        return Some(v.clone());
     }
     if term == "subject" {
         return ctx.bindings.values().next().map(|f| f.subject.clone());

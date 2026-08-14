@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result as AnyhowResult};
 use clap::Parser;
+use sha2::{Digest, Sha256};
 
 use intermed_cli::command::{
     CacheArgs, CacheCommand, Command, DbArgs, DemoArgs, DemoCommand, DepsArgs, DepsCommand,
@@ -31,8 +32,8 @@ use intermed_config::{ConfigError, IntermedConfig};
 use intermed_doctor_core::evidence::Finding;
 use intermed_doctor_core::facts::Fact;
 use intermed_doctor_core::{
-    DiagnosisSettings, DiagnosticEngine, DiagnosticRun, JarCache, Target, TargetKind,
-    detect_target, materialize_modpack_archive, parse_changed_since, write_atomic,
+    DiagnosisSettings, DiagnosticEngine, DiagnosticRun, GatedCollector, JarCache, Target,
+    TargetKind, detect_target, materialize_modpack_archive, parse_changed_since, write_atomic,
 };
 use intermed_duckdb::{DuckdbRulePack, duckdb_available};
 use intermed_report::{Format, write_demo_artifacts};
@@ -72,30 +73,39 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     intermed_cli::verbosity::configure(cli.quiet, cli.verbose);
 
-    // Bug fix: configure_thread_pool must run for ALL subcommands that use Rayon
-    // (not just `doctor`), otherwise vfs/sbom/lab/deps scans ignore the jobs limit.
-    // We read from INTERMED_JOBS env var as a lightweight fallback when no config
-    // is loaded yet. configure_thread_pool errors are non-fatal — warn and continue.
-    let early_jobs: Option<usize> = std::env::var("INTERMED_JOBS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n: &usize| n > 0);
-    if let Err(e) = configure_thread_pool(early_jobs) {
-        eprintln!("warning: {e} (continuing with Rayon default)");
+    // Resolve every configuration layer before initializing Rayon. In
+    // particular, `--jobs` must beat INTERMED_JOBS rather than arriving after
+    // the process-global pool has already been built.
+    let mut effective_config = match IntermedConfig::load(cli.config.as_deref()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("error: could not resolve configuration: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(Command::Doctor(args)) = cli.command.as_ref() {
+        apply_doctor_cli_overrides(&mut effective_config, args);
     }
 
     if cli.dump_config {
-        match IntermedConfig::defaults().to_toml() {
+        return match effective_config.to_toml() {
             Ok(text) => {
                 print!("{text}");
                 ExitCode::SUCCESS
             }
             Err(e) => {
-                eprintln!("error: could not serialize default config: {e}");
+                eprintln!("error: could not serialize effective config: {e}");
                 ExitCode::from(2)
             }
-        }
-    } else if let Some(command) = cli.command {
+        };
+    }
+
+    let jobs = (effective_config.runtime.jobs > 0).then_some(effective_config.runtime.jobs);
+    if let Err(e) = configure_thread_pool(jobs) {
+        eprintln!("warning: {e} (continuing with Rayon default)");
+    }
+
+    if let Some(command) = cli.command {
         match command {
             Command::Doctor(args) => run_doctor(args, cli.config.as_deref()),
             Command::Vfs(args) => run_vfs(args),
@@ -135,6 +145,115 @@ fn configure_thread_pool(jobs: Option<usize>) -> Result<(), String> {
         .num_threads(n)
         .build_global()
         .map_err(|e| format!("could not configure {n} worker thread(s): {e}"))
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn digest_serialized(value: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_vec(value)
+        .ok()
+        .map(|bytes| digest_bytes(&bytes))
+}
+
+fn digest_file(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", digest.finalize()))
+}
+
+fn target_manifest_path(args: &DoctorArgs, target: &Target) -> Option<PathBuf> {
+    if let Some(path) = &args.pack_manifest {
+        return Some(path.clone());
+    }
+    if target.kind == TargetKind::ModpackArchive {
+        return Some(target.path.clone());
+    }
+    let roots = [target.game_root.as_ref(), Some(&target.path)];
+    for root in roots.into_iter().flatten() {
+        for name in ["modrinth.index.json", "manifest.json", "instance.cfg"] {
+            let candidate = root.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn populate_analyzer_fingerprint(
+    report: &mut intermed_doctor_core::DoctorReport,
+    config: &IntermedConfig,
+    args: &DoctorArgs,
+    target: &Target,
+    rule_pack_sha256: Option<String>,
+) {
+    let mut features = Vec::new();
+    if cfg!(feature = "duckdb") {
+        features.push("duckdb".to_string());
+    }
+    if cfg!(feature = "dhat-heap") {
+        features.push("dhat-heap".to_string());
+    }
+    if features.is_empty() {
+        features.push("default".to_string());
+    }
+    let target_manifest = target_manifest_path(args, target);
+    let target_manifest_sha256 = target_manifest.as_deref().and_then(digest_file);
+    let cache_mode = if args.cache.no_cache {
+        "disabled"
+    } else if args.cache.cache_remote_dir.is_some() {
+        "local+remote"
+    } else {
+        "local"
+    };
+    let effective_config_sha256 = config.to_toml().ok().map(|mut text| {
+        use std::fmt::Write as _;
+        // Options that intentionally live outside the reusable TOML schema are
+        // still analysis inputs and therefore belong in the invocation digest.
+        let _ = write!(
+            text,
+            "\n[effective_invocation]\nlogic={:?}\nno_cache={}\nchanged_since={:?}\npack_manifest={:?}\nminecraft_jar={:?}\nminecraft_mappings={:?}\n",
+            args.logic,
+            args.cache.no_cache,
+            args.cache.changed_since,
+            args.pack_manifest,
+            args.tuning.minecraft_jar,
+            args.tuning.minecraft_mappings,
+        );
+        digest_bytes(text.as_bytes())
+    });
+    report.analysis_configuration.fingerprint = intermed_doctor_core::report::AnalyzerFingerprint {
+        git_commit: option_env!("INTERMED_GIT_COMMIT").map(str::to_string),
+        git_dirty: option_env!("INTERMED_GIT_DIRTY").and_then(|v| v.parse().ok()),
+        cargo_features: features,
+        effective_config_sha256,
+        rule_pack_sha256,
+        minecraft_jar_sha256: report.mixin_coverage.minecraft_jar_sha256.clone(),
+        mappings_sha256: report.mixin_coverage.mappings_sha256.clone(),
+        target_manifest_sha256: target_manifest_sha256.clone(),
+        cache_mode: cache_mode.to_string(),
+    };
+    if let (Some(path), Some(sha256)) = (target_manifest, target_manifest_sha256) {
+        report.analysis_configuration.input_manifest.push(
+            intermed_doctor_core::report::InputFingerprint {
+                kind: "target-manifest".to_string(),
+                path: path.display().to_string(),
+                sha256,
+            },
+        );
+    }
 }
 
 /// Process exit code for a completed run.
@@ -202,13 +321,13 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
     if !args.target.exists() {
         anyhow::bail!("target does not exist: {}", args.target.display());
     }
-    if let Some(path) = &args.pack_manifest {
-        if !path.is_file() {
-            anyhow::bail!(
-                "pack manifest does not exist or is not a file: {}",
-                path.display()
-            );
-        }
+    if let Some(path) = &args.pack_manifest
+        && !path.is_file()
+    {
+        anyhow::bail!(
+            "pack manifest does not exist or is not a file: {}",
+            path.display()
+        );
     }
     if stdout_artifact_count(&args.output) > 1 {
         anyhow::bail!(
@@ -234,17 +353,7 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         other => anyhow::anyhow!("{other}"),
     })?;
     apply_doctor_cli_overrides(&mut cfg, &args);
-
-    // Bug fix (Баг 6): configure_thread_pool is hoisted to main() for all commands.
-    // Here we refine it with the doctor-specific jobs setting if it was not yet set
-    // via INTERMED_JOBS env var. build_global silently no-ops if already initialized.
-    let jobs = args
-        .jobs
-        .or_else(|| (cfg.runtime.jobs > 0).then_some(cfg.runtime.jobs));
-    if let Err(e) = configure_thread_pool(jobs) {
-        // A second call after build_global is already done is a no-op error; ignore it.
-        let _ = e;
-    }
+    let mixin_enabled = cfg.mixin.enabled;
 
     let mut target: Target = detect_target(&args.target);
     let modpack_mount = materialize_modpack_archive(&target)
@@ -297,8 +406,9 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
     let rule_pack_selection = rule_pack_selection_from(&cfg, &args);
     // `without_mixin`: when Layer-F mixin-risk runs (any logic mode), drop the
     // lighter declarative mixin rules from the pack so the two don't double-report.
-    let resolved_rules = resolve_doctor_packs(args.mixin_risk, &rule_pack_selection)
+    let resolved_rules = resolve_doctor_packs(mixin_enabled, &rule_pack_selection)
         .context("rule pack resolution failed")?;
+    let rule_pack_sha256 = digest_serialized(&resolved_rules.pack);
     if !resolved_rules.overlay_ids.is_empty() {
         info!(
             "rule-packs: merged overlays [{}]",
@@ -311,14 +421,15 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
     print_rule_provenance(args.logic);
     let engine = build_engine(
         args.logic,
-        args.mixin_risk,
+        mixin_enabled,
         performance,
         perf_thresholds,
         settings,
         jar_cache,
         resolved_rules.pack,
     );
-    let run = engine.diagnose_with_facts(&target);
+    let mut run = engine.diagnose_with_facts(&target);
+    populate_analyzer_fingerprint(&mut run.report, &cfg, &args, &target, rule_pack_sha256);
     detail!(
         "scan: {} fact(s), {} finding(s) across {} collector(s)",
         run.facts.len(),
@@ -344,12 +455,12 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
             .map_err(|e| anyhow::anyhow!("could not write facts to {}: {e}", path.display()))?;
     }
 
-    if let Some(path) = &args.db {
-        if let Err(e) = persistence::persist_duckdb_run(path, &run) {
-            eprintln!("error: {e:#}");
-            if !args.db_best_effort {
-                return Ok(ExitCode::from(2));
-            }
+    if let Some(path) = &args.db
+        && let Err(e) = persistence::persist_duckdb_run(path, &run)
+    {
+        eprintln!("error: {e:#}");
+        if !args.db_best_effort {
+            return Ok(ExitCode::from(2));
         }
     }
 
@@ -415,15 +526,18 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
 }
 
 fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &DoctorArgs) {
-    // Note: cfg.cache.* are NOT mutated here. init_jar_cache() reads the cache
-    // override args (cache_max_mib, cache_max_age_days) directly from `args`, so
-    // mutating cfg would create a double-apply and confuse debugging. The config
-    // file value remains the baseline; CLI args are overlaid non-destructively.
-    //
-    // cfg.performance.enabled is NOT mutated here either: run_doctor reads
-    // `args.performance.performance || cfg.performance.enabled` directly on the
-    // line that computes the `performance` bool, so a mutation here would be
-    // redundant and would pollute the config value seen elsewhere.
+    // Mutate the serializable configuration itself so `--dump-config` is a true
+    // effective-config view, not a view of the pre-CLI baseline. Consumers that
+    // also receive the original args apply the same values idempotently.
+    if let Some(mib) = args.cache.cache_max_mib {
+        cfg.cache.max_size_mib = mib;
+    }
+    if let Some(days) = args.cache.cache_max_age_days {
+        cfg.cache.max_age_days = days;
+    }
+    if args.performance.performance {
+        cfg.performance.enabled = true;
+    }
     if let Some(ms) = args.performance.tick_spike_ms {
         cfg.performance.tick_spike_ms = ms;
     }
@@ -466,21 +580,33 @@ fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &DoctorArgs) {
         cfg.runtime.jobs = jobs;
     }
     if let Some(level) = args.mixin.level {
+        cfg.mixin.enabled = true;
         cfg.mixin.level = match level {
-            intermed_cli::command::MixinLevelArg::Normal => "normal".to_string(),
-            intermed_cli::command::MixinLevelArg::Detailed => "detailed".to_string(),
+            intermed_cli::command::MixinLevelArg::Basic => "basic".to_string(),
+            intermed_cli::command::MixinLevelArg::Standard => "standard".to_string(),
             intermed_cli::command::MixinLevelArg::Full => "full".to_string(),
         };
+    }
+    if args.mixin_risk {
+        cfg.mixin.enabled = true;
+        if args.mixin.level.is_none() {
+            cfg.mixin.level = "standard".to_string();
+        }
     }
     if args.mixin.no_mixin_handler_effects {
         cfg.mixin.handler_effects = Some(false);
     } else if args.mixin.mixin_handler_effects {
+        cfg.mixin.enabled = true;
         cfg.mixin.handler_effects = Some(true);
     }
     if args.mixin.no_mixin_recommendations {
         cfg.mixin.recommendations = Some(false);
     } else if args.mixin.mixin_recommendations {
+        cfg.mixin.enabled = true;
         cfg.mixin.recommendations = Some(true);
+    }
+    if args.tuning.minecraft_jar.is_some() || args.tuning.minecraft_mappings.is_some() {
+        cfg.mixin.enabled = true;
     }
 }
 
@@ -701,16 +827,21 @@ fn build_engine(
         builder = builder.rule(intermed_sbom::correlation_rule()); // Layer H×G
     }
 
-    if mixin_risk {
-        builder = builder.collector(intermed_mixin_intel::collector()); // Layer F
-    }
+    builder = builder.collector(GatedCollector::new(
+        intermed_mixin_intel::collector(),
+        mixin_risk,
+        "disabled by effective configuration; use --mixin-level basic|standard|full",
+    )); // Layer F
+    builder = builder.collector(GatedCollector::new(
+        intermed_spark_bridge::collector(),
+        performance,
+        "disabled by effective configuration; use --performance",
+    )); // Layer I
     if performance {
-        builder = builder
-            .collector(intermed_spark_bridge::collector()) // Layer I
-            .rule(intermed_spark_bridge::rule_with_thresholds(perf_thresholds));
+        builder = builder.rule(intermed_spark_bridge::rule_with_thresholds(perf_thresholds));
     }
 
-    // Every Layer-J backend evaluates the *resolved* pack (honoring --mixin-risk's
+    // Every Layer-J backend evaluates the *resolved* pack (honoring the effective Mixin
     // without-mixin selection + installed overlays); only one arm runs, so the move is
     // fine. The columnar engine is the default in-process backend.
     match logic {
@@ -2176,11 +2307,11 @@ fn run_rules_check(args: intermed_cli::command::RulesCheckArgs) -> ExitCode {
                     eprintln!("error: {}: signature required but missing", file.display());
                     return ExitCode::from(2);
                 }
-                if pack.signature.is_some() {
-                    if let Err(e) = verify_rule_pack_signature(&pack, &trusted) {
-                        eprintln!("error: {}: {e}", file.display());
-                        return ExitCode::from(2);
-                    }
+                if pack.signature.is_some()
+                    && let Err(e) = verify_rule_pack_signature(&pack, &trusted)
+                {
+                    eprintln!("error: {}: {e}", file.display());
+                    return ExitCode::from(2);
                 }
             }
         }
@@ -3006,12 +3137,15 @@ mod explain_tests {
                 path: ".".into(),
                 kind: TargetKind::ModsDir,
             },
+            analysis_environment: Default::default(),
             environment: Environment::default(),
             summary: Summary::default(),
             findings: Vec::new(),
             fix_plan: Vec::new(),
             fact_stats: BTreeMap::new(),
             collectors: Vec::new(),
+            analysis_configuration: Default::default(),
+            mixin_coverage: Default::default(),
             rules: Vec::new(),
             operational_errors: vec![OperationalError {
                 stage: "rule".into(),

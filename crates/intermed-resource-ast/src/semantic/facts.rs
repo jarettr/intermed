@@ -183,22 +183,22 @@ pub fn emit(
                 _ => None,
             };
 
-            if let Some(ep) = expected_path {
-                if deleted_paths.contains(ep.as_str()) {
-                    store
-                        .fact(EXTRACTOR, kind::RESOURCE_SEMANTIC_CONFLICT)
-                        .subject(rec.ast.resource_path.clone())
-                        .attr("relation", r.relation.as_str())
-                        .attr("to", r.target.clone())
-                        .attr("expected_path", ep)
-                        .attr("conflict_type", "references_deleted_resource")
-                        .source(SourceRef::inside(
-                            rec.archive.clone(),
-                            rec.ast.resource_path.clone(),
-                        ))
-                        .emit();
-                    n += 1;
-                }
+            if let Some(ep) = expected_path
+                && deleted_paths.contains(ep.as_str())
+            {
+                store
+                    .fact(EXTRACTOR, kind::RESOURCE_SEMANTIC_CONFLICT)
+                    .subject(rec.ast.resource_path.clone())
+                    .attr("relation", r.relation.as_str())
+                    .attr("to", r.target.clone())
+                    .attr("expected_path", ep)
+                    .attr("conflict_type", "references_deleted_resource")
+                    .source(SourceRef::inside(
+                        rec.archive.clone(),
+                        rec.ast.resource_path.clone(),
+                    ))
+                    .emit();
+                n += 1;
             }
         }
     }

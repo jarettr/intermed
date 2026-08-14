@@ -11,7 +11,9 @@ use std::sync::{Condvar, Mutex, OnceLock};
 
 use rayon::prelude::*;
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, Severity,
+};
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::jar_meta;
 use intermed_doctor_core::{
@@ -45,7 +47,7 @@ pub fn rule() -> impl Rule {
     SbomProvenanceRule
 }
 
-/// Cross-layer rule: correlate low provenance (Layer H) with dangerous
+/// Cross-layer rule: correlate unresolved provenance (Layer H) with dangerous
 /// capabilities (Layer G). Either signal alone is routine; together they are the
 /// supply-chain smell worth surfacing.
 pub fn correlation_rule() -> impl Rule {
@@ -442,10 +444,13 @@ impl Rule for SbomProvenanceRule {
                 Finding::builder(self.id(), format!("unknown-source:{archive}"))
                     .severity(Severity::Warn)
                     .category(Category::Security)
-                    .title(format!("Unknown mod provenance: {archive}"))
+                    .title(format!(
+                        "Artifact identity could not be established: {archive}"
+                    ))
                     .explanation(
                         "This jar has no recognizable Fabric/Quilt/Forge manifest. \
-                         Provenance and supply-chain trust cannot be established.",
+                         Its mod identity and distribution provenance could not be established; \
+                         this is not by itself evidence that the artifact is unsafe.",
                     )
                     .evidence(EvidenceEdge::subject(f.id))
                     .affects(archive)
@@ -494,13 +499,19 @@ impl Rule for SbomProvenanceRule {
                         .to_string(),
                 ),
             };
-            out.push(
+            out.push({
+                let visibility = if status == "unsigned" {
+                    FindingVisibility::ExplainOnly
+                } else {
+                    FindingVisibility::Default
+                };
                 Finding::builder(
                     self.id(),
                     format!("artifact-signature-status:{status}:{archive}"),
                 )
                 .severity(severity)
                 .category(Category::Security)
+                .visibility(visibility)
                 .confidence(0.95)
                 .title(title)
                 .explanation(explanation)
@@ -511,8 +522,8 @@ impl Rule for SbomProvenanceRule {
                 ))
                 .tag("sbom")
                 .tag("signature")
-                .build(),
-            );
+                .build()
+            });
         }
         Ok(out)
     }
@@ -616,7 +627,7 @@ impl Rule for SbomSecurityCorrelationRule {
                     .title(if parse_failed {
                         format!("Identity analysis incomplete for high-risk jar `{archive}`")
                     } else {
-                        format!("Low-provenance jar `{archive}` exercises high-risk capability")
+                        format!("Unresolved artifact provenance with high-risk capability: `{archive}`")
                     })
                     .explanation(format!(
                         "`{archive}` has identity status `{identity_status}` and trust score \
@@ -628,8 +639,8 @@ impl Rule for SbomSecurityCorrelationRule {
                             "Because the low score comes from an identity parse failure, it is not \
                              treated as independent evidence of suspicious provenance."
                         } else {
-                            "Weak provenance combined with a dangerous capability is a stronger \
-                             supply-chain concern than either signal alone."
+                            "Unresolved distribution provenance combined with a dangerous \
+                             capability warrants source verification, but is not a malware verdict."
                         }
                     ))
                     .evidence(EvidenceEdge::subject(evidence))

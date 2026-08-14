@@ -539,10 +539,10 @@ fn successors(
             }
         }
     }
-    if falls_through(opcode) {
-        if let Some((next_off, _)) = opcodes.get(idx + 1) {
-            out.push(*next_off);
-        }
+    if falls_through(opcode)
+        && let Some((next_off, _)) = opcodes.get(idx + 1)
+    {
+        out.push(*next_off);
     }
     out
 }

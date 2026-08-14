@@ -71,6 +71,7 @@ impl Collector for ResourceAstCollector {
 
         match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan, settings, level) {
             Ok(scan) => {
+                let incomplete = !scan.truncations.is_empty() || !scan.failures.is_empty();
                 // Opt-in vanilla resource index: scan the Minecraft jar
                 // (`--minecraft-jar`, shared with the mixin layer) so `minecraft:`
                 // references resolve and tags expand against real vanilla resources.
@@ -81,7 +82,11 @@ impl Collector for ResourceAstCollector {
                     .map(|jar| scan_vanilla_records(jar, ctx.jar_cache, settings, level))
                     .unwrap_or_default();
                 let emitted = emit(ctx, scan, &vanilla, settings);
-                CollectorOutcome::active(emitted.0, emitted.1)
+                if incomplete {
+                    CollectorOutcome::incomplete(emitted.0, emitted.1)
+                } else {
+                    CollectorOutcome::active(emitted.0, emitted.1)
+                }
             }
             Err(e) => CollectorOutcome::failed(e.to_string()),
         }
@@ -157,6 +162,7 @@ fn emit(
             .subject(archive.clone())
             .attr("layer", "data-semantics")
             .attr("reason", reason.clone())
+            .attr("relevant_entry", true)
             .source(SourceRef::file(archive.clone()))
             .confidence(0.95)
             .emit();

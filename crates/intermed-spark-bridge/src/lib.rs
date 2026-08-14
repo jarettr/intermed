@@ -1494,13 +1494,13 @@ fn discover_report_paths(target: &Target) -> impl Iterator<Item = PathBuf> + '_ 
     }
     for sub in ["spark", "profiler"] {
         let dir = target.path.join(sub);
-        if dir.is_dir() {
-            if let Ok(rd) = std::fs::read_dir(&dir) {
-                for entry in rd.flatten() {
-                    let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()) == Some("json") {
-                        paths.push(p);
-                    }
+        if dir.is_dir()
+            && let Ok(rd) = std::fs::read_dir(&dir)
+        {
+            for entry in rd.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                    paths.push(p);
                 }
             }
         }

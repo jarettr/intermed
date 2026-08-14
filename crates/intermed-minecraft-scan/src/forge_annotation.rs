@@ -207,10 +207,10 @@ fn extract_mod_from_embedded_strings(class_bytes: &[u8]) -> Option<(String, Load
             i += 1;
             continue;
         }
-        if let Ok(s) = std::str::from_utf8(&class_bytes[start..end]) {
-            if looks_like_mod_id(s) {
-                mod_ids.push(s.to_string());
-            }
+        if let Ok(s) = std::str::from_utf8(&class_bytes[start..end])
+            && looks_like_mod_id(s)
+        {
+            mod_ids.push(s.to_string());
         }
         i = end;
     }
@@ -237,10 +237,10 @@ fn pool_contains_utf8(haystack: &[u8], needle: &str) -> bool {
             i += 1;
             continue;
         }
-        if let Ok(s) = std::str::from_utf8(&haystack[start..end]) {
-            if s == needle {
-                return true;
-            }
+        if let Ok(s) = std::str::from_utf8(&haystack[start..end])
+            && s == needle
+        {
+            return true;
         }
         i = end;
     }
@@ -277,10 +277,10 @@ fn mod_id_from_annotation(annotation: &Annotation<'_>) -> Option<String> {
         return None;
     }
     for element in &annotation.elements {
-        if element.name == "value" || element.name == "modId" {
-            if let Some(id) = string_from_element_value(&element.value) {
-                return Some(id);
-            }
+        if (element.name == "value" || element.name == "modId")
+            && let Some(id) = string_from_element_value(&element.value)
+        {
+            return Some(id);
         }
     }
     if annotation.elements.len() == 1 {

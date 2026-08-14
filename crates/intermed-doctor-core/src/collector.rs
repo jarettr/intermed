@@ -25,8 +25,12 @@ pub struct CollectCtx<'a> {
 /// What happened when a collector ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectorStatus {
+    /// Registered in the pipeline but explicitly disabled by effective config.
+    Disabled,
     /// Ran and (possibly) produced facts.
     Active,
+    /// Ran and produced useful facts, but relevant input was truncated or failed.
+    Incomplete,
     /// Intentionally did not run (target not applicable).
     Skipped,
     /// Layer not implemented yet — reserved for a later phase.
@@ -44,9 +48,23 @@ pub struct CollectorOutcome {
 }
 
 impl CollectorOutcome {
+    pub fn disabled(message: impl Into<String>) -> Self {
+        Self {
+            status: CollectorStatus::Disabled,
+            facts_emitted: 0,
+            message: message.into(),
+        }
+    }
     pub fn active(facts_emitted: usize, message: impl Into<String>) -> Self {
         Self {
             status: CollectorStatus::Active,
+            facts_emitted,
+            message: message.into(),
+        }
+    }
+    pub fn incomplete(facts_emitted: usize, message: impl Into<String>) -> Self {
+        Self {
+            status: CollectorStatus::Incomplete,
             facts_emitted,
             message: message.into(),
         }
@@ -70,6 +88,54 @@ impl CollectorOutcome {
             status: CollectorStatus::Failed,
             facts_emitted: 0,
             message: message.into(),
+        }
+    }
+}
+
+/// A collector registration whose enabled state is part of the report.
+///
+/// Optional subsystems must remain visible even when disabled; absence from the
+/// collector list is ambiguous with a wiring bug. This wrapper keeps the real
+/// collector id/layer while returning an explicit disabled outcome when its
+/// effective configuration gate is closed.
+pub struct GatedCollector<C> {
+    inner: C,
+    enabled: bool,
+    disabled_reason: String,
+}
+
+impl<C> GatedCollector<C> {
+    pub fn new(inner: C, enabled: bool, disabled_reason: impl Into<String>) -> Self {
+        Self {
+            inner,
+            enabled,
+            disabled_reason: disabled_reason.into(),
+        }
+    }
+}
+
+impl<C: Collector> Collector for GatedCollector<C> {
+    fn id(&self) -> &'static str {
+        self.inner.id()
+    }
+
+    fn layer(&self) -> Layer {
+        self.inner.layer()
+    }
+
+    fn applies(&self, target: &Target) -> bool {
+        self.enabled && self.inner.applies(target)
+    }
+
+    fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+        self.inner.collect(ctx)
+    }
+
+    fn not_applicable(&self, target: &Target) -> CollectorOutcome {
+        if self.enabled {
+            self.inner.not_applicable(target)
+        } else {
+            CollectorOutcome::disabled(self.disabled_reason.clone())
         }
     }
 }

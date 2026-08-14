@@ -231,10 +231,10 @@ impl ColumnarStore {
         let mut kind_attr_keys: BTreeMap<String, AHashSet<String>> = BTreeMap::new();
 
         for f in facts {
-            if let Some(keep) = kinds {
-                if !keep.contains(&f.kind) {
-                    continue;
-                }
+            if let Some(keep) = kinds
+                && !keep.contains(&f.kind)
+            {
+                continue;
             }
             let base = [
                 Value::Int(f.id.0 as i64),
@@ -865,10 +865,10 @@ fn group_count_distinct<'a>(
                 distinct.push(AHashSet::new());
                 order.len() - 1
             });
-            if let Some(v) = attr_pos.and_then(|i| t.get(i)) {
-                if !v.is_null() {
-                    distinct[slot].insert(v.to_display());
-                }
+            if let Some(v) = attr_pos.and_then(|i| t.get(i))
+                && !v.is_null()
+            {
+                distinct[slot].insert(v.to_display());
             }
         }
     }

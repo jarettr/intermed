@@ -12,14 +12,14 @@ The mixin analysis is opt-in, because it reads bytecode and produces detail a
 quick dependency check does not need:
 
 ```bash
-intermed doctor ./mods --mixin-risk
+intermed doctor ./mods --mixin-level standard
 intermed mixin-map ./mods            # the mixin view on its own
 ```
 
 Depth is controlled by `--mixin-level`:
 
-- `normal` — overlaps and risk only.
-- `detailed` — adds recommendations (the default for the dedicated config).
+- `basic` — overlaps and risk only.
+- `standard` — adds recommendations (the default for the dedicated config).
 - `full` — adds a per-handler effect summary for every injection point.
 
 ## The unit of analysis: the application site
@@ -121,8 +121,8 @@ pack. Minecraft's own classes are only indexed when you supply them, so
 vanilla-target checks are off by default and never produce a false positive:
 
 ```bash
-intermed doctor ./mods --mixin-risk --minecraft-jar /path/to/minecraft.jar
-intermed doctor ./mods --mixin-risk --minecraft-jar mc.jar --minecraft-mappings mappings.tiny
+intermed doctor ./mods --mixin-level standard --minecraft-jar /path/to/minecraft.jar
+intermed doctor ./mods --mixin-level full --minecraft-jar mc.jar --minecraft-mappings mappings.tiny
 ```
 
 With the jar (and, for named targets, Yarn/Mojmap mappings), apply checks extend

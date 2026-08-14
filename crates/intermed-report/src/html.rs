@@ -29,7 +29,7 @@ pub fn render_html_with_facts(report: &DoctorReport, facts: &[Fact]) -> String {
     let findings = findings_section(report, &by_id);
     let deps = dependencies_section(facts);
     let resources = resources_section(report, facts);
-    let mixin = mixin_section(facts);
+    let mixin = mixin_section(report, facts);
     let security = security_section(facts);
     let facts_tab = facts_section(report, facts);
     let perf = performance_section(report, facts);
@@ -71,33 +71,21 @@ fn summary_section(report: &DoctorReport) -> String {
         None => "?".into(),
     };
 
-    // Split the headline into signal vs. noise: actionable = fatal+error+warn
-    // (things to act on), informational = note+info (safe merges, per-handler
-    // effect notes, …). The raw `total` alone overstates how much needs attention.
-    let actionable = s.fatal + s.error + s.warn;
-    let informational = s.note + s.info;
     let mut out = String::new();
     out.push_str(&format!(
         "<div class=\"cards\">\
-         <div class=\"card sev-{worst_l}\" title=\"fatal + error + warn — findings to act on\">\
-           <div class=\"num\">{actionable}</div><div>actionable</div></div>\
-         <div class=\"card\" title=\"note + info — safe merges, effect notes, context\">\
-           <div class=\"num\">{informational}</div><div>informational</div></div>\
-         <div class=\"card\"><div class=\"num\">{total}</div><div>total</div></div>\
-         <div class=\"sep\"></div>\
-         <div class=\"card sev-fatal\"><div class=\"num\">{fatal}</div><div>fatal</div></div>\
-         <div class=\"card sev-error\"><div class=\"num\">{error}</div><div>error</div></div>\
-         <div class=\"card sev-warn\"><div class=\"num\">{warn}</div><div>warn</div></div>\
-         <div class=\"card sev-note\"><div class=\"num\">{note}</div><div>note</div></div>\
-         <div class=\"card\"><div class=\"num\">{exit}</div><div>exit code</div></div>\
+         <div class=\"card sev-{worst_l}\"><div class=\"num\">{confirmed}</div><div>confirmed problems</div></div>\
+         <div class=\"card sev-warn\"><div class=\"num\">{review}</div><div>needs review</div></div>\
+         <div class=\"card sev-note\"><div class=\"num\">{incomplete}</div><div>incomplete analysis</div></div>\
+         <div class=\"card\"><div class=\"num\">{context}</div><div>context</div></div>\
+         <div class=\"card\"><div class=\"num\">{hidden}</div><div>retained detail</div></div>\
          </div>",
         worst_l = escape(&worst.to_lowercase()),
-        total = s.total,
-        fatal = s.fatal,
-        error = s.error,
-        warn = s.warn,
-        note = s.note,
-        exit = report.exit_code(),
+        confirmed = s.confirmed_problems,
+        review = s.needs_review,
+        incomplete = s.incomplete_analysis,
+        context = s.context,
+        hidden = s.hidden_details,
     ));
 
     out.push_str("<h3>Environment</h3><table class=\"kv\">");
@@ -111,6 +99,11 @@ fn summary_section(report: &DoctorReport) -> String {
         ("Minecraft", derived(&env.minecraft_version)),
         ("Launcher", opt(&env.launcher)),
         ("Side", dbg_opt(&env.side)),
+        ("Target Java", opt(&env.java_version)),
+        (
+            "Analyzer host Java",
+            opt(&report.analysis_environment.java_version),
+        ),
         ("OS", opt(&env.os)),
         ("Worst severity", escape(&worst)),
     ] {
@@ -131,6 +124,32 @@ fn summary_section(report: &DoctorReport) -> String {
         out.push_str("</ul></div>");
     }
 
+    let default_ids = report
+        .findings
+        .iter()
+        .filter(|finding| finding.visibility == intermed_evidence::FindingVisibility::Default)
+        .map(|finding| finding.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut seen_actions = std::collections::BTreeSet::new();
+    let top_actions = report
+        .fix_plan
+        .iter()
+        .filter(|item| default_ids.contains(item.finding_id.as_str()))
+        .filter(|item| seen_actions.insert(item.fix.description.as_str()))
+        .take(8)
+        .collect::<Vec<_>>();
+    if !top_actions.is_empty() {
+        out.push_str("<h3>Top actions</h3><ol>");
+        for item in top_actions {
+            out.push_str(&format!(
+                "<li><strong>{}</strong> — {}</li>",
+                escape(&item.finding_id),
+                escape(&item.fix.description),
+            ));
+        }
+        out.push_str("</ol>");
+    }
+
     out.push_str("<h3>Collectors</h3><table><thead><tr><th>Collector</th><th>Layer</th><th>Status</th><th>Facts</th></tr></thead><tbody>");
     for c in &report.collectors {
         out.push_str(&format!(
@@ -142,6 +161,79 @@ fn summary_section(report: &DoctorReport) -> String {
         ));
     }
     out.push_str("</tbody></table>");
+
+    let mixin = &report.analysis_configuration.mixin;
+    let fingerprint = &report.analysis_configuration.fingerprint;
+    out.push_str("<h3>Analysis configuration</h3><table class=\"kv\">");
+    for (key, value) in [
+        ("Mixin enabled", mixin.enabled.to_string()),
+        ("Mixin level", mixin.level.clone()),
+        ("Mixin handler effects", mixin.handler_effects.to_string()),
+        ("Mixin recommendations", mixin.recommendations.to_string()),
+        (
+            "Minecraft JAR supplied",
+            mixin.minecraft_jar_supplied.to_string(),
+        ),
+        ("Mappings supplied", mixin.mappings_supplied.to_string()),
+        (
+            "Enabled collectors",
+            report.analysis_configuration.enabled_collectors.join(", "),
+        ),
+        (
+            "Disabled collectors",
+            report.analysis_configuration.disabled_collectors.join(", "),
+        ),
+        (
+            "Git commit",
+            fingerprint
+                .git_commit
+                .clone()
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        (
+            "Git dirty at build",
+            fingerprint
+                .git_dirty
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        ("Cargo features", fingerprint.cargo_features.join(", ")),
+        (
+            "Effective config SHA-256",
+            fingerprint
+                .effective_config_sha256
+                .clone()
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        (
+            "Rule pack SHA-256",
+            fingerprint
+                .rule_pack_sha256
+                .clone()
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        ("Cache mode", fingerprint.cache_mode.clone()),
+    ] {
+        out.push_str(&format!(
+            "<tr><th>{}</th><td>{}</td></tr>",
+            escape(key),
+            escape(&value)
+        ));
+    }
+    out.push_str("</table>");
+
+    if !report.analysis_configuration.input_manifest.is_empty() {
+        out.push_str("<h3>Input manifest</h3><table><thead><tr><th>Kind</th><th>Path</th><th>SHA-256</th></tr></thead><tbody>");
+        for input in &report.analysis_configuration.input_manifest {
+            out.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td><code>{}</code></td></tr>",
+                escape(&input.kind),
+                escape(&input.path),
+                escape(&input.sha256),
+            ));
+        }
+        out.push_str("</tbody></table>");
+    }
 
     if !report.deferred_layers.is_empty() {
         out.push_str("<h3>Deferred layers</h3><ul>");
@@ -159,10 +251,16 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
     if report.findings.is_empty() {
         return "<p class=\"empty\">No findings — the pack looks healthy.</p>".into();
     }
-    let displayed: Vec<_> = report
+    const DEFAULT_FINDING_BUDGET: usize = 200;
+    let all_displayed: Vec<_> = report
         .findings
         .iter()
         .filter(|f| f.visibility.shown_by_default())
+        .collect();
+    let displayed: Vec<_> = all_displayed
+        .iter()
+        .copied()
+        .take(DEFAULT_FINDING_BUDGET)
         .collect();
     let mut categories: Vec<String> = displayed
         .iter()
@@ -172,10 +270,17 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
     categories.dedup();
 
     let mut out = group_overview_html(report);
-    let hidden = report.findings.len().saturating_sub(displayed.len());
+    let hidden = report.findings.len().saturating_sub(all_displayed.len());
     if hidden > 0 {
         out.push_str(&format!(
             "<p class=\"muted\">{hidden} detailed/explain-only finding(s) are retained in the JSON report.</p>"
+        ));
+    }
+    if all_displayed.len() > displayed.len() {
+        out.push_str(&format!(
+            "<p class=\"muted\">The human-facing table is limited to the first {} severity-sorted findings; {} additional default-visible records remain in JSON/explain output.</p>",
+            displayed.len(),
+            all_displayed.len() - displayed.len()
         ));
     }
 
@@ -246,11 +351,18 @@ fn group_overview_html(report: &DoctorReport) -> String {
             title = escape(&g.title),
             n = g.len(),
         ));
-        for f in &g.members {
+        const GROUP_MEMBER_BUDGET: usize = 20;
+        for f in g.members.iter().take(GROUP_MEMBER_BUDGET) {
             out.push_str(&format!(
                 "<li><code>{}</code> — {}</li>",
                 escape(&f.id),
                 escape(&f.title)
+            ));
+        }
+        if g.len() > GROUP_MEMBER_BUDGET {
+            out.push_str(&format!(
+                "<li class=\"muted\">… {} more records in JSON/explain output</li>",
+                g.len() - GROUP_MEMBER_BUDGET
             ));
         }
         out.push_str("</ul></details>");
@@ -375,7 +487,7 @@ fn attr_summary(fact: &Fact) -> String {
 
 // ── Mixin tab (risk heatmap + overlaps + complexity/bloat) ───────────────────
 
-fn mixin_section(facts: &[Fact]) -> String {
+fn mixin_section(report: &DoctorReport, facts: &[Fact]) -> String {
     let risk: Vec<&Fact> = facts
         .iter()
         .filter(|f| f.kind == "mixin_risk_score")
@@ -387,12 +499,96 @@ fn mixin_section(facts: &[Fact]) -> String {
         .collect();
     let bloat: Vec<&Fact> = facts.iter().filter(|f| f.kind == "mixin_bloat").collect();
 
+    let mut out = String::new();
+    let passport = &report.mixin_coverage;
+    out.push_str("<h3>Mixin coverage passport</h3><table class=\"kv\"><tbody>");
+    for (key, value) in [
+        ("Status", passport.status.clone()),
+        ("Reason", passport.reason.clone()),
+        (
+            "Configs discovered",
+            passport.configs_discovered.to_string(),
+        ),
+        ("Configs parsed", passport.configs_parsed.to_string()),
+        ("Mixin classes", passport.mixin_classes.to_string()),
+        (
+            "Target classes resolved",
+            format!(
+                "{} / {}",
+                passport.target_classes_resolved, passport.target_classes
+            ),
+        ),
+        (
+            "Target methods resolved",
+            format!(
+                "{} / {}",
+                passport.target_methods_resolved, passport.target_methods
+            ),
+        ),
+        ("Namespaces", passport.namespaces.join(", ")),
+        (
+            "Classpath coverage",
+            passport
+                .classpath_level
+                .clone()
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        (
+            "Minecraft classes indexed",
+            passport.minecraft_classes.to_string(),
+        ),
+        ("Mod classes indexed", passport.mod_classes.to_string()),
+        (
+            "Minecraft namespace",
+            passport
+                .minecraft_namespace
+                .clone()
+                .unwrap_or_else(|| "unavailable".into()),
+        ),
+        (
+            "Unresolved targets",
+            passport.unresolved_targets.to_string(),
+        ),
+        ("Truncations", passport.truncations.to_string()),
+        (
+            "Minecraft JAR SHA-256",
+            passport
+                .minecraft_jar_sha256
+                .clone()
+                .unwrap_or_else(|| "not supplied".into()),
+        ),
+        (
+            "Mappings source",
+            passport
+                .mappings_source
+                .clone()
+                .unwrap_or_else(|| "not supplied".into()),
+        ),
+        (
+            "Mappings SHA-256",
+            passport
+                .mappings_sha256
+                .clone()
+                .unwrap_or_else(|| "not supplied".into()),
+        ),
+    ] {
+        out.push_str(&format!(
+            "<tr><th>{}</th><td>{}</td></tr>",
+            escape(key),
+            escape(&value)
+        ));
+    }
+    out.push_str("</tbody></table>");
+
     if risk.is_empty() && overlaps.is_empty() && complexity.is_empty() {
-        return "<p class=\"empty\">No mixin facts. Run <code>doctor --mixin-risk</code>.</p>"
-            .into();
+        out.push_str(&format!(
+            "<p class=\"empty\"><strong>Mixin analysis: {}</strong> — {}</p>",
+            escape(&passport.status),
+            escape(&passport.reason)
+        ));
+        return out;
     }
 
-    let mut out = String::new();
     if !risk.is_empty() {
         out.push_str("<h3>Risk heatmap (per target)</h3><div class=\"heatmap\">");
         let mut sorted = risk.clone();
@@ -1131,6 +1327,6 @@ mod tests {
         let (report, _) = sample_report();
         let html = render_html(&report);
         assert!(html.starts_with("<!DOCTYPE html>"));
-        assert!(html.contains("No mixin facts"));
+        assert!(html.contains("Mixin analysis: unavailable"));
     }
 }

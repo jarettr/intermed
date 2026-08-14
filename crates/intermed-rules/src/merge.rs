@@ -67,6 +67,7 @@ mod tests {
                 rule_id: None,
                 severity: "warn".to_string(),
                 category: "metadata".to_string(),
+                visibility: "default".to_string(),
                 title: "overlay".to_string(),
                 explanation: "overlay".to_string(),
                 fix: None,

@@ -96,6 +96,31 @@ pub enum ConflictClass {
     BinaryOverride,
     /// Later writer replaces earlier content; order matters.
     UnsafeReplace,
+    /// Pass 1 observed multiple writers but pass 2 could not read every blob.
+    ClassificationUnavailable,
+}
+
+/// Key relationship inside a syntactically valid language-file collision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LanguageMergeClass {
+    DisjointKeys,
+    SharedEqualValues,
+    SharedConflictingValues,
+}
+
+impl LanguageMergeClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DisjointKeys => "disjoint-keys",
+            Self::SharedEqualValues => "shared-equal-values",
+            Self::SharedConflictingValues => "shared-conflicting-values",
+        }
+    }
+
+    pub fn is_safe(self) -> bool {
+        matches!(self, Self::DisjointKeys | Self::SharedEqualValues)
+    }
 }
 
 impl ConflictClass {
@@ -118,6 +143,7 @@ impl ConflictClass {
             ConflictClass::OrderDependentShader => "order-dependent-shader",
             ConflictClass::BinaryOverride => "binary-override",
             ConflictClass::UnsafeReplace => "unsafe-replace",
+            ConflictClass::ClassificationUnavailable => "classification-unavailable",
         }
     }
 
@@ -130,8 +156,6 @@ impl ConflictClass {
             ConflictClass::Identical
                 | ConflictClass::SafeCrdtMerge
                 | ConflictClass::SafeJsonObjectMerge
-                | ConflictClass::LangJsonMerge
-                | ConflictClass::LangPropertiesMerge
         )
     }
 
@@ -365,7 +389,45 @@ pub struct ResourceCollision {
     pub writers: Vec<String>,
     pub archives: Vec<String>,
     pub class: ConflictClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language_merge_class: Option<LanguageMergeClass>,
+    #[serde(default)]
+    pub coverage: CollisionCoverage,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollisionCoverage {
+    #[default]
+    Complete,
+    Partial,
+}
+
+impl CollisionCoverage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+impl ResourceCollision {
+    pub fn is_safe_merge(&self) -> bool {
+        self.class.is_safe_merge()
+            || matches!(
+                self.class,
+                ConflictClass::LangJsonMerge | ConflictClass::LangPropertiesMerge
+            ) && self
+                .language_merge_class
+                .is_some_and(LanguageMergeClass::is_safe)
+    }
+
+    pub fn is_order_dependent(&self) -> bool {
+        self.class.is_order_dependent()
+            || self.language_merge_class == Some(LanguageMergeClass::SharedConflictingValues)
+    }
 }
 
 /// An archive that could not be inspected. Scans are tolerant: one bad jar does
@@ -451,6 +513,13 @@ impl Collector for ResourceCollector {
     fn layer(&self) -> Layer {
         Layer::Resource
     }
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::PerArtifact,
+        )
+        .produces([kind::RESOURCE_WRITER, kind::RESOURCE_COLLISION])
+        .regions([intermed_doctor_core::TargetRegion::ResourceBlobs])
+    }
 
     fn applies(&self, target: &Target) -> bool {
         mods_dir(target).is_some()
@@ -463,7 +532,12 @@ impl Collector for ResourceCollector {
         match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);
-                CollectorOutcome::active(
+                let outcome = if scan.failures.is_empty() && scan.truncations.is_empty() {
+                    CollectorOutcome::active
+                } else {
+                    CollectorOutcome::incomplete
+                };
+                outcome(
                     emitted,
                     format!(
                         "{} resource writer(s), {} collision(s), {} scan failure(s)",
@@ -505,21 +579,30 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
     }
 
     for c in &scan.collisions {
-        let confidence = LoadOrderConfidence::for_class(c.class);
-        ctx.store
+        let confidence = if c.is_safe_merge() {
+            LoadOrderConfidence::High
+        } else {
+            LoadOrderConfidence::for_class(c.class)
+        };
+        let mut collision = ctx
+            .store
             .fact(EXTRACTOR, kind::RESOURCE_COLLISION)
             .subject(c.path.clone())
             .attr("writers", c.writers.join(","))
             .attr("archives", c.archives.join(","))
             .attr("class", c.class.as_str())
+            .attr("coverage", c.coverage.as_str())
             .attr("domain", asset_domain(&c.path).as_str())
-            .attr("safe_merge", c.class.is_safe_merge())
-            .attr("order_dependent", c.class.is_order_dependent())
+            .attr("safe_merge", c.is_safe_merge())
+            .attr("order_dependent", c.is_order_dependent())
             .attr("load_order_confidence", confidence.as_str())
             .attr("writer_count", c.writers.len() as i64)
             .attr("reason", c.reason.clone())
-            .source(SourceRef::file(c.path.clone()))
-            .emit();
+            .source(SourceRef::file(c.path.clone()));
+        if let Some(language_merge_class) = c.language_merge_class {
+            collision = collision.attr("language_merge_class", language_merge_class.as_str());
+        }
+        collision.emit();
         emitted += 1;
 
         // Overlay/PackOps intent: what an overlay generator *would* do. Read-only
@@ -529,18 +612,12 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
             .fact(EXTRACTOR, kind::RESOURCE_OVERLAY_ACTION)
             .subject(c.path.clone())
             .attr("action", c.class.overlay_action())
-            .attr(
-                "safety",
-                if c.class.is_safe_merge() {
-                    "safe"
-                } else {
-                    "manual"
-                },
-            )
+            .attr("safety", if c.is_safe_merge() { "safe" } else { "manual" })
             .attr("class", c.class.as_str())
+            .attr("coverage", c.coverage.as_str())
             .attr("domain", asset_domain(&c.path).as_str())
             .attr("writers", c.writers.join(","))
-            .attr("requires_manual_review", !c.class.is_safe_merge())
+            .attr("requires_manual_review", !c.is_safe_merge())
             .attr("reason", c.reason.clone())
             .source(SourceRef::file(c.path.clone()))
             .emit();
@@ -597,6 +674,18 @@ impl Rule for ResourceConflictRule {
         "resource-conflict"
     }
 
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([kind::RESOURCE_WRITER, kind::RESOURCE_COLLISION])
+            .layers([Layer::Resource])
+            .regions([intermed_doctor_core::TargetRegion::Artifacts])
+            .coverage([intermed_doctor_core::evidence::CoverageRequirement::CompleteResourceBlobs])
+            .proofs([
+                intermed_doctor_core::evidence::ProofKind::Observation,
+                intermed_doctor_core::evidence::ProofKind::DeterministicDerivation,
+            ])
+    }
+
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         // Evaluate *only* the resource-conflict rules, not the whole core pack.
         // The declarative core pack is the single source of truth for the
@@ -612,7 +701,7 @@ impl Rule for ResourceConflictRule {
 /// The subset of the core declarative pack that emits `resource-conflict`
 /// findings. Derived from the canonical pack so the logic never drifts.
 fn resource_conflict_pack() -> intermed_rules::RulePack {
-    let mut pack = intermed_rules::default_core_pack_v2();
+    let mut pack = intermed_rules::default_core_pack_v3();
     pack.rules.retain(|spec| {
         let emitted_rule_id = spec.finding.rule_id.as_deref().unwrap_or(&spec.id);
         emitted_rule_id == "resource-conflict"
@@ -706,8 +795,7 @@ pub fn scan_mods_dir_filtered(
     // retained byte buffer, bounded by the colliding-resource volume rather than
     // every resource in every jar.
     let blobs = reread_collision_blobs(&jars, &collision_paths);
-
-    let mut collisions = classify_collisions(&blobs);
+    let mut collisions = classify_observed_collisions(&writes, &blobs, &collision_paths);
     collisions.extend(detect_cross_format_lang_collisions(&writes));
     collisions.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(ResourceScan {
@@ -718,6 +806,68 @@ pub fn scan_mods_dir_filtered(
         truncations,
         blobs,
     })
+}
+
+/// Preserve pass-1 collision observations even if bounded pass 2 cannot recover
+/// every blob required for semantic classification.
+fn classify_observed_collisions(
+    writes: &[ResourceWrite],
+    blobs: &[ResourceBlob],
+    collision_paths: &BTreeSet<String>,
+) -> Vec<ResourceCollision> {
+    let expected_counts: std::collections::HashMap<&str, usize> = collision_paths
+        .iter()
+        .map(|path| {
+            (
+                path.as_str(),
+                writes.iter().filter(|write| write.path == *path).count(),
+            )
+        })
+        .collect();
+    let actual_counts: std::collections::HashMap<&str, usize> = collision_paths
+        .iter()
+        .map(|path| {
+            (
+                path.as_str(),
+                blobs.iter().filter(|blob| blob.path == *path).count(),
+            )
+        })
+        .collect();
+    let incomplete_paths: BTreeSet<&str> = expected_counts
+        .iter()
+        .filter_map(|(path, expected)| {
+            (actual_counts.get(path).copied().unwrap_or(0) < *expected).then_some(*path)
+        })
+        .collect();
+    let complete_blobs: Vec<ResourceBlob> = blobs
+        .iter()
+        .filter(|blob| !incomplete_paths.contains(blob.path.as_str()))
+        .cloned()
+        .collect();
+
+    let mut collisions = classify_collisions(&complete_blobs);
+    for path in incomplete_paths {
+        let path_writes: Vec<&ResourceWrite> =
+            writes.iter().filter(|write| write.path == path).collect();
+        collisions.push(ResourceCollision {
+            path: path.to_string(),
+            writers: path_writes
+                .iter()
+                .map(|write| write.writer.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            archives: path_writes
+                .iter()
+                .map(|write| write.archive.clone())
+                .collect(),
+            class: ConflictClass::ClassificationUnavailable,
+            language_merge_class: None,
+            coverage: CollisionCoverage::Partial,
+            reason: "second-pass-read-failure: pass 1 observed multiple writers but not every collision blob could be read".to_string(),
+        });
+    }
+    collisions
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -919,31 +1069,38 @@ fn classify_collisions(blobs: &[ResourceBlob]) -> Vec<ResourceCollision> {
             .collect();
         let archives: Vec<String> = group.iter().map(|b| b.archive.clone()).collect();
 
-        let (class, reason) = classify_group(path, &group);
+        let (class, language_merge_class, reason) = classify_group(path, &group);
         out.push(ResourceCollision {
             path: path.to_string(),
             writers,
             archives,
             class,
+            language_merge_class,
+            coverage: CollisionCoverage::Complete,
             reason,
         });
     }
     out
 }
 
-fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String) {
+fn classify_group(
+    path: &str,
+    group: &[&ResourceBlob],
+) -> (ConflictClass, Option<LanguageMergeClass>, String) {
     if group
         .first()
         .is_some_and(|first| group.iter().all(|b| b.bytes == first.bytes))
     {
         return (
             ConflictClass::Identical,
+            None,
             "all writers provide byte-identical content".to_string(),
         );
     }
 
     if is_tag_json_path(path) {
-        return classify_tag_group(group);
+        let (class, reason) = classify_tag_group(group);
+        return (class, None, reason);
     }
 
     if is_lang_json_path(path)
@@ -958,27 +1115,40 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
         // finding is Layer M's `lang-key-conflict`; Layer E only records the
         // structural count so the overlay/report can show it without a
         // duplicate finding.
+        let merge_class = classify_language_keys(&per_writer);
         let conflicts = count_conflicting_keys(&per_writer);
-        let reason = if conflicts == 0 {
-            "JSON language files merge as a deterministic key union (no shared key differs)"
-                .to_string()
+        let reason = if merge_class.is_safe() {
+            format!(
+                "JSON language files have {} and merge as an order-independent key union",
+                merge_class.as_str()
+            )
         } else {
             format!(
-                "JSON language files merge as a key union; {conflicts} shared key(s) map to \
-                     different text and are resolved by load order"
+                "JSON language files have {conflicts} shared key(s) with conflicting values; \
+                 the effective text is resolved by load order"
             )
         };
-        return (ConflictClass::LangJsonMerge, reason);
+        return (ConflictClass::LangJsonMerge, Some(merge_class), reason);
     }
 
     if is_lang_properties_path(path)
-        && group
+        && let Some(per_writer) = group
             .iter()
-            .all(|b| lang_properties_keys(&b.bytes).is_some())
+            .map(|b| lang_properties_keys(&b.bytes))
+            .collect::<Option<Vec<_>>>()
     {
+        let merge_class = classify_language_keys(&per_writer);
         return (
             ConflictClass::LangPropertiesMerge,
-            "`.lang` property files can be merged as a deterministic key union".to_string(),
+            Some(merge_class),
+            if merge_class.is_safe() {
+                format!(
+                    "`.lang` files have {} and merge as an order-independent key union",
+                    merge_class.as_str()
+                )
+            } else {
+                "`.lang` files bind at least one shared key to conflicting values; the effective text is resolved by load order".to_string()
+            },
         );
     }
 
@@ -988,6 +1158,7 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
     if domain == JsonDomain::PackMcmeta {
         return (
             ConflictClass::RootMetadata,
+            None,
             "pack.mcmeta is root pack metadata present in every resource pack; an overlay carries \
              its own rather than copying a writer's"
                 .to_string(),
@@ -1006,6 +1177,7 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
             JsonDomain::Atlas => {
                 return (
                     ConflictClass::OrderDependentAtlas,
+                    None,
                     "atlas definitions list texture sources read from one file by load order; \
                      merging is not a plain union — sources can be dropped"
                         .to_string(),
@@ -1014,6 +1186,7 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
             JsonDomain::Shader => {
                 return (
                     ConflictClass::OrderDependentShader,
+                    None,
                     "shader definition overridden by multiple jars; shader pipelines are \
                      load-order sensitive and loader-specific"
                         .to_string(),
@@ -1022,16 +1195,18 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
             // sounds.json is an object keyed by sound event: disjoint events merge
             // safely; the same event defined differently is an order-dependent pick.
             JsonDomain::Sounds => {
-                return classify_object_merge_group(
+                let (class, reason) = classify_object_merge_group(
                     group,
                     ConflictClass::OrderDependentSoundDef,
                     "sound event(s)",
                 );
+                return (class, None, reason);
             }
             // Single-document data files: the runtime keeps one by load order.
             d if d.is_single_document() => {
                 return (
                     ConflictClass::JsonOverride,
+                    None,
                     format!(
                         "{} is a single-document file written by multiple jars; the runtime keeps \
                          one by load order — this is an override, not a merge",
@@ -1043,15 +1218,14 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
             JsonDomain::Font => {
                 return (
                     ConflictClass::JsonOverride,
+                    None,
                     "font provider definition kept as one document by load order".to_string(),
                 );
             }
             _ => {
-                return classify_object_merge_group(
-                    group,
-                    ConflictClass::JsonMergeCandidate,
-                    "key(s)",
-                );
+                let (class, reason) =
+                    classify_object_merge_group(group, ConflictClass::JsonMergeCandidate, "key(s)");
+                return (class, None, reason);
             }
         }
     }
@@ -1061,6 +1235,7 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
     if !is_json_path(path) {
         return (
             ConflictClass::BinaryOverride,
+            None,
             format!(
                 "{} binary asset provided with differing bytes by multiple jars; the runtime keeps \
                  one by load order",
@@ -1071,6 +1246,7 @@ fn classify_group(path: &str, group: &[&ResourceBlob]) -> (ConflictClass, String
 
     (
         ConflictClass::UnsafeReplace,
+        None,
         "content differs and no safe merge rule is known".to_string(),
     )
 }
@@ -1361,6 +1537,8 @@ fn detect_cross_format_lang_collisions(writes: &[ResourceWrite]) -> Vec<Resource
             writers: writers_vec,
             archives,
             class: ConflictClass::LangFormatMismatch,
+            language_merge_class: None,
+            coverage: CollisionCoverage::Complete,
             reason: format!(
                 "locale `{}` is shipped as both {} — JSON and `.lang` cannot be merged safely",
                 locale_key,
@@ -1405,6 +1583,31 @@ fn count_conflicting_keys(per_writer: &[BTreeMap<String, String>]) -> usize {
         }
     }
     conflicting.len()
+}
+
+fn classify_language_keys(per_writer: &[BTreeMap<String, String>]) -> LanguageMergeClass {
+    let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+    let mut has_shared = false;
+    for map in per_writer {
+        for (key, value) in map {
+            match seen.get(key.as_str()) {
+                Some(previous) => {
+                    has_shared = true;
+                    if *previous != value.as_str() {
+                        return LanguageMergeClass::SharedConflictingValues;
+                    }
+                }
+                None => {
+                    seen.insert(key, value);
+                }
+            }
+        }
+    }
+    if has_shared {
+        LanguageMergeClass::SharedEqualValues
+    } else {
+        LanguageMergeClass::DisjointKeys
+    }
 }
 
 fn lang_json_keys(bytes: &[u8]) -> Option<BTreeMap<String, String>> {
@@ -1551,6 +1754,42 @@ mod tests {
             archive: format!("{writer}.jar"),
             bytes: bytes.to_vec(),
         }
+    }
+
+    #[test]
+    fn pass_two_read_failure_preserves_observed_collision() {
+        let path = "data/example/recipes/conflict.json";
+        let writes = vec![
+            ResourceWrite {
+                path: path.into(),
+                writer: "a".into(),
+                archive: "a.jar".into(),
+                size: 2,
+                crc32: 1,
+                json: true,
+            },
+            ResourceWrite {
+                path: path.into(),
+                writer: "b".into(),
+                archive: "b.jar".into(),
+                size: 2,
+                crc32: 2,
+                json: true,
+            },
+        ];
+        let paths = BTreeSet::from([path.to_string()]);
+        // Only one of the two pass-1 writers could be materialized in pass 2.
+        let blobs = vec![blob(path, "a", b"{}")];
+
+        let collisions = classify_observed_collisions(&writes, &blobs, &paths);
+
+        assert_eq!(collisions.len(), 1);
+        assert_eq!(
+            collisions[0].class,
+            ConflictClass::ClassificationUnavailable
+        );
+        assert_eq!(collisions[0].coverage, CollisionCoverage::Partial);
+        assert!(collisions[0].reason.contains("second-pass-read-failure"));
     }
 
     #[test]
@@ -1777,6 +2016,12 @@ mod tests {
         ];
         let collisions = classify_collisions(&blobs);
         assert_eq!(collisions[0].class, ConflictClass::LangJsonMerge);
+        assert_eq!(
+            collisions[0].language_merge_class,
+            Some(LanguageMergeClass::SharedConflictingValues)
+        );
+        assert!(!collisions[0].is_safe_merge());
+        assert!(collisions[0].is_order_dependent());
         assert!(
             collisions[0].reason.contains("1 shared key"),
             "reason carries key-level diff count: {}",
@@ -1792,7 +2037,12 @@ mod tests {
         ];
         let collisions = classify_collisions(&blobs);
         assert_eq!(collisions[0].class, ConflictClass::LangJsonMerge);
-        assert!(collisions[0].reason.contains("no shared key differs"));
+        assert_eq!(
+            collisions[0].language_merge_class,
+            Some(LanguageMergeClass::DisjointKeys)
+        );
+        assert!(collisions[0].is_safe_merge());
+        assert!(collisions[0].reason.contains("disjoint-keys"));
     }
 
     #[test]

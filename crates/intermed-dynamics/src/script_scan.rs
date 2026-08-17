@@ -38,6 +38,31 @@ fn id_regex() -> Regex {
 
 /// Locate script files under the target's roots. Returns `(path, engine)`.
 pub fn script_files(target: &Target) -> Vec<(PathBuf, &'static str)> {
+    discover_script_files(target).files
+}
+
+/// Whether a conventional script root exists, even if its contents cannot be
+/// enumerated. This lets the collector report an incomplete discovery instead
+/// of being marked not-applicable.
+pub fn has_script_roots(target: &Target) -> bool {
+    let mut roots = target.candidate_roots();
+    if let Some(parent) = target.path.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    roots
+        .iter()
+        .any(|root| root.join("kubejs").exists() || root.join("scripts").exists())
+}
+
+/// Bounded discovery result. Gaps are part of collector completeness rather
+/// than silently disappearing when a directory cannot be read or a cap fires.
+#[derive(Debug, Default)]
+pub struct ScriptDiscovery {
+    pub files: Vec<(PathBuf, &'static str)>,
+    pub gaps: Vec<String>,
+}
+
+pub fn discover_script_files(target: &Target) -> ScriptDiscovery {
     let mut roots: Vec<PathBuf> = target.candidate_roots();
     // A mods-dir target points *at* `mods/`; scripts live beside it in the game
     // root, so include the parent.
@@ -48,11 +73,19 @@ pub fn script_files(target: &Target) -> Vec<(PathBuf, &'static str)> {
     roots.dedup();
 
     let mut out = Vec::new();
+    let mut gaps = Vec::new();
     for root in &roots {
         // KubeJS: kubejs/{server,startup,client}_scripts/**.js
         let kubejs = root.join("kubejs");
         for sub in ["server_scripts", "startup_scripts", "client_scripts"] {
-            collect_files(&kubejs.join(sub), "js", crate::engine::KUBEJS, 0, &mut out);
+            collect_files(
+                &kubejs.join(sub),
+                "js",
+                crate::engine::KUBEJS,
+                0,
+                &mut out,
+                &mut gaps,
+            );
         }
         // CraftTweaker: scripts/**.zs
         collect_files(
@@ -61,13 +94,21 @@ pub fn script_files(target: &Target) -> Vec<(PathBuf, &'static str)> {
             crate::engine::CRAFTTWEAKER,
             0,
             &mut out,
+            &mut gaps,
         );
         if out.len() >= MAX_SCRIPT_FILES {
             break;
         }
     }
+    if out.len() >= MAX_SCRIPT_FILES {
+        gaps.push(format!(
+            "script discovery reached the {MAX_SCRIPT_FILES} file cap"
+        ));
+    }
     out.truncate(MAX_SCRIPT_FILES);
-    out
+    gaps.sort();
+    gaps.dedup();
+    ScriptDiscovery { files: out, gaps }
 }
 
 fn collect_files(
@@ -76,17 +117,39 @@ fn collect_files(
     engine: &'static str,
     depth: usize,
     out: &mut Vec<(PathBuf, &'static str)>,
+    gaps: &mut Vec<String>,
 ) {
-    if depth > MAX_DEPTH || out.len() >= MAX_SCRIPT_FILES || !dir.is_dir() {
+    if depth > MAX_DEPTH {
+        gaps.push(format!(
+            "script discovery exceeded recursion depth {MAX_DEPTH} under {}",
+            dir.display()
+        ));
         return;
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    if out.len() >= MAX_SCRIPT_FILES || !dir.is_dir() {
         return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            gaps.push(format!(
+                "cannot read script directory {}: {error}",
+                dir.display()
+            ));
+            return;
+        }
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                gaps.push(format!("cannot enumerate {}: {error}", dir.display()));
+                continue;
+            }
+        };
         let path = entry.path();
         if path.is_dir() {
-            collect_files(&path, ext, engine, depth + 1, out);
+            collect_files(&path, ext, engine, depth + 1, out, gaps);
         } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
             out.push((path, engine));
         }
@@ -189,22 +252,47 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Scan all script files under `target` and emit facts. Returns count emitted.
-pub fn emit(store: &mut FactStore, target: &Target) -> usize {
-    let files = script_files(target);
+#[derive(Debug, Default)]
+pub struct ScriptScanResult {
+    pub emitted: usize,
+    pub files_discovered: usize,
+    pub gaps: Vec<String>,
+}
+
+pub fn emit(store: &mut FactStore, target: &Target) -> ScriptScanResult {
+    let discovery = discover_script_files(target);
+    let files = discovery.files;
+    let mut gaps = discovery.gaps;
     if files.is_empty() {
-        return 0;
+        return ScriptScanResult {
+            emitted: 0,
+            files_discovered: 0,
+            gaps,
+        };
     }
     let id_re = id_regex();
     let mut emitted = 0usize;
     for (path, engine) in &files {
-        let Ok(meta) = std::fs::metadata(path) else {
-            continue;
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(error) => {
+                gaps.push(format!("cannot stat script {}: {error}", path.display()));
+                continue;
+            }
         };
         if meta.len() > MAX_SCRIPT_BYTES {
+            gaps.push(format!(
+                "script {} exceeds the {MAX_SCRIPT_BYTES} byte cap",
+                path.display()
+            ));
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) => {
+                gaps.push(format!("cannot read script {}: {error}", path.display()));
+                continue;
+            }
         };
         let locator = path.display().to_string();
         for hit in scan_text(&text, engine, &id_re) {
@@ -222,7 +310,13 @@ pub fn emit(store: &mut FactStore, target: &Target) -> usize {
             emitted += 1;
         }
     }
-    emitted
+    gaps.sort();
+    gaps.dedup();
+    ScriptScanResult {
+        emitted,
+        files_discovered: files.len(),
+        gaps,
+    }
 }
 
 #[cfg(test)]

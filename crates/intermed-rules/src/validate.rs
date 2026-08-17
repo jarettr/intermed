@@ -3,12 +3,17 @@
 use std::collections::BTreeSet;
 
 use crate::RulePackError;
-use crate::model::{RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RuleKind, RulePack};
+use crate::model::{
+    RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RULE_PACK_SCHEMA_V3, RuleKind, RulePack,
+};
 use crate::template::{parse_category, parse_severity};
 
 /// Validate pack schema, rule ids, and per-kind required fields.
 pub fn validate_rule_pack(pack: &RulePack) -> Result<(), RulePackError> {
-    if pack.schema != RULE_PACK_SCHEMA && pack.schema != RULE_PACK_SCHEMA_V2 {
+    if pack.schema != RULE_PACK_SCHEMA
+        && pack.schema != RULE_PACK_SCHEMA_V2
+        && pack.schema != RULE_PACK_SCHEMA_V3
+    {
         return Err(RulePackError(format!(
             "unsupported rule-pack schema: {}",
             pack.schema
@@ -49,6 +54,89 @@ pub fn validate_rule_pack(pack: &RulePack) -> Result<(), RulePackError> {
         }
         validate_rule_shape(rule)?;
         validate_rule_expressions(rule)?;
+        validate_fact_contract(rule)?;
+        validate_assessment_contract(pack, rule)?;
+    }
+    Ok(())
+}
+
+fn validate_assessment_contract(
+    pack: &RulePack,
+    rule: &crate::model::RuleSpec,
+) -> Result<(), RulePackError> {
+    let hard = matches!(rule.finding.severity.as_str(), "error" | "fatal");
+    if pack.schema == RULE_PACK_SCHEMA_V3 && hard {
+        let Some(contract) = &rule.assessment else {
+            return Err(RulePackError(format!(
+                "{}: v3 Error/Fatal rule requires an assessment contract",
+                rule.id
+            )));
+        };
+        if contract.coverage_requirements.is_empty() {
+            return Err(RulePackError(format!(
+                "{}: hard assessment requires at least one coverage requirement",
+                rule.id
+            )));
+        }
+        if contract.proof_kind == intermed_doctor_core::evidence::ProofKind::Heuristic {
+            return Err(RulePackError(format!(
+                "{}: heuristic proof cannot directly emit Error/Fatal",
+                rule.id
+            )));
+        }
+        if !rule.finding.id.contains('{') {
+            return Err(RulePackError(format!(
+                "{}: hard finding id must include occurrence identity from a binding",
+                rule.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fact_contract(rule: &crate::model::RuleSpec) -> Result<(), RulePackError> {
+    let registered = intermed_doctor_core::facts::kind::all_kinds()
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut kinds = rule
+        .input_kinds
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    kinds.extend(rule.left.iter().map(|source| source.kind.as_str()));
+    kinds.extend(rule.right.iter().map(|source| source.kind.as_str()));
+    kinds.extend(rule.input.iter().map(|source| source.kind.as_str()));
+    kinds.extend(rule.anchor.iter().map(|source| source.kind.as_str()));
+    kinds.extend(rule.related_kinds.iter().map(String::as_str));
+    if let Some(evidence) = &rule.evidence {
+        kinds.push(evidence.kind.as_str());
+    }
+    for fact_kind in kinds {
+        if !registered.contains(fact_kind) {
+            return Err(RulePackError(format!(
+                "{}: unknown fact kind `{fact_kind}`",
+                rule.id
+            )));
+        }
+    }
+
+    if rule.input_kinds.len() == 1 {
+        let contract = intermed_doctor_core::facts::schema_contract::contract();
+        if let Some(kind) = contract.kind(&rule.input_kinds[0])
+            && kind.complete
+        {
+            for key in rule.where_all.keys().chain(rule.where_not.keys()) {
+                if let Some(attr) = key.strip_prefix("attr:")
+                    && !kind.attrs.contains_key(attr)
+                {
+                    return Err(RulePackError(format!(
+                        "{}: attribute `{attr}` is not declared for `{}`",
+                        rule.id, rule.input_kinds[0]
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -232,6 +320,43 @@ mod tests {
     #[test]
     fn known_alias_in_where_is_accepted() {
         let good = PACK.replace("ALIAS", "m");
+        assert!(parse_rule_pack(&good, "t.json").is_ok());
+    }
+
+    #[test]
+    fn v3_hard_rule_requires_a_proof_contract() {
+        let bad = PACK
+            .replace("intermed-rule-pack-v2", "intermed-rule-pack-v3")
+            .replace("\"severity\": \"warn\"", "\"severity\": \"error\"")
+            .replace("ALIAS", "m");
+        let err = parse_rule_pack(&bad, "t.json").unwrap_err();
+        assert!(err.0.contains("requires an assessment contract"), "{err}");
+    }
+
+    #[test]
+    fn v3_rejects_heuristic_hard_conclusions() {
+        let bad = PACK
+            .replace("intermed-rule-pack-v2", "intermed-rule-pack-v3")
+            .replace("\"severity\": \"warn\"", "\"severity\": \"error\"")
+            .replace(
+                "\"finding\":",
+                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"heuristic\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
+            )
+            .replace("ALIAS", "m");
+        let err = parse_rule_pack(&bad, "t.json").unwrap_err();
+        assert!(err.0.contains("heuristic proof"), "{err}");
+    }
+
+    #[test]
+    fn v3_accepts_a_typed_hard_contract() {
+        let good = PACK
+            .replace("intermed-rule-pack-v2", "intermed-rule-pack-v3")
+            .replace("\"severity\": \"warn\"", "\"severity\": \"error\"")
+            .replace(
+                "\"finding\":",
+                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"deterministic-derivation\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
+            )
+            .replace("ALIAS", "m");
         assert!(parse_rule_pack(&good, "t.json").is_ok());
     }
 }

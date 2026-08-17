@@ -26,7 +26,7 @@ intermed doctor ./mods --json report.json --exit-zero
 
 | Flag | Output |
 |------|--------|
-| `--json [FILE]`  | The full `intermed-doctor-report-v1` report. |
+| `--json [FILE]`  | The full canonical `intermed-doctor-report-v2` report. |
 | `--sarif [FILE]` | SARIF 2.1.0, for code-scanning UIs. |
 | `--html FILE`    | A self-contained HTML report (no network, inlined assets). |
 

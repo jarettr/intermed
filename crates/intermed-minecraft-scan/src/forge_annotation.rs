@@ -12,6 +12,7 @@ use cafebabe::constant_pool::{ConstantPoolItem, LiteralConstant};
 use cafebabe::{ParseOptions, parse_class_with_options};
 
 use intermed_doctor_core::Loader;
+use intermed_doctor_core::bounded_zip::MAX_CLASS_BYTES;
 
 use crate::metadata::Artifact;
 
@@ -29,8 +30,9 @@ const NEOFORGE_MOD_DESCRIPTORS: &[&str] = &[
 /// Forge mod gets an `entrypoint` fact (the `@Mod` class is the entrypoint).
 pub fn discover_mod_entrypoints(
     archive: &mut zip::ZipArchive<std::fs::File>,
-) -> Vec<(String, String)> {
+) -> (Vec<(String, String)>, Vec<String>) {
     let mut out: Vec<(String, String)> = Vec::new();
+    let mut gaps = Vec::new();
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
@@ -39,10 +41,9 @@ pub fn discover_mod_entrypoints(
         if !name.ends_with(".class") || name.contains('$') {
             continue;
         }
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_err() {
+        let Some(bytes) = read_class_bounded(&mut entry, &name, &mut gaps) else {
             continue;
-        }
+        };
         if let Some((mod_id, _loader)) = extract_mod_annotation(&bytes) {
             if out.iter().any(|(id, _)| id == &mod_id) {
                 continue;
@@ -54,12 +55,15 @@ pub fn discover_mod_entrypoints(
             out.push((mod_id, entry_class));
         }
     }
-    out
+    (out, gaps)
 }
 
 /// Scan a jar for `@Mod`-annotated classes when no JSON/TOML/YAML manifest exists.
-pub fn discover_mods_from_jar(archive: &mut zip::ZipArchive<std::fs::File>) -> Vec<Artifact> {
+pub fn discover_mods_from_jar(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> (Vec<Artifact>, Vec<String>) {
     let mut out = Vec::new();
+    let mut gaps = Vec::new();
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
@@ -68,10 +72,9 @@ pub fn discover_mods_from_jar(archive: &mut zip::ZipArchive<std::fs::File>) -> V
         if !name.ends_with(".class") || name.contains('$') {
             continue;
         }
-        let mut bytes = Vec::new();
-        if entry.read_to_end(&mut bytes).is_err() {
+        let Some(bytes) = read_class_bounded(&mut entry, &name, &mut gaps) else {
             continue;
-        }
+        };
         if let Some((mod_id, loader)) = extract_mod_annotation(&bytes) {
             if out.iter().any(|a: &Artifact| a.id == mod_id) {
                 continue;
@@ -117,7 +120,27 @@ pub fn discover_mods_from_jar(archive: &mut zip::ZipArchive<std::fs::File>) -> V
             });
         }
     }
-    out
+    (out, gaps)
+}
+
+fn read_class_bounded<R: Read>(
+    entry: &mut R,
+    name: &str,
+    gaps: &mut Vec<String>,
+) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut bounded = entry.take(MAX_CLASS_BYTES.saturating_add(1));
+    if bounded.read_to_end(&mut bytes).is_err() {
+        gaps.push(format!("failed to read class entry {name}"));
+        return None;
+    }
+    if bytes.len() as u64 > MAX_CLASS_BYTES {
+        gaps.push(format!(
+            "class entry {name} exceeds {MAX_CLASS_BYTES} byte cap"
+        ));
+        return None;
+    }
+    Some(bytes)
 }
 
 fn extract_mod_annotation(class_bytes: &[u8]) -> Option<(String, Loader)> {
@@ -347,7 +370,8 @@ mod tests {
         );
         let file = std::fs::File::open(&jar).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
-        let mods = discover_mods_from_jar(&mut archive);
+        let (mods, gaps) = discover_mods_from_jar(&mut archive);
+        assert!(gaps.is_empty());
         assert_eq!(mods.len(), 1);
         assert_eq!(mods[0].id, "testmod");
         std::fs::remove_dir_all(dir).ok();

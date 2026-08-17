@@ -21,6 +21,7 @@ use serde::Deserialize;
 use crate::collector::{CollectCtx, Collector, CollectorOutcome};
 use crate::layer::Layer;
 use crate::rule::{Rule, RuleCtx};
+use crate::scope::{CollectorScope, CompletenessModel, TargetRegion};
 use crate::target::Target;
 
 const EXTRACTOR: &str = "modpack-manifest";
@@ -35,11 +36,45 @@ impl Collector for ModpackManifestCollector {
     fn layer(&self) -> Layer {
         Layer::TargetDetection
     }
+    fn scope(&self) -> CollectorScope {
+        CollectorScope::new(CompletenessModel::AllOrNothing)
+            .produces([
+                kind::MODPACK_MANIFEST,
+                kind::MODPACK_FILE_REF,
+                kind::MODPACK_PROJECT_REF,
+                kind::MODPACK_INCOMPLETE,
+            ])
+            .regions([TargetRegion::Manifest, TargetRegion::Artifacts])
+    }
     fn applies(&self, target: &Target) -> bool {
-        find_manifest(target).is_some()
+        target.kind.has_mods() || find_manifest(target).is_some()
     }
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
-        let Some((root, manifest)) = find_manifest(ctx.target) else {
+        let discovered = ctx
+            .settings
+            .pack_manifest
+            .as_deref()
+            .map(|path| {
+                parse_manifest_locator(path).map(|manifest| {
+                    let root = ctx
+                        .target
+                        .game_root
+                        .clone()
+                        .unwrap_or_else(|| ctx.target.path.clone());
+                    (root, manifest)
+                })
+            })
+            .unwrap_or_else(|| find_manifest(ctx.target));
+        let Some((root, manifest)) = discovered else {
+            if let Some(path) = &ctx.settings.pack_manifest {
+                return CollectorOutcome::incomplete(
+                    0,
+                    format!(
+                        "explicit pack manifest could not be parsed: {}",
+                        path.display()
+                    ),
+                );
+            }
             return CollectorOutcome::skipped("no modpack manifest present");
         };
         let mut emitted = 0usize;
@@ -279,6 +314,45 @@ fn find_manifest(target: &Target) -> Option<(std::path::PathBuf, DiscoveredManif
     None
 }
 
+fn parse_manifest_locator(path: &Path) -> Option<DiscoveredManifest> {
+    let file_name = path.file_name().and_then(|name| name.to_str());
+    if file_name == Some("modrinth.index.json") {
+        return parse_modrinth(path).map(|parsed| DiscoveredManifest {
+            locator: path.display().to_string(),
+            parsed,
+        });
+    }
+    if file_name == Some("manifest.json") {
+        return parse_curseforge(path).map(|parsed| DiscoveredManifest {
+            locator: path.display().to_string(),
+            parsed,
+        });
+    }
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    if let Some(text) = crate::bounded_zip::read_zip_text_opt(
+        &mut archive,
+        "modrinth.index.json",
+        crate::bounded_zip::MAX_MANIFEST_BYTES,
+    ) && let Some(parsed) = parse_modrinth_text(&text)
+    {
+        return Some(DiscoveredManifest {
+            locator: format!("{}!modrinth.index.json", path.display()),
+            parsed,
+        });
+    }
+    let text = crate::bounded_zip::read_zip_text_opt(
+        &mut archive,
+        "manifest.json",
+        crate::bounded_zip::MAX_MANIFEST_BYTES,
+    )?;
+    parse_curseforge_text(&text).map(|parsed| DiscoveredManifest {
+        locator: format!("{}!manifest.json", path.display()),
+        parsed,
+    })
+}
+
 #[derive(Deserialize)]
 struct RawModrinth {
     #[serde(rename = "formatVersion", default)]
@@ -300,7 +374,11 @@ struct RawModrinthFile {
 
 fn parse_modrinth(path: &Path) -> Option<ParsedManifest> {
     let text = std::fs::read_to_string(path).ok()?;
-    let raw: RawModrinth = serde_json::from_str(&text).ok()?;
+    parse_modrinth_text(&text)
+}
+
+fn parse_modrinth_text(text: &str) -> Option<ParsedManifest> {
+    let raw: RawModrinth = serde_json::from_str(text).ok()?;
     if raw.format_version == 0 {
         return None;
     }
@@ -345,7 +423,11 @@ fn default_true() -> bool {
 
 fn parse_curseforge(path: &Path) -> Option<ParsedManifest> {
     let text = std::fs::read_to_string(path).ok()?;
-    let raw: RawCurse = serde_json::from_str(&text).ok()?;
+    parse_curseforge_text(&text)
+}
+
+fn parse_curseforge_text(text: &str) -> Option<ParsedManifest> {
+    let raw: RawCurse = serde_json::from_str(text).ok()?;
     // A CurseForge manifest must carry a files array to be one we understand.
     if raw.files.is_empty() {
         return None;
@@ -480,6 +562,53 @@ mod tests {
         let findings = ModpackIntegrityRule.evaluate(&rctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn explicit_mrpack_is_used_for_materialization_coverage() {
+        use std::io::Write as _;
+
+        let root = temp_dir("explicit-mrpack");
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::write(root.join("mods/one.jar"), b"jar").unwrap();
+        let archive_path = root.join("source.mrpack");
+        let archive_file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(archive_file);
+        archive
+            .start_file(
+                "modrinth.index.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        archive
+            .write_all(
+                br#"{"formatVersion":1,"name":"Explicit","files":[
+                    {"path":"mods/one.jar","hashes":{}},
+                    {"path":"mods/two.jar","hashes":{}},
+                    {"path":"mods/three.jar","hashes":{}}
+                ]}"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let target = target_at(&root);
+        let mut store = FactStore::new();
+        let settings = crate::settings::DiagnosisSettings {
+            pack_manifest: Some(archive_path),
+            ..crate::settings::DiagnosisSettings::default()
+        };
+        let mut ctx = CollectCtx {
+            target: &target,
+            store: &mut store,
+            jar_cache: None,
+            settings: &settings,
+        };
+        let outcome = ModpackManifestCollector.collect(&mut ctx);
+        assert_eq!(outcome.status, crate::collector::CollectorStatus::Active);
+        assert_eq!(store.by_kind(kind::MODPACK_MANIFEST).count(), 1);
+        assert_eq!(store.by_kind(kind::MODPACK_FILE_REF).count(), 3);
+        assert_eq!(store.by_kind(kind::MODPACK_INCOMPLETE).count(), 1);
         std::fs::remove_dir_all(root).ok();
     }
 

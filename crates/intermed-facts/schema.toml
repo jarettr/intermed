@@ -199,6 +199,7 @@ complete = true
 attrs.layer = "string"
 attrs.reason = "string"
 attrs.relevant_entry = "bool"
+attrs.coverage_gap = "string"
 
 [kind.resource_writer]
 subject = "mod id"
@@ -220,6 +221,8 @@ attrs.safe_merge = "bool"
 attrs.order_dependent = "bool"
 attrs.load_order_confidence = "string"
 attrs.writer_count = "int"
+attrs.language_merge_class = "string"
+attrs.coverage = "string"
 
 [kind.json_merge_candidate]
 subject = "json merge candidate"

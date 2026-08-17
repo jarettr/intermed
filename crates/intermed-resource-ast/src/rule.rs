@@ -6,7 +6,10 @@
 //! behaviour-changing disagreement the byte-level Layer E cannot see, so it adds
 //! signal without adding false positives.
 
-use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
+    ProofKind, Severity,
+};
 use intermed_doctor_core::facts::{Fact, kind};
 use intermed_doctor_core::{Rule, RuleCtx};
 
@@ -24,6 +27,26 @@ pub struct ResourceSemanticRule;
 impl Rule for ResourceSemanticRule {
     fn id(&self) -> &'static str {
         "resource-semantics"
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([
+                kind::RESOURCE_SEMANTIC_DIFF,
+                kind::RESOURCE_REFERENCE,
+                kind::RESOURCE_AST_PARSED,
+            ])
+            .layers([intermed_doctor_core::Layer::DataSemantics])
+            .regions([
+                intermed_doctor_core::TargetRegion::Datapacks,
+                intermed_doctor_core::TargetRegion::VanillaResources,
+                intermed_doctor_core::TargetRegion::Scripts,
+            ])
+            .coverage([
+                CoverageRequirement::RelevantResources,
+                CoverageRequirement::KnownRuntimeMutators,
+            ])
+            .proofs([ProofKind::Observation, ProofKind::DeterministicDerivation])
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
@@ -322,7 +345,9 @@ fn presentation(diff_kind: &str) -> Option<DiffPresentation> {
 /// Parse the central `severity` attr the collector derived from the diff's impact.
 fn severity_from_attr(s: Option<&str>) -> Severity {
     match s {
-        Some("fatal") => Severity::Fatal,
+        // Static resource semantics can establish a serious load risk but not
+        // process termination. Fatal is reserved for terminal runtime evidence.
+        Some("fatal") => Severity::Error,
         Some("error") => Severity::Error,
         Some("warn") => Severity::Warn,
         Some("info") => Severity::Info,
@@ -348,6 +373,12 @@ fn per_path_override_finding(f: &Fact) -> Option<Finding> {
     };
     Some(
         Finding::builder("resource-semantics", format!("{diff_kind}:{path}"))
+            .family(diff_kind)
+            .coverage_requirement(CoverageRequirement::RelevantResources)
+            .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
+            .proof_kind(ProofKind::DeterministicDerivation)
+            .impact(Impact::PackHealth)
+            .evidence_origin(EvidenceOrigin::StaticExact)
             .severity(severity)
             .category(Category::Resource)
             .title(title)

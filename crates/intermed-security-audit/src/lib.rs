@@ -134,6 +134,20 @@ impl Collector for SecurityCollector {
         Layer::Security
     }
 
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::PerArtifact,
+        )
+        .produces([
+            kind::USES_PROCESS_SPAWN,
+            kind::USES_SOCKET,
+            kind::USES_REFLECTION_SET_ACCESSIBLE,
+            kind::USES_UNSAFE,
+            kind::USES_NATIVE_LIBRARY,
+        ])
+        .regions([intermed_doctor_core::TargetRegion::Artifacts])
+    }
+
     fn applies(&self, target: &Target) -> bool {
         mods_dir(target).is_some()
     }
@@ -158,7 +172,16 @@ impl Collector for SecurityCollector {
                 if suppressed > 0 {
                     summary.push_str(&format!(", {suppressed} mod(s) below finding threshold"));
                 }
-                CollectorOutcome::active(emitted, summary)
+                if !scan.failures.is_empty()
+                    || scan
+                        .records
+                        .iter()
+                        .any(|record| !record.truncations.is_empty())
+                {
+                    CollectorOutcome::incomplete(emitted, summary)
+                } else {
+                    CollectorOutcome::active(emitted, summary)
+                }
             }
             Err(e) => CollectorOutcome::failed(e.to_string()),
         }
@@ -444,6 +467,20 @@ pub fn security_findings_from_drafts(
 impl Rule for SecurityApiRule {
     fn id(&self) -> &'static str {
         "security-api-risk"
+    }
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([
+                kind::USES_PROCESS_SPAWN,
+                kind::USES_SOCKET,
+                kind::USES_REFLECTION_SET_ACCESSIBLE,
+                kind::USES_UNSAFE,
+                kind::USES_NATIVE_LIBRARY,
+            ])
+            .layers([Layer::Security])
+            .regions([intermed_doctor_core::TargetRegion::Artifacts])
+            .coverage([intermed_doctor_core::evidence::CoverageRequirement::LocalArtifact])
+            .proofs([intermed_doctor_core::evidence::ProofKind::Observation])
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {

@@ -278,6 +278,20 @@ impl Collector for SbomCollector {
         Layer::Sbom
     }
 
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::PerArtifact,
+        )
+        .produces([
+            kind::CHECKSUM,
+            kind::SIGNATURE_STATUS,
+            kind::TRUST_SCORE,
+            kind::ARTIFACT_IDENTITY,
+            kind::SBOM,
+        ])
+        .regions([intermed_doctor_core::TargetRegion::Artifacts])
+    }
+
     fn applies(&self, target: &Target) -> bool {
         mods_dir(target).is_some()
     }
@@ -296,7 +310,12 @@ impl Collector for SbomCollector {
         match scan_mods_dir_inner(&dir, ctx.jar_cache, &ctx.settings.scan, corpus_ids.as_ref()) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);
-                CollectorOutcome::active(
+                let outcome = if scan.failures.is_empty() {
+                    CollectorOutcome::active
+                } else {
+                    CollectorOutcome::incomplete
+                };
+                outcome(
                     emitted,
                     format!(
                         "{} artifact(s), {} scan failure(s)",
@@ -723,10 +742,8 @@ fn scan_mods_dir_inner(
         .map(|jar| {
             let archive = file_name_of(jar);
             let cached = match cache {
-                Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || {
-                    scan_jar_cached(jar, corpus_mod_ids)
-                }),
-                None => scan_jar_cached(jar, corpus_mod_ids),
+                Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || scan_jar_cached(jar)),
+                None => scan_jar_cached(jar),
             };
             (archive, cached)
         })
@@ -740,6 +757,12 @@ fn scan_mods_dir_inner(
                 // The payload is shared by content hash; the locator is specific
                 // to the current pack and must not leak from the first cache fill.
                 record.archive = archive;
+                record.in_corpus_lock = record
+                    .mod_id
+                    .as_ref()
+                    .is_some_and(|id| corpus_mod_ids.is_some_and(|set| set.contains(id)));
+                record.trust_breakdown.corpus_lock = if record.in_corpus_lock { 7 } else { 0 };
+                record.trust_score = record.trust_breakdown.total();
                 records.push(record);
             }
             CachedSbomJar::Err(reason) => failures.push(SbomScanFailure { archive, reason }),
@@ -759,8 +782,8 @@ enum CachedSbomJar {
     Err(String),
 }
 
-fn scan_jar_cached(jar: &Path, corpus_mod_ids: Option<&BTreeSet<String>>) -> CachedSbomJar {
-    match scan_jar(jar, corpus_mod_ids) {
+fn scan_jar_cached(jar: &Path) -> CachedSbomJar {
+    match scan_jar(jar, None) {
         Ok(record) => CachedSbomJar::Ok(record),
         Err(e) => CachedSbomJar::Err(e.to_string()),
     }

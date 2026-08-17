@@ -5,7 +5,7 @@
 //! diagnosis. This mirrors the old `DoctorReport` "report-DNA" (ANSI render +
 //! JSON + SARIF) the design doc asked us to carry forward.
 
-use intermed_doctor_core::DoctorReport;
+use intermed_doctor_core::{DoctorReport, REPORT_SCHEMA_V1};
 use intermed_facts::Fact;
 
 mod demo;
@@ -28,12 +28,60 @@ pub use terminal::render_terminal;
 pub enum Format {
     /// Human-readable, optionally coloured.
     Terminal { color: bool },
-    /// Pretty-printed `intermed-doctor-report-v1` JSON.
+    /// Pretty-printed canonical `intermed-doctor-report-v2` JSON.
     Json,
     /// SARIF 2.1.0 for IDE / CI ingestion.
     Sarif,
     /// Self-contained static HTML (lab-matrix style).
     Html,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSchema {
+    V1,
+    V2,
+}
+
+/// Render the canonical v2 report or the temporary lossy v1 compatibility
+/// projection. The v1 writer deliberately removes trust-contract fields that
+/// did not exist in that schema; the v1 reader remains supported through serde
+/// defaults on the v2 model.
+pub fn render_json_schema(report: &DoctorReport, schema: ReportSchema) -> String {
+    let mut value = match serde_json::to_value(report) {
+        Ok(value) => value,
+        Err(error) => return format!("{{\"error\":\"serialization failed: {error}\"}}"),
+    };
+    if schema == ReportSchema::V1
+        && let Some(root) = value.as_object_mut()
+    {
+        root.insert(
+            "schema".to_string(),
+            serde_json::Value::String(REPORT_SCHEMA_V1.to_string()),
+        );
+        root.remove("target_capabilities");
+        if let Some(findings) = root
+            .get_mut("findings")
+            .and_then(|value| value.as_array_mut())
+        {
+            for finding in findings {
+                if let Some(finding) = finding.as_object_mut() {
+                    for field in [
+                        "semantic_id",
+                        "occurrence_id",
+                        "family",
+                        "channel",
+                        "proposed_impact",
+                        "evidence_origins",
+                        "assessment",
+                    ] {
+                        finding.remove(field);
+                    }
+                }
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value)
+        .unwrap_or_else(|error| format!("{{\"error\":\"serialization failed: {error}\"}}"))
 }
 
 /// Render a report in the requested format (without the fact corpus).
@@ -46,8 +94,7 @@ pub fn render(report: &DoctorReport, format: Format) -> String {
 pub fn render_with_facts(report: &DoctorReport, facts: &[Fact], format: Format) -> String {
     match format {
         Format::Terminal { color } => terminal::render_terminal_with_facts(report, color, facts),
-        Format::Json => serde_json::to_string_pretty(report)
-            .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
+        Format::Json => render_json_schema(report, ReportSchema::V2),
         Format::Sarif => serde_json::to_string_pretty(&to_sarif_with_facts(report, facts))
             .unwrap_or_else(|e| format!("{{\"error\":\"serialization failed: {e}\"}}")),
         Format::Html => {
@@ -120,7 +167,14 @@ mod tests {
         assert!(term.contains("ERROR") || term.contains("error"));
 
         let json = render(&r, Format::Json);
-        assert!(json.contains("intermed-doctor-report-v1"));
+        assert!(json.contains("intermed-doctor-report-v2"));
+
+        let v1 = render_json_schema(&r, ReportSchema::V1);
+        assert!(v1.contains("intermed-doctor-report-v1"));
+        assert!(!v1.contains("\"assessment\""));
+        let restored: DoctorReport = serde_json::from_str(&v1).expect("v1 remains readable");
+        assert_eq!(restored.schema, "intermed-doctor-report-v1");
+        assert_eq!(restored.findings.len(), r.findings.len());
 
         let sarif = render(&r, Format::Sarif);
         assert!(sarif.contains("\"version\": \"2.1.0\""));

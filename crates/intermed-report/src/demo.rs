@@ -591,7 +591,7 @@ fn default_capabilities() -> Vec<String> {
             .into(),
         "Layer F mixin-risk intelligence (handler effects, overlaps, overwrite detection)".into(),
         "Layer G/H security notes and SPDX SBOM export".into(),
-        "Terminal, JSON (`intermed-doctor-report-v1`), SARIF, and self-contained HTML outputs"
+        "Terminal, JSON (`intermed-doctor-report-v2`), SARIF, and self-contained HTML outputs"
             .into(),
         "deps graph, mixin-map, and profile timings on the hero pack".into(),
     ]

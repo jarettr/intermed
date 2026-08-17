@@ -16,8 +16,8 @@ use intermed_doctor_core::bounded_zip;
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::jar_meta;
 use intermed_doctor_core::{
-    CollectCtx, Collector, CollectorOutcome, Layer, Loader, MetadataLevel, Target,
-    list_jar_archives,
+    CollectCtx, Collector, CollectorOutcome, CollectorScope, CompletenessModel, Layer, Loader,
+    MetadataLevel, Target, TargetRegion, list_jar_archives,
 };
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,18 @@ impl Collector for MetadataCollector {
     }
     fn layer(&self) -> Layer {
         Layer::Metadata
+    }
+    fn scope(&self) -> CollectorScope {
+        CollectorScope::new(CompletenessModel::PerArtifact)
+            .produces([
+                kind::MOD,
+                kind::MOD_METADATA,
+                kind::MOD_CAPABILITY,
+                kind::DEPENDENCY,
+                kind::PROVIDED_DEPENDENCY,
+                kind::UNPARSEABLE_ARCHIVE,
+            ])
+            .regions([TargetRegion::Artifacts, TargetRegion::Metadata])
     }
     fn applies(&self, target: &Target) -> bool {
         target.kind.has_mods()
@@ -1447,19 +1459,22 @@ fn parse_jar(
 
     // Report entries skipped by the per-entry caps (the bounded readers enforce
     // them; this is the diagnostic half).
-    let truncations = oversized_entries(&mut archive);
+    let mut truncations = oversized_entries(&mut archive);
 
     let parsed_archive = parse_archive(&mut archive, expected_loader)?;
     let mut artifacts = parsed_archive.artifacts;
     if artifacts.is_empty() {
-        artifacts = forge_annotation::discover_mods_from_jar(&mut archive);
+        let (discovered, gaps) = forge_annotation::discover_mods_from_jar(&mut archive);
+        artifacts = discovered;
+        truncations.extend(gaps);
     } else if artifacts
         .iter()
         .any(|a| matches!(a.loader, Loader::Forge | Loader::NeoForge) && a.entrypoints.is_empty())
     {
         // A `mods.toml` names the mod but not its entry class; scan `@Mod` classes
         // so Forge/NeoForge mods still get an `entrypoint` (phase = mod).
-        let entrypoints = forge_annotation::discover_mod_entrypoints(&mut archive);
+        let (entrypoints, gaps) = forge_annotation::discover_mod_entrypoints(&mut archive);
+        truncations.extend(gaps);
         for (mod_id, class) in entrypoints {
             if let Some(art) = artifacts.iter_mut().find(|a| a.id == mod_id)
                 && art.entrypoints.is_empty()
@@ -1491,7 +1506,7 @@ fn parse_jar(
 
     enrich_access_and_coremods(&mut archive, &mut artifacts);
     if metadata_level == MetadataLevel::Full {
-        enrich_entrypoint_intelligence(&mut archive, &mut artifacts);
+        truncations.extend(enrich_entrypoint_intelligence(&mut archive, &mut artifacts));
     }
 
     if let Some(text) = read_entry(&mut archive, "META-INF/neoforge.mods.toml")
@@ -1671,7 +1686,7 @@ fn enrich_access_and_coremods<R: Read + Seek>(
 fn enrich_entrypoint_intelligence<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     artifacts: &mut [Artifact],
-) {
+) -> Vec<String> {
     // Per-entrypoint detail: precise type / events / priority for each declared
     // entrypoint class (drives `entrypoint_detail`).
     for artifact in artifacts.iter_mut() {
@@ -1717,6 +1732,16 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
         artifact.bytecode.referenced_packages = intel.referenced_packages.clone();
         artifact.bytecode.references_truncated = intel.references_truncated;
     }
+    intel
+        .coverage_gaps
+        .into_iter()
+        .map(|gap| {
+            format!(
+                "bytecode metadata scan incomplete ({}/{} class entries processed): {gap}",
+                intel.classes_scanned, intel.classes_seen
+            )
+        })
+        .collect()
 }
 
 fn directive_to_transform(d: &access::AccessDirective) -> AccessTransform {

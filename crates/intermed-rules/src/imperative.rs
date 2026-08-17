@@ -5,13 +5,16 @@
 
 use std::collections::BTreeSet;
 
-use intermed_doctor_core::evidence::{Category, Finding, FixCandidate, Severity};
+use intermed_doctor_core::evidence::{
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
+    ProofKind, Severity,
+};
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{Rule, RuleCtx};
 
 use crate::declarative::DeclarativeRulePack;
 use crate::interpreter::evaluate_pack;
-use crate::pack::default_core_pack_v2;
+use crate::pack::default_core_pack_v3;
 
 /// Two artifacts claim the same id.
 pub struct DuplicateIdRule;
@@ -21,7 +24,7 @@ impl Rule for DuplicateIdRule {
         "duplicate-id"
     }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
+        Ok(evaluate_pack(&default_core_pack_v3(), ctx)
             .into_iter()
             .filter(|f| f.rule_id == "duplicate-id")
             .collect())
@@ -36,7 +39,7 @@ impl Rule for LoaderMismatchRule {
         "loader-mismatch"
     }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
+        Ok(evaluate_pack(&default_core_pack_v3(), ctx)
             .into_iter()
             .filter(|f| f.rule_id == "loader-mismatch")
             .collect())
@@ -78,25 +81,51 @@ impl Rule for MixedLoaderPackRule {
         }
 
         let list: Vec<&str> = loaders.iter().map(String::as_str).collect();
-        Ok(vec![
-            Finding::builder(self.id(), "mixed-loader-pack:mods-dir")
-                .severity(Severity::Warn)
-                .category(Category::Loader)
-                .title("Mixed mod loaders in directory")
-                .explanation(format!(
-                    "This directory contains mods for multiple loaders ({}) but no instance \
-                     loader was detected, so per-mod loader-mismatch rules did not run. Such a \
-                     mix cannot load together in one Minecraft instance.",
-                    list.join(", ")
-                ))
-                .fix(FixCandidate::advice(
-                    "Split mods by loader into separate instance directories, or point \
-                     intermed at a full instance/server root so the environment loader is known.",
-                ))
-                .tag("loader")
-                .tag("mixed-pack")
-                .build(),
-        ])
+        let bridges = ctx
+            .store
+            .by_kind(kind::COMPATIBILITY_BRIDGE)
+            .filter(|fact| fact.attr("scope") == Some("mod-runtime"))
+            .collect::<Vec<_>>();
+        let bridge_ids = bridges
+            .iter()
+            .map(|fact| fact.subject.as_str())
+            .collect::<Vec<_>>();
+        let bridge_detected = !bridges.is_empty();
+        let explanation = if bridge_detected {
+            format!(
+                "This directory contains descriptors for multiple loaders ({}) and runtime bridge evidence ({}) but no authoritative instance loader. The mixed-loader state is observed; whether every bridged artifact is supported is undecidable without the target loader and bridge compatibility contract.",
+                list.join(", "),
+                bridge_ids.join(", ")
+            )
+        } else {
+            format!(
+                "This directory contains descriptors for multiple loaders ({}) but no authoritative instance loader or supported runtime bridge was detected. Compatibility cannot be asserted until the target loader is known.",
+                list.join(", ")
+            )
+        };
+        let mut builder = Finding::builder(self.id(), "mixed-loader-pack:mods-dir")
+            .severity(Severity::Warn)
+            .category(Category::Loader)
+            .title(if bridge_detected {
+                "Mixed loaders with compatibility bridge"
+            } else {
+                "Mixed mod loaders; target loader unknown"
+            })
+            .explanation(explanation)
+            .fix(FixCandidate::advice(
+                "Analyze the full instance or supply its pack manifest. If a bridge is intentional, verify that it supports each affected artifact and target loader version.",
+            ))
+            .coverage_requirement(CoverageRequirement::AuthoritativeLoader)
+            .coverage_requirement(CoverageRequirement::KnownBridgeSemantics)
+            .proof_kind(ProofKind::Observation)
+            .impact(Impact::CompatibilityRisk)
+            .evidence_origin(EvidenceOrigin::StaticExact)
+            .tag("loader")
+            .tag("mixed-pack");
+        for bridge in bridges {
+            builder = builder.evidence(EvidenceEdge::subject(bridge.id));
+        }
+        Ok(vec![builder.build()])
     }
 }
 
@@ -112,7 +141,7 @@ impl Rule for SideMismatchRule {
         "side-mismatch"
     }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        Ok(evaluate_pack(&default_core_pack_v2(), ctx)
+        Ok(evaluate_pack(&default_core_pack_v3(), ctx)
             .into_iter()
             .filter(|f| f.id.starts_with("side-mismatch:"))
             .collect())

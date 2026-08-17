@@ -1,7 +1,7 @@
 //! Integration tests for the embedded DuckDB backend (requires `duckdb` feature).
 
 use intermed_doctor_core::facts::{FactStore, kind};
-use intermed_doctor_core::report::{DoctorReport, Summary, TargetView};
+use intermed_doctor_core::report::{DoctorReport, REPORT_SCHEMA_V2, Summary, TargetView};
 use intermed_doctor_core::target::{Environment, Target, TargetKind};
 use intermed_doctor_core::{Rule, RuleCtx};
 use intermed_duckdb::{DuckStore, DuckdbRulePack, schema::compute_run_id};
@@ -60,7 +60,7 @@ fn persist_run_survives_duplicate_fact_ids_in_batch() {
     facts.push(facts[0].clone());
 
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -75,6 +75,7 @@ fn persist_run_survives_duplicate_fact_ids_in_batch() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),
@@ -125,7 +126,7 @@ fn persist_many_mixin_effects_is_idempotent() {
     }
     let facts = store.all().to_vec();
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -140,6 +141,7 @@ fn persist_many_mixin_effects_is_idempotent() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),
@@ -184,7 +186,7 @@ fn persist_run_is_idempotent() {
         .emit();
     let facts = store.all().to_vec();
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -199,6 +201,7 @@ fn persist_run_is_idempotent() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),
@@ -249,7 +252,7 @@ fn readonly_open_rejects_writes_but_allows_select() {
         .emit();
     let facts = store.all().to_vec();
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -264,6 +267,7 @@ fn readonly_open_rejects_writes_but_allows_select() {
         fact_stats: store.stats(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),
@@ -350,7 +354,9 @@ fn mixin_overlap_sql_backend_surfaces_finding() {
         findings[0].id,
         "mixin-overlap:net.minecraft.client.render.WorldRenderer"
     );
-    assert_eq!(findings[0].severity, Severity::Warn);
+    // Plain co-location is navigational context. It is elevated only when
+    // ordering sensitivity or another concrete failure mode is established.
+    assert_eq!(findings[0].severity, Severity::Note);
     assert!(findings[0].evidence.iter().any(|e| e.fact == id));
 }
 
@@ -550,7 +556,7 @@ fn top_mixin_overlaps_query_runs_against_duckdb() {
         .attr("mods", "lithium,sodium")
         .emit();
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -565,6 +571,7 @@ fn top_mixin_overlaps_query_runs_against_duckdb() {
         fact_stats: fact_store.stats(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),
@@ -604,7 +611,7 @@ fn risk_patterns_view_and_method_roll_up_findings() {
             .build(),
     ];
     let report = DoctorReport {
-        schema: "intermed-doctor-report-v1".into(),
+        schema: REPORT_SCHEMA_V2.into(),
         tool_version: "0.1.0".into(),
         generated_at: chrono::Utc::now(),
         target: TargetView {
@@ -619,6 +626,7 @@ fn risk_patterns_view_and_method_roll_up_findings() {
         fact_stats: std::collections::BTreeMap::new(),
         collectors: Vec::new(),
         analysis_configuration: Default::default(),
+        target_capabilities: Default::default(),
         mixin_coverage: Default::default(),
         rules: Vec::new(),
         operational_errors: Vec::new(),

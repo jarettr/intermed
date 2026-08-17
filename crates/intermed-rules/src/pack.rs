@@ -7,7 +7,10 @@ use intermed_doctor_core::facts::kind;
 
 use crate::RulePackError;
 use crate::convert::upgrade_pack_to_v2;
-use crate::model::{FindingTemplate, RULE_PACK_SCHEMA, RuleKind, RulePack, RuleSpec};
+use crate::model::{
+    FindingTemplate, MissingPrerequisiteBehavior, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V3,
+    RuleAssessmentContract, RuleKind, RulePack, RuleSpec,
+};
 use crate::validate::validate_rule_pack;
 
 /// Embedded v2 core pack (single source of truth for Layer-J declarative rules).
@@ -123,7 +126,7 @@ pub fn default_core_pack() -> RulePack {
 /// Core pack without mixin overlap/overwrite rules (Layer F owns those in imperative mode).
 #[must_use]
 pub fn default_core_pack_without_mixin() -> RulePack {
-    let mut pack = default_core_pack_v2();
+    let mut pack = default_core_pack_v3();
     pack.rules.retain(|r| {
         !r.id.starts_with("mixin-")
             && !r
@@ -140,6 +143,62 @@ pub fn default_core_pack_v2() -> RulePack {
     let mut pack = parse_rule_pack(EMBEDDED_CORE_V2, "embedded-core-v2.json")
         .expect("embedded core rule pack is valid");
     pack.rules.extend(log_signal_rules());
+    pack
+}
+
+/// Canonical 0.1.6 core pack with a typed trust contract on every rule.
+#[must_use]
+pub fn default_core_pack_v3() -> RulePack {
+    use intermed_doctor_core::evidence::{CoverageRequirement as C, Impact, ProofKind};
+
+    let mut pack = default_core_pack_v2();
+    pack.schema = RULE_PACK_SCHEMA_V3.to_string();
+    pack.version = "0.1.6".to_string();
+    for rule in &mut pack.rules {
+        let hard = matches!(rule.finding.severity.as_str(), "error" | "fatal");
+        let coverage_requirements = match rule.id.as_str() {
+            "duplicate-id" => vec![C::LocalArtifact],
+            "known-incompatible-mods" => {
+                vec![
+                    C::CompletePack,
+                    C::ActiveDescriptor,
+                    C::KnownBridgeSemantics,
+                ]
+            }
+            "loader-mismatch" => vec![
+                C::AuthoritativeLoader,
+                C::ActiveDescriptor,
+                C::KnownBridgeSemantics,
+            ],
+            "mixin-overlap-hot" | "mixin-overwrite-hot" => {
+                vec![C::CompleteClasspath, C::CompatibleMappings]
+            }
+            "invalid-active-metadata" => vec![C::LocalArtifact, C::ActiveDescriptor],
+            "resource-conflict-classification-unavailable" => vec![C::CompleteResourceBlobs],
+            id if id.starts_with("log-") && hard => vec![C::RuntimeEvidence, C::TerminalRuntime],
+            _ => vec![C::LocalArtifact],
+        };
+        let impact = match rule.finding.category.as_str() {
+            "log" | "runtime" => Impact::RuntimeFailure,
+            "dependency" | "loader" | "mixin" if hard => Impact::StartupBlocking,
+            "dependency" | "loader" | "mixin" => Impact::CompatibilityRisk,
+            "security" => Impact::SecurityReview,
+            "performance" => Impact::PerformanceDegradation,
+            "resource" | "metadata" | "packaging" | "environment" => Impact::PackHealth,
+            _ => Impact::Informational,
+        };
+        rule.assessment = Some(RuleAssessmentContract {
+            impact,
+            proof_kind: if hard {
+                ProofKind::DeterministicDerivation
+            } else {
+                ProofKind::Observation
+            },
+            coverage_requirements,
+            on_missing_prerequisite: MissingPrerequisiteBehavior::Abstain,
+        });
+    }
+    validate_rule_pack(&pack).expect("generated embedded v3 core rule pack is valid");
     pack
 }
 
@@ -194,6 +253,7 @@ fn log_signal_rules() -> Vec<RuleSpec> {
                 match_on: None,
                 settings_refs: BTreeMap::new(),
                 evidence: None,
+                assessment: None,
                 finding: FindingTemplate {
                     id: "log:{subject}:{attr:line}".to_string(),
                     rule_id: None,

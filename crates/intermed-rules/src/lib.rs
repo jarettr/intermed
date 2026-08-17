@@ -43,17 +43,19 @@ pub use imperative::{
     DuplicateIdRule, LoaderMismatchRule, MixedLoaderPackRule, SideMismatchRule, default_rules,
 };
 pub use interpreter::{
-    EvidenceCache, dedupe_by_subject, evaluate_pack, fact_finding_findings,
-    group_distinct_findings, join_findings, matches_where_v1, matching_fact_ids,
+    EvidenceCache, apply_pack_trust_contract, dedupe_by_subject, evaluate_pack,
+    fact_finding_findings, group_distinct_findings, join_findings, matches_where_v1,
+    matching_fact_ids,
 };
 pub use ir_lowering::{Lowering, rule_to_ir};
 pub use merge::merge_rule_packs;
 pub use model::{
-    FactSource, FindingTemplate, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA,
-    RelatedEvidenceSpec, RuleKind, RulePack, RuleSpec,
+    FactSource, FindingTemplate, MissingPrerequisiteBehavior, RULE_PACK_SCHEMA,
+    RULE_PACK_SCHEMA_V2, RULE_PACK_SCHEMA_V3, RULE_REGISTRY_SCHEMA, RelatedEvidenceSpec,
+    RuleAssessmentContract, RuleKind, RulePack, RuleSpec,
 };
 pub use pack::{
-    RulePackCheck, check_rule_packs, default_core_pack, default_core_pack_v2,
+    RulePackCheck, check_rule_packs, default_core_pack, default_core_pack_v2, default_core_pack_v3,
     default_core_pack_without_mixin, load_rule_pack, normalize_pack, parse_rule_pack,
 };
 pub use signing::{
@@ -73,6 +75,100 @@ pub use template::{parse_category, parse_severity, render_template};
 pub use trace::{RuleTraceLine, format_trace, trace_pack};
 pub use tsv::{escape_souffle_symbol, escape_tsv_field};
 pub use validate::validate_rule_pack;
+
+/// Derive the typed input contract of a declarative pack from its fact sources
+/// and v3 assessment declarations. Backends share this exact contract, so an
+/// external engine cannot weaken coverage policy merely by changing execution
+/// strategy.
+pub fn requirements_for_pack(pack: &RulePack) -> intermed_doctor_core::RuleRequirements {
+    use intermed_doctor_core::{Layer, RuleRequirements};
+    let mut requirements = RuleRequirements::default();
+    for rule in &pack.rules {
+        let mut add_kind = |kind: &str| {
+            requirements.required_fact_kinds.insert(kind.to_string());
+            requirements.input_layers.insert(layer_for_fact_kind(kind));
+        };
+        for kind in &rule.input_kinds {
+            add_kind(kind);
+        }
+        for source in [&rule.left, &rule.right, &rule.input, &rule.anchor]
+            .into_iter()
+            .flatten()
+        {
+            add_kind(&source.kind);
+        }
+        for kind in &rule.related_kinds {
+            add_kind(kind);
+        }
+        if let Some(evidence) = &rule.evidence {
+            add_kind(&evidence.kind);
+        }
+        if let Some(contract) = &rule.assessment {
+            requirements
+                .permitted_proof_kinds
+                .insert(contract.proof_kind);
+            for coverage in &contract.coverage_requirements {
+                requirements.minimum_coverage.insert(*coverage);
+                requirements
+                    .required_regions
+                    .extend(regions_for_requirement(*coverage));
+            }
+        }
+    }
+    requirements.input_layers.insert(Layer::Rules);
+    requirements
+}
+
+fn layer_for_fact_kind(kind: &str) -> intermed_doctor_core::Layer {
+    use intermed_doctor_core::Layer;
+    if kind.starts_with("mixin_") || kind == "classpath_coverage" {
+        Layer::Mixin
+    } else if kind.starts_with("resource_") || kind == "archive_collision" {
+        Layer::Resource
+    } else if kind.starts_with("runtime_")
+        || kind == "log_signal"
+        || kind == "crash_anchor"
+        || kind == "throwable_node"
+        || kind == "stack_frame"
+    {
+        Layer::Log
+    } else if kind.starts_with("sbom_") || kind == "artifact_provenance" {
+        Layer::Sbom
+    } else if kind.starts_with("security_") || kind == "sensitive_api_usage" {
+        Layer::Security
+    } else if kind.starts_with("spark_") || kind.starts_with("hot_") {
+        Layer::Performance
+    } else if kind.contains("dependency") || kind == "provides" {
+        Layer::Dependency
+    } else if kind.starts_with("resource_ast") || kind.starts_with("data_") {
+        Layer::DataSemantics
+    } else {
+        Layer::Metadata
+    }
+}
+
+fn regions_for_requirement(
+    requirement: intermed_doctor_core::evidence::CoverageRequirement,
+) -> Vec<intermed_doctor_core::TargetRegion> {
+    use intermed_doctor_core::TargetRegion;
+    use intermed_doctor_core::evidence::CoverageRequirement::*;
+    match requirement {
+        LocalArtifact | CompletePack | CompleteProviderUniverse | ActiveDescriptor => {
+            vec![TargetRegion::Artifacts]
+        }
+        CompleteClasspath => vec![TargetRegion::MinecraftClasspath],
+        RuntimeEvidence | TerminalRuntime => vec![TargetRegion::Logs],
+        RuntimeProfile => vec![TargetRegion::RuntimeProfile],
+        AuthoritativeLoader => vec![TargetRegion::Manifest],
+        KnownBridgeSemantics => vec![TargetRegion::LoaderClasspath],
+        CompatibleMappings => vec![TargetRegion::Mappings],
+        ApplicableMixin => vec![TargetRegion::ModClasspath],
+        CompleteResourceBlobs => vec![TargetRegion::ResourceBlobs],
+        RelevantResources => vec![TargetRegion::Datapacks],
+        CompleteVanillaBaseline => vec![TargetRegion::VanillaResources],
+        KnownRuntimeMutators => vec![TargetRegion::Scripts, TargetRegion::ModClasspath],
+    }
+}
 
 /// Validation / load failure.
 #[derive(Debug, thiserror::Error)]

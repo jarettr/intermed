@@ -65,7 +65,8 @@ defaults to the current directory. The target kind is auto-detected.
 
 | Flag | Effect |
 |------|--------|
-| `--json [FILE]` | `intermed-doctor-report-v1` JSON, to stdout or a file. |
+| `--json [FILE]` | Canonical `intermed-doctor-report-v2` JSON, to stdout or a file. |
+| `--report-schema <v1\|v2>` | Select JSON schema; v2 is canonical, v1 is a temporary lossy compatibility writer. |
 | `--sarif [FILE]` | SARIF 2.1.0. |
 | `--html <FILE>` | A self-contained HTML report. |
 | `--explain <FINDING_ID>` | Print one finding with its full evidence chain, and exit. |

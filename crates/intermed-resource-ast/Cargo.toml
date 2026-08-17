@@ -8,6 +8,7 @@ description = "Layer M — resource/data semantics (typed resource AST over Laye
 
 [dependencies]
 intermed-doctor-core.workspace = true
+intermed-evidence.workspace = true
 intermed-resource-identity.workspace = true
 rayon.workspace = true
 serde.workspace = true

@@ -6,7 +6,10 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use intermed_doctor_core::RuleCtx;
-use intermed_doctor_core::evidence::{EvidenceEdge, Finding, FixCandidate};
+use intermed_doctor_core::evidence::{
+    AssessmentDisposition, CertaintyTier, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate,
+    PrerequisiteFailure, Severity,
+};
 use intermed_doctor_core::facts::{Fact, FactId};
 
 use crate::expr::{ExprCtx, eval_bool, resolve_term, term_value};
@@ -34,7 +37,39 @@ pub fn evaluate_pack<'a>(pack: &RulePack, ctx: &RuleCtx<'a>) -> Vec<Finding> {
             RuleKind::Correlation => evaluate_correlation(ctx, spec, &settings, &mut out, &cache),
         }
     }
+    apply_pack_trust_contract(pack, &mut out);
     out
+}
+
+/// Apply schema-level safety after any backend has materialized findings.
+pub fn apply_pack_trust_contract(pack: &RulePack, findings: &mut [Finding]) {
+    if pack.schema == crate::RULE_PACK_SCHEMA_V3 {
+        return;
+    }
+    for finding in findings.iter_mut().filter(|finding| {
+        matches!(finding.severity, Severity::Error | Severity::Fatal)
+            && !finding
+                .machine_tags
+                .iter()
+                .any(|tag| tag == "legacy-rule-pack-no-proof-contract")
+    }) {
+        let prior = finding.severity;
+        finding.severity = Severity::Warn;
+        finding.confidence = finding.confidence.min(0.6);
+        finding
+            .machine_tags
+            .push("legacy-rule-pack-no-proof-contract".to_string());
+        finding.assessment.disposition = AssessmentDisposition::Downgraded;
+        finding.assessment.certainty = CertaintyTier::Undecidable;
+        finding.assessment.blockers.push(PrerequisiteFailure {
+            code: "legacy-rule-pack-has-no-proof-contract".to_string(),
+            requirement: intermed_doctor_core::evidence::CoverageRequirement::LocalArtifact,
+            detail: format!(
+                "{} does not declare the v3 assessment contract; proposed {prior:?} is capped at Warn",
+                pack.schema
+            ),
+        });
+    }
 }
 
 fn settings_literals(
@@ -688,6 +723,23 @@ fn build_finding(
         .title(title)
         .explanation(explanation)
         .confidence(default_confidence(category));
+    if let Some(contract) = &spec.assessment {
+        b = b
+            .impact(contract.impact)
+            .proof_kind(contract.proof_kind)
+            .evidence_origin(match contract.proof_kind {
+                intermed_doctor_core::evidence::ProofKind::Observation => {
+                    EvidenceOrigin::StaticExact
+                }
+                intermed_doctor_core::evidence::ProofKind::DeterministicDerivation => {
+                    EvidenceOrigin::StaticInferred
+                }
+                intermed_doctor_core::evidence::ProofKind::Heuristic => EvidenceOrigin::Heuristic,
+            });
+        for requirement in &contract.coverage_requirements {
+            b = b.coverage_requirement(*requirement);
+        }
+    }
     for fact in &facts {
         b = b.evidence(EvidenceEdge::subject(fact.id));
     }
@@ -883,4 +935,41 @@ pub fn dedupe_by_subject(findings: Vec<Finding>) -> Vec<Finding> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod trust_contract_tests {
+    use super::*;
+    use crate::model::RULE_PACK_SCHEMA_V2;
+    use intermed_doctor_core::evidence::{Category, Finding};
+
+    #[test]
+    fn legacy_pack_cannot_emit_an_uncontracted_hard_finding() {
+        let pack = RulePack {
+            schema: RULE_PACK_SCHEMA_V2.to_string(),
+            id: "legacy".to_string(),
+            version: "1".to_string(),
+            publisher: None,
+            rules: Vec::new(),
+            signature: None,
+        };
+        let mut findings = vec![
+            Finding::builder("external", "external:x")
+                .severity(Severity::Error)
+                .category(Category::Loader)
+                .title("hard claim")
+                .explanation("legacy")
+                .build(),
+        ];
+
+        apply_pack_trust_contract(&pack, &mut findings);
+        apply_pack_trust_contract(&pack, &mut findings);
+
+        assert_eq!(findings[0].severity, Severity::Warn);
+        assert_eq!(findings[0].assessment.blockers.len(), 1);
+        assert_eq!(
+            findings[0].assessment.blockers[0].code,
+            "legacy-rule-pack-has-no-proof-contract"
+        );
+    }
 }

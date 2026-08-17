@@ -1,4 +1,4 @@
-//! The `intermed-doctor-report-v1` model — the single structured artifact a
+//! The `intermed-doctor-report-v2` model — the single structured artifact a
 //! diagnosis produces. Renderers (`intermed-report`) turn it into terminal /
 //! JSON / SARIF output; they never recompute anything.
 
@@ -10,18 +10,24 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use intermed_evidence::{EvidenceSummaryItem, Finding, FindingVisibility, FixCandidate, Severity};
+use intermed_evidence::{
+    AssessmentDisposition, CertaintyTier, EvidenceSummaryItem, Finding, FindingVisibility,
+    FixCandidate, Severity,
+};
 use intermed_facts::{Fact, FactStore, kind};
 
 use crate::collector::{CollectorOutcome, CollectorStatus};
 use crate::instance_layout::LayoutKind;
 use crate::layer::Layer;
 use crate::profile::DiagnosticProfile;
+use crate::scope::TargetCapabilities;
 use crate::target::{Environment, InstanceType, Loader, Side, Target, TargetKind};
 
 /// Schema identifier embedded in every report (mirrors the old
 /// `intermed-release-check-v1` convention).
-pub const REPORT_SCHEMA: &str = "intermed-doctor-report-v1";
+pub const REPORT_SCHEMA_V1: &str = "intermed-doctor-report-v1";
+pub const REPORT_SCHEMA_V2: &str = "intermed-doctor-report-v2";
+pub const REPORT_SCHEMA: &str = REPORT_SCHEMA_V2;
 
 /// Compact view of the target for the report.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -83,9 +89,14 @@ impl Summary {
                 s.hidden_details += 1;
                 continue;
             }
-            let incomplete = f.machine_tags.iter().any(|tag| tag == "incomplete")
-                || f.id.starts_with("scan-incomplete:")
-                || f.id.contains("analysis-incomplete");
+            let incomplete = !f.assessment.blockers.is_empty()
+                || f.assessment
+                    .coverage
+                    .iter()
+                    .any(|coverage| !coverage.state.is_complete())
+                || (matches!(f.severity, Severity::Fatal | Severity::Error)
+                    && (f.assessment.disposition != AssessmentDisposition::Asserted
+                        || f.assessment.certainty != CertaintyTier::Confirmed));
             if incomplete {
                 s.incomplete_analysis += 1;
             } else {
@@ -266,6 +277,8 @@ pub struct DoctorReport {
     pub analysis_configuration: AnalysisConfiguration,
     #[serde(default)]
     pub mixin_coverage: MixinCoveragePassport,
+    #[serde(default)]
+    pub target_capabilities: TargetCapabilities,
     pub rules: Vec<RuleStat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operational_errors: Vec<OperationalError>,
@@ -775,45 +788,24 @@ fn apply_visibility_policy(findings: &mut [Finding]) {
         let has_tag = |t: &str| f.machine_tags.iter().any(|x| x == t);
         // Any proven-safe merge (CRDT set union, disjoint object union) is a
         // normal state, not a problem.
-        if has_tag("safe-merge")
-            || has_tag("safe-crdt-merge")
-            || f.id.contains(":safe-crdt-merge:")
-            || f.id.contains(":safe-json-object-merge:")
-        {
+        if has_tag("safe-merge") || has_tag("safe-crdt-merge") {
             f.visibility = FindingVisibility::ExplainOnly;
             if f.severity < Severity::Warn {
                 f.severity = Severity::Info;
             }
-        } else if has_tag("root-metadata") || is_pack_mcmeta_override(f) {
+        } else if has_tag("root-metadata") {
             // Root pack metadata (pack.mcmeta): expected, only matters for overlays.
             f.visibility = FindingVisibility::OverlayOnly;
             if f.severity < Severity::Warn {
                 f.severity = Severity::Info;
             }
-        } else if f.severity <= Severity::Note
-            && [
-                "mixin-effect-summary:",
-                "mixin-handler-intel:",
-                "mixin-interaction:",
-                "mixin-plugin:",
-                "mixin-complexity:",
-                "mixin-bloat:",
-            ]
-            .iter()
-            .any(|prefix| f.id.starts_with(prefix))
-        {
+        } else if f.severity <= Severity::Note && has_tag("mixin-detail") {
             // Full mixin mode intentionally emits site-level evidence, but tens
             // of thousands of informational rows must not bury errors/warnings
             // in human reports. The records remain in JSON and explain views.
             f.visibility = FindingVisibility::Verbose;
         }
     }
-}
-
-/// A byte-level resource-conflict finding whose subject path is a `pack.mcmeta`.
-fn is_pack_mcmeta_override(f: &Finding) -> bool {
-    f.id.starts_with("resource-conflict:")
-        && (f.id.ends_with("/pack.mcmeta") || f.id.ends_with(":pack.mcmeta"))
 }
 
 /// Populate each finding's `evidence_summary` from the facts its evidence cites.
@@ -949,12 +941,42 @@ pub fn assemble_with_settings(
     tool_version: &str,
     target: &Target,
     store: &FactStore,
+    findings: Vec<Finding>,
+    collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
+    rule_stats: Vec<RuleStat>,
+    operational_errors: Vec<OperationalError>,
+    profile: Option<DiagnosticProfile>,
+    settings: &crate::settings::DiagnosisSettings,
+) -> DoctorReport {
+    let target_capabilities = TargetCapabilities::derive(target, store, &collectors, settings);
+    assemble_with_settings_and_capabilities(
+        tool_version,
+        target,
+        store,
+        findings,
+        collectors,
+        rule_stats,
+        operational_errors,
+        profile,
+        settings,
+        target_capabilities,
+    )
+}
+
+/// Assemble a configured report using the scope-derived capabilities evaluated
+/// by the engine before snapshot compaction.
+#[allow(clippy::too_many_arguments)]
+pub fn assemble_with_settings_and_capabilities(
+    tool_version: &str,
+    target: &Target,
+    store: &FactStore,
     mut findings: Vec<Finding>,
     collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
     rule_stats: Vec<RuleStat>,
     mut operational_errors: Vec<OperationalError>,
     profile: Option<DiagnosticProfile>,
     settings: &crate::settings::DiagnosisSettings,
+    target_capabilities: TargetCapabilities,
 ) -> DoctorReport {
     // 1. Collapse findings that share an id into one (unique-id contract).
     merge_findings_by_id(&mut findings);
@@ -966,13 +988,20 @@ pub fn assemble_with_settings(
     // 2c. Turn repetitive writer-pair recipe overrides into one actionable card;
     // raw per-resource findings remain in JSON/ExplainOnly.
     cluster_resource_conflicts(&mut findings, store);
+    // Report-generated aggregate findings pass through the same trust contract
+    // as rule output. Re-assessment is idempotent and preserves explicit
+    // contradiction adjustments made by the cross-layer engine.
+    crate::assessment::assess_findings(
+        store,
+        &target_capabilities,
+        &mut findings,
+        settings.scan.changed_since.is_some(),
+    );
     // 3. Demote "normal state" findings (safe merges, pack.mcmeta) so the default
     //    report can collapse them.
     apply_visibility_policy(&mut findings);
     for finding in &mut findings {
-        let channel = if finding.id.starts_with("incident:")
-            || finding.machine_tags.iter().any(|tag| tag == "incident")
-        {
+        let channel = if finding.channel == "incident" {
             "incident-diagnosis"
         } else {
             "pack-health-static-review"
@@ -1119,6 +1148,7 @@ pub fn assemble_with_settings(
         collectors: collector_reports,
         analysis_configuration,
         mixin_coverage,
+        target_capabilities,
         rules: rule_stats,
         operational_errors,
         deferred_layers,
@@ -1352,9 +1382,10 @@ mod tests {
         let mut findings = vec![
             Finding::builder(
                 "resource-conflict",
-                "resource-conflict:json-override:assets/foo/pack.mcmeta",
+                "resource-conflict:root-metadata:pack.mcmeta",
             )
             .severity(Severity::Note)
+            .tag("root-metadata")
             .build(),
         ];
         apply_visibility_policy(&mut findings);
@@ -1375,8 +1406,14 @@ mod tests {
     #[test]
     fn informational_mixin_site_details_are_verbose_but_warnings_remain_visible() {
         let mut findings = vec![
-            finding("mixin-risk", "mixin-effect-summary:site-a", Severity::Note),
-            finding("mixin-risk", "mixin-interaction:site-b", Severity::Warn),
+            Finding::builder("mixin-risk", "mixin-effect-summary:site-a")
+                .severity(Severity::Note)
+                .tag("mixin-detail")
+                .build(),
+            Finding::builder("mixin-risk", "mixin-interaction:site-b")
+                .severity(Severity::Warn)
+                .tag("mixin-detail")
+                .build(),
         ];
         apply_visibility_policy(&mut findings);
         assert_eq!(findings[0].visibility, FindingVisibility::Verbose);

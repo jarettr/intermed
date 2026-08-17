@@ -63,6 +63,10 @@ pub struct ResourceGraph {
     /// Minecraft jar, `--minecraft-jar`), if loaded. Lets `minecraft:` references
     /// resolve against real vanilla resources instead of being blanket-satisfied.
     external_definitions: BTreeSet<String>,
+    /// True only when the external vanilla artifact was scanned without a
+    /// relevant gap. Partial records may satisfy observed references, but may
+    /// never justify an absence conclusion.
+    vanilla_index_complete: bool,
     /// `tag resource_path → entry ids` for every tag (pack + vanilla), the basis
     /// for effective tag-membership expansion.
     tag_entries: BTreeMap<String, Vec<String>>,
@@ -152,11 +156,11 @@ impl ResourceGraph {
     /// and index vanilla tags for membership expansion. The records themselves are
     /// **not** added as writers — vanilla is the baseline, not a competing writer,
     /// so it never produces collision/override diffs or per-resource facts.
-    pub fn add_vanilla_index(&mut self, records: &[ResourceAstRecord]) {
-        if records.is_empty() {
-            return;
+    pub fn add_vanilla_index(&mut self, records: &[ResourceAstRecord], complete: bool) {
+        self.vanilla_index_complete = complete;
+        if !records.is_empty() {
+            self.add_owner("minecraft".to_string(), "minecraft".to_string());
         }
-        self.add_owner("minecraft".to_string(), "minecraft".to_string());
         for rec in records {
             let path = &rec.ast.resource_path;
             self.external_definitions
@@ -172,7 +176,7 @@ impl ResourceGraph {
     /// Whether a vanilla index has been loaded (`--minecraft-jar`).
     #[must_use]
     pub fn has_vanilla_index(&self) -> bool {
-        !self.external_definitions.is_empty()
+        self.vanilla_index_complete
     }
 
     /// Whether the index has *any* definition in the same directory as `path` — i.e.
@@ -551,7 +555,7 @@ mod tests {
             "data/minecraft/tags/items/logs.json",
             &[],
         )];
-        graph.add_vanilla_index(&vanilla);
+        graph.add_vanilla_index(&vanilla, true);
         assert!(graph.has_vanilla_index());
         assert!(graph.has_definition("data/minecraft/tags/items/logs.json"));
 
@@ -579,7 +583,7 @@ mod tests {
             "data/minecraft/loot_tables/blocks/stone.json",
             vec![],
         )];
-        graph.add_vanilla_index(&vanilla);
+        graph.add_vanilla_index(&vanilla, true);
         assert!(graph.has_vanilla_index());
         // No `data/minecraft/tags/...` in the index → tag directory not covered →
         // no minecraft tag is flagged (would otherwise be a flood of false positives).

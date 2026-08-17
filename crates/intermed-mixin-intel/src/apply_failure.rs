@@ -797,6 +797,17 @@ fn detect_for_class(
     global_mappings: Option<&TinyMappings>,
     out: &mut Vec<ApplyFailure>,
 ) {
+    // Absence/apply assertions are meaningful only for a mixin that is active
+    // on the analyzed side and is not dynamically gated. A config plugin,
+    // constraint, unknown activation, or side exclusion makes the selector a
+    // conditional hypothesis rather than a load failure.
+    if !matches!(
+        class.activation,
+        crate::model::ActivationStatus::ActiveConfirmed
+            | crate::model::ActivationStatus::ActiveAssumed
+    ) {
+        return;
+    }
     // refmap_missing: a *named* MC target with no refmap declared or loaded.
     // A refmap bridges named→runtime only when the runtime namespace is
     // intermediary (Fabric/Quilt). On Forge/NeoForge the runtime IS the named

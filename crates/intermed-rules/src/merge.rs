@@ -62,6 +62,7 @@ mod tests {
             match_on: None,
             settings_refs: BTreeMap::new(),
             evidence: None,
+            assessment: None,
             finding: FindingTemplate {
                 id: "overlay:{subject}".to_string(),
                 rule_id: None,

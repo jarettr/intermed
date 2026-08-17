@@ -36,7 +36,7 @@ use intermed_doctor_core::{
     TargetKind, detect_target, materialize_modpack_archive, parse_changed_since, write_atomic,
 };
 use intermed_duckdb::{DuckdbRulePack, duckdb_available};
-use intermed_report::{Format, write_demo_artifacts};
+use intermed_report::{Format, ReportSchema, write_demo_artifacts};
 use intermed_spark_bridge::PerformanceThresholds;
 
 use intermed_deps::{DependencyRule, ResolutionOutcome, build_graph, resolve_store};
@@ -44,11 +44,12 @@ use intermed_log::{LogCollector, LogSignalRule};
 use intermed_minecraft_scan::{EnvironmentCollector, MetadataCollector};
 use intermed_rules::{
     ColumnarRulePack, GenerateBackend, MixedLoaderPackRule, RULE_PACK_SCHEMA_V2,
-    RULE_REGISTRY_SCHEMA, RulePackSelection, SouffleRulePack, check_rule_packs,
-    default_rule_pack_install_dir, format_trace, generate_rules, install_pack_from_registry,
-    install_pack_with_dependencies, load_registry_from_source, load_rule_pack, load_signing_key,
-    load_trusted_keys, merged_default_registry, registry_to_json, resolve_doctor_packs,
-    souffle_available, trace_pack, validate_rule_pack, verify_rule_pack_signature,
+    RULE_PACK_SCHEMA_V3, RULE_REGISTRY_SCHEMA, RulePackSelection, SouffleRulePack,
+    check_rule_packs, default_rule_pack_install_dir, format_trace, generate_rules,
+    install_pack_from_registry, install_pack_with_dependencies, load_registry_from_source,
+    load_rule_pack, load_signing_key, load_trusted_keys, merged_default_registry, registry_to_json,
+    resolve_doctor_packs, souffle_available, trace_pack, validate_rule_pack,
+    verify_rule_pack_signature,
 };
 use intermed_sbom::{SbomExportFormat, export_scan, scan_mods_dir};
 
@@ -485,15 +486,20 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
 
     if let Some(target) = &args.output.json {
         wrote_artifact = true;
+        let schema = match args.output.report_schema {
+            intermed_cli::command::ReportSchemaArg::V1 => ReportSchema::V1,
+            intermed_cli::command::ReportSchemaArg::V2 => ReportSchema::V2,
+        };
+        let json = intermed_report::render_json_schema(&run.report, schema);
         match target {
             Some(path) => {
-                write_report_artifact(path, &run.report, &run.facts, Format::Json, "JSON")?
+                write_atomic(path, json.as_bytes()).with_context(|| {
+                    format!("could not write JSON report to {}", path.display())
+                })?;
+                info!("wrote JSON report to {}", path.display());
             }
             None => {
-                println!(
-                    "{}",
-                    intermed_report::render_with_facts(&run.report, &run.facts, Format::Json)
-                );
+                println!("{json}");
                 wrote_stdout = true;
             }
         }
@@ -2182,7 +2188,7 @@ fn run_rules_generate(args: intermed_cli::command::RulesGenerateArgs) -> ExitCod
     use intermed_cli::command::RulesGenerateBackend;
 
     let pack = match if args.pack.as_os_str().is_empty() || !args.pack.exists() {
-        Ok(intermed_rules::default_core_pack_v2())
+        Ok(intermed_rules::default_core_pack_v3())
     } else if args.pack.is_file() {
         load_rule_pack(&args.pack)
     } else {
@@ -2220,7 +2226,7 @@ fn run_rules_generate(args: intermed_cli::command::RulesGenerateArgs) -> ExitCod
 
 fn run_rules_explain(args: intermed_cli::command::RulesExplainArgs) -> ExitCode {
     let pack = match if args.pack.as_os_str().is_empty() || !args.pack.exists() {
-        Ok(intermed_rules::default_core_pack_v2())
+        Ok(intermed_rules::default_core_pack_v3())
     } else if args.pack.is_file() {
         load_rule_pack(&args.pack)
     } else {
@@ -2362,9 +2368,9 @@ fn run_rules_check(args: intermed_cli::command::RulesCheckArgs) -> ExitCode {
 
 fn default_core_pack_v2_from_path(path: &Path) -> intermed_rules::RulePack {
     if path.is_file() {
-        load_rule_pack(path).unwrap_or_else(|_| intermed_rules::default_core_pack_v2())
+        load_rule_pack(path).unwrap_or_else(|_| intermed_rules::default_core_pack_v3())
     } else {
-        intermed_rules::default_core_pack_v2()
+        intermed_rules::default_core_pack_v3()
     }
 }
 
@@ -2552,7 +2558,7 @@ fn run_sbom(args: SbomArgs) -> ExitCode {
 fn run_rules_sign(args: intermed_cli::command::RulesSignArgs) -> ExitCode {
     let pack = match load_rule_pack(&args.pack) {
         Ok(mut pack) => {
-            if pack.schema != RULE_PACK_SCHEMA_V2 {
+            if pack.schema != RULE_PACK_SCHEMA_V2 && pack.schema != RULE_PACK_SCHEMA_V3 {
                 pack.schema = RULE_PACK_SCHEMA_V2.to_string();
                 if pack.version.is_empty() {
                     pack.version = env!("CARGO_PKG_VERSION").to_string();
@@ -3146,6 +3152,7 @@ mod explain_tests {
             collectors: Vec::new(),
             analysis_configuration: Default::default(),
             mixin_coverage: Default::default(),
+            target_capabilities: Default::default(),
             rules: Vec::new(),
             operational_errors: vec![OperationalError {
                 stage: "rule".into(),

@@ -130,6 +130,7 @@ mod tests {
             match_on: None,
             settings_refs: BTreeMap::new(),
             evidence: None,
+            assessment: None,
             finding: FindingTemplate {
                 id: "f".into(),
                 rule_id: None,

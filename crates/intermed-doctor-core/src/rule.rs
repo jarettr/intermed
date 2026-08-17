@@ -9,6 +9,7 @@ use intermed_evidence::Finding;
 use intermed_facts::FactStore;
 use thiserror::Error;
 
+use crate::scope::RuleRequirements;
 use crate::settings::DiagnosisSettings;
 use crate::target::Target;
 
@@ -40,6 +41,11 @@ impl<'a> RuleCtx<'a> {
 pub trait Rule: Send + Sync {
     /// Stable id, e.g. `missing-dependency`.
     fn id(&self) -> &'static str;
+
+    /// Typed input/coverage declaration used for validation and observability.
+    fn requirements(&self) -> RuleRequirements {
+        RuleRequirements::default()
+    }
 
     /// Evaluate against the fact store and return domain findings.
     ///

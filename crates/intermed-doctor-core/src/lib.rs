@@ -16,6 +16,7 @@
 //! the seam that keeps later phases cheap: a new layer is a new `Collector`
 //! impl plus one registration line.
 
+pub mod assessment;
 pub mod bounded_zip;
 pub mod collector;
 pub mod engine;
@@ -31,6 +32,7 @@ pub mod profile;
 pub mod report;
 pub mod rule;
 pub mod scan_filter;
+pub mod scope;
 pub mod settings;
 pub mod suppression;
 pub mod target;
@@ -52,9 +54,15 @@ pub use layer::Layer;
 pub use modpack::{ModpackError, ModpackMount, materialize_modpack_archive};
 pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
 pub use profile::{DiagnosticProfile, PROFILE_SCHEMA, PhaseTiming};
-pub use report::{DoctorReport, OperationalError, REPORT_SCHEMA};
+pub use report::{
+    DoctorReport, OperationalError, REPORT_SCHEMA, REPORT_SCHEMA_V1, REPORT_SCHEMA_V2,
+};
 pub use rule::{Rule, RuleCtx, RuleError};
 pub use scan_filter::{filter_jar_paths, list_jar_archives, parse_changed_since, should_scan_path};
+pub use scope::{
+    CollectorScope, CompletenessModel, InputRequirement, RuleRequirements, TargetCapabilities,
+    TargetRegion,
+};
 pub use settings::{
     DiagnosisSettings, FactStoreSettings, LogSettings, MetadataLevel, MetadataSettings, MixinLevel,
     MixinSettings, ResourceAstLevel, ResourceSettings, SbomSettings, ScanSettings,

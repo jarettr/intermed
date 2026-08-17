@@ -10,6 +10,7 @@ use intermed_facts::FactStore;
 
 use crate::jar_cache::JarCache;
 use crate::layer::Layer;
+use crate::scope::{CollectorScope, CompletenessModel};
 use crate::settings::DiagnosisSettings;
 use crate::target::Target;
 
@@ -127,6 +128,10 @@ impl<C: Collector> Collector for GatedCollector<C> {
         self.enabled && self.inner.applies(target)
     }
 
+    fn scope(&self) -> CollectorScope {
+        self.inner.scope()
+    }
+
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         self.inner.collect(ctx)
     }
@@ -147,6 +152,13 @@ pub trait Collector: Send + Sync {
 
     /// The layer this collector belongs to.
     fn layer(&self) -> Layer;
+
+    /// Static declaration of facts/target regions owned by this collector.
+    /// Collectors should override this; the empty scope is retained only for
+    /// compatibility with third-party collectors compiled against 0.1.x.
+    fn scope(&self) -> CollectorScope {
+        CollectorScope::new(CompletenessModel::BoundedPartial)
+    }
 
     /// Whether this collector should run against the given target.
     fn applies(&self, target: &Target) -> bool;
@@ -187,6 +199,9 @@ impl Collector for DeferredCollector {
     }
     fn layer(&self) -> Layer {
         self.layer
+    }
+    fn scope(&self) -> CollectorScope {
+        CollectorScope::new(CompletenessModel::AllOrNothing)
     }
     fn applies(&self, _target: &Target) -> bool {
         false

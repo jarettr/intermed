@@ -10,8 +10,8 @@ use std::{fs::File, io::Read};
 
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{
-    CollectCtx, Collector, CollectorOutcome, InstanceType, Layer, LayoutKind, Loader, Side, Target,
-    TargetKind,
+    CollectCtx, Collector, CollectorOutcome, CollectorScope, CompletenessModel, InstanceType,
+    Layer, LayoutKind, Loader, Side, Target, TargetKind, TargetRegion,
 };
 
 pub struct EnvironmentCollector;
@@ -22,6 +22,11 @@ impl Collector for EnvironmentCollector {
     }
     fn layer(&self) -> Layer {
         Layer::TargetDetection
+    }
+    fn scope(&self) -> CollectorScope {
+        CollectorScope::new(CompletenessModel::AllOrNothing)
+            .produces([kind::ENVIRONMENT, kind::JAVA_RUNTIME])
+            .regions([TargetRegion::Manifest])
     }
     fn applies(&self, target: &Target) -> bool {
         // Logs/crash reports get their environment from the log layer instead.

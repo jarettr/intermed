@@ -25,10 +25,53 @@ pub struct RuntimeEvent {
     pub message: String,
     pub continuation_lines: Vec<String>,
     pub exception_chain: Vec<ThrowableNode>,
+    pub terminality: EventTerminality,
     /// One-based physical line in the source file.
     pub source_line: u32,
     /// Fragment within `source_line` after flattened-log normalization.
     pub source_fragment: u32,
+}
+
+/// Whether an event is evidence that the analyzed process actually terminated.
+/// Log level and exception presence alone are insufficient: many launchers and
+/// servers recover from ERROR records.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EventTerminality {
+    ProcessFatal,
+    LoaderAbort,
+    CrashReportRoot,
+    WatchdogTermination,
+    ServerStopped,
+    Recovered,
+    BackgroundError,
+    #[default]
+    Unknown,
+}
+
+impl EventTerminality {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProcessFatal => "process-fatal",
+            Self::LoaderAbort => "loader-abort",
+            Self::CrashReportRoot => "crash-report-root",
+            Self::WatchdogTermination => "watchdog-termination",
+            Self::ServerStopped => "server-stopped",
+            Self::Recovered => "recovered",
+            Self::BackgroundError => "background-error",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::ProcessFatal
+                | Self::LoaderAbort
+                | Self::CrashReportRoot
+                | Self::WatchdogTermination
+                | Self::ServerStopped
+        )
+    }
 }
 
 /// A normalized fragment which retains its physical source coordinates.
@@ -322,6 +365,7 @@ pub fn normalize_events(text: &str, source: &str) -> Vec<RuntimeEvent> {
                     .unwrap_or_default(),
                 continuation_lines: Vec::new(),
                 exception_chain: Vec::new(),
+                terminality: EventTerminality::Unknown,
                 source_line: line.physical_line,
                 source_fragment: line.normalized_fragment,
             });
@@ -346,13 +390,104 @@ pub fn normalize_events(text: &str, source: &str) -> Vec<RuntimeEvent> {
                 message: line.text.trim().to_string(),
                 continuation_lines: Vec::new(),
                 exception_chain: Vec::new(),
+                terminality: EventTerminality::Unknown,
                 source_line: line.physical_line,
                 source_fragment: line.normalized_fragment,
             });
         }
     }
     flush(&mut current, &mut events);
+    classify_terminalities(&mut events);
     events
+}
+
+fn classify_terminalities(events: &mut [RuntimeEvent]) {
+    let texts = events
+        .iter()
+        .map(|event| {
+            std::iter::once(event.message.as_str())
+                .chain(event.continuation_lines.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_ascii_lowercase()
+        })
+        .collect::<Vec<_>>();
+
+    for index in 0..events.len() {
+        let text = &texts[index];
+        let has_failure = !events[index].exception_chain.is_empty()
+            || matches!(events[index].level.as_deref(), Some("ERROR" | "FATAL"));
+        if !has_failure {
+            continue;
+        }
+        let later = &texts[index.saturating_add(1)..];
+        let later_recovery = later.iter().any(|line| is_recovery_marker(line));
+        let later_crash_report = later.iter().any(|line| is_crash_report_marker(line));
+        let terminality = if is_background_error(text) {
+            EventTerminality::BackgroundError
+        } else if (text.contains("watchdog")
+            || events[index]
+                .thread
+                .as_deref()
+                .is_some_and(|thread| thread.to_ascii_lowercase().contains("watchdog"))
+            || events[index]
+                .logger
+                .as_deref()
+                .is_some_and(|logger| logger.to_ascii_lowercase().contains("watchdog")))
+            && (text.contains("exception")
+                || text.contains("server hang")
+                || text.contains("single server tick")
+                || !events[index].exception_chain.is_empty())
+        {
+            EventTerminality::WatchdogTermination
+        } else if is_loader_abort(text) {
+            EventTerminality::LoaderAbort
+        } else if is_crash_report_marker(text) || later_crash_report {
+            EventTerminality::CrashReportRoot
+        } else if matches!(events[index].level.as_deref(), Some("FATAL"))
+            || events[index].exception_chain.iter().any(|node| {
+                node.throwable_type.ends_with("OutOfMemoryError")
+                    || node.throwable_type.ends_with("VirtualMachineError")
+            })
+            || text.contains("a fatal error has been detected by the java runtime environment")
+        {
+            EventTerminality::ProcessFatal
+        } else if later_recovery {
+            EventTerminality::Recovered
+        } else {
+            EventTerminality::Unknown
+        };
+        events[index].terminality = terminality;
+    }
+}
+
+fn is_recovery_marker(text: &str) -> bool {
+    text.contains("done (")
+        || text.contains("server started")
+        || text.contains("minecraft started")
+        || text.contains("successfully loaded")
+        || text.contains("startup complete")
+}
+
+fn is_crash_report_marker(text: &str) -> bool {
+    text.contains("crash report has been saved")
+        || text.contains("preparing crash report")
+        || text.contains("---- minecraft crash report ----")
+        || text.contains("a fatal error has been detected by the java runtime")
+}
+
+fn is_loader_abort(text: &str) -> bool {
+    text.contains("loading errors encountered")
+        || text.contains("failed to start minecraft")
+        || text.contains("mod loading has failed")
+        || text.contains("could not execute entrypoint")
+        || text.contains("missing or unsupported mandatory dependencies")
+}
+
+fn is_background_error(text: &str) -> bool {
+    (text.contains("update") && (text.contains("check") || text.contains("checker")))
+        || text.contains("telemetry")
+        || text.contains("could not contact")
 }
 
 fn attach_exception_chain(event: &mut RuntimeEvent) {
@@ -536,5 +671,52 @@ mod tests {
                 .iter()
                 .all(|event| event.continuation_lines.is_empty())
         );
+    }
+
+    #[test]
+    fn error_followed_by_done_is_recovered_not_terminal() {
+        let events = normalize_events(
+            "[12:00:00] [main/ERROR]: java.lang.IllegalStateException: optional failure\n[12:00:01] [Server thread/INFO]: Done (2.1s)! For help, type help",
+            "latest.log",
+        );
+        assert_eq!(events[0].terminality, EventTerminality::Recovered);
+        assert!(!events[0].terminality.is_terminal());
+    }
+
+    #[test]
+    fn fatal_with_saved_crash_report_is_terminal() {
+        let events = normalize_events(
+            "[12:00:00] [main/FATAL]: java.lang.IllegalStateException: boom\n[12:00:01] [main/ERROR]: This crash report has been saved to: crash.txt",
+            "latest.log",
+        );
+        assert_eq!(events[0].terminality, EventTerminality::CrashReportRoot);
+        assert!(events[0].terminality.is_terminal());
+    }
+
+    #[test]
+    fn watchdog_exception_is_terminal() {
+        let events = normalize_events(
+            "[12:00:00] [Server Watchdog/FATAL]: java.lang.Error: Watching Server\n\tat net.minecraft.server.dedicated.ServerWatchdog.run(ServerWatchdog.java:1)",
+            "latest.log",
+        );
+        assert_eq!(events[0].terminality, EventTerminality::WatchdogTermination);
+    }
+
+    #[test]
+    fn update_check_failure_is_background() {
+        let events = normalize_events(
+            "[12:00:00] [Update thread/ERROR]: java.io.IOException: update check failed",
+            "latest.log",
+        );
+        assert_eq!(events[0].terminality, EventTerminality::BackgroundError);
+    }
+
+    #[test]
+    fn datapack_error_followed_by_startup_is_recovered() {
+        let events = normalize_events(
+            "[12:00:00] [Server thread/ERROR]: java.lang.IllegalArgumentException: datapack parse error\n[12:00:01] [Server thread/INFO]: Done (4.0s)! For help, type help",
+            "latest.log",
+        );
+        assert_eq!(events[0].terminality, EventTerminality::Recovered);
     }
 }

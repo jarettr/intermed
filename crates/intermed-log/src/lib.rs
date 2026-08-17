@@ -13,7 +13,8 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::evidence::{
-    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, Severity,
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FindingVisibility,
+    FixCandidate, Impact, ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{FactId, SourceRef, kind};
 use intermed_doctor_core::{
@@ -234,6 +235,19 @@ impl Collector for LogCollector {
     fn layer(&self) -> Layer {
         Layer::Log
     }
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::BoundedPartial,
+        )
+        .produces([
+            kind::RUNTIME_EVENT,
+            kind::CRASH_ANCHOR,
+            kind::THROWABLE_NODE,
+            kind::STACK_FRAME,
+            kind::LOG_SIGNAL,
+        ])
+        .regions([intermed_doctor_core::TargetRegion::Logs])
+    }
     fn applies(&self, target: &Target) -> bool {
         target.kind.is_log() || target_has_logs(target)
     }
@@ -432,10 +446,19 @@ fn emit_runtime_events(
             .iter()
             .rposition(|node| !node.suppressed);
         let deepest = deepest_index.and_then(|index| event.exception_chain.get(index));
-        let crash_relevance = if deepest.is_some() && matches!(level, "ERROR" | "FATAL" | "UNKNOWN")
-        {
+        let terminal = event.terminality.is_terminal();
+        let crash_relevance = if deepest.is_some() && terminal {
             "causal"
-        } else if matches!(level, "ERROR" | "FATAL") {
+        } else if deepest.is_some()
+            && matches!(event.terminality, runtime::EventTerminality::Unknown)
+        {
+            "unknown"
+        } else if matches!(level, "ERROR" | "FATAL")
+            && !matches!(
+                event.terminality,
+                runtime::EventTerminality::Recovered | runtime::EventTerminality::BackgroundError
+            )
+        {
             "contributing"
         } else {
             "background"
@@ -453,6 +476,7 @@ fn emit_runtime_events(
             .attr("message", truncate(&event.message, 1000))
             .attr("continuation_count", event.continuation_lines.len() as i64)
             .attr("normalized_fragment", i64::from(event.source_fragment))
+            .attr("terminality", event.terminality.as_str())
             .attr("crash_relevance", crash_relevance)
             .attr(
                 "relevance_score",
@@ -460,6 +484,8 @@ fn emit_runtime_events(
                     100i64
                 } else if crash_relevance == "contributing" {
                     65
+                } else if crash_relevance == "unknown" {
+                    40
                 } else {
                     15
                 },
@@ -468,13 +494,14 @@ fn emit_runtime_events(
             .confidence(1.0)
             .emit();
         emitted += 1;
-        if deepest.is_some() && matches!(level, "ERROR" | "FATAL" | "UNKNOWN") {
+        if terminal {
             ctx.store
                 .fact(extractor, kind::CRASH_ANCHOR)
                 .subject(event.occurrence_id.clone())
                 .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
                 .attr("normalized_fragment", i64::from(event.source_fragment))
-                .attr("anchor_type", "exception-chain")
+                .attr("anchor_type", event.terminality.as_str())
+                .attr("terminality", event.terminality.as_str())
                 .attr(
                     "root_cause_exception",
                     deepest
@@ -560,6 +587,7 @@ fn emit_runtime_events(
                 .attr("normalized_fragment", i64::from(event.source_fragment))
                 .attr("event_type", sig)
                 .attr("level", level)
+                .attr("terminality", event.terminality.as_str())
                 .attr("root_cause_exception", root_type)
                 .attr("crash_relevance", crash_relevance)
                 .attr(
@@ -568,6 +596,8 @@ fn emit_runtime_events(
                         100i64
                     } else if crash_relevance == "contributing" {
                         65
+                    } else if crash_relevance == "unknown" {
+                        40
                     } else {
                         15
                     },
@@ -985,6 +1015,23 @@ impl intermed_doctor_core::Rule for LogSignalRule {
     fn id(&self) -> &'static str {
         "log-signal"
     }
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([
+                kind::RUNTIME_EVENT,
+                kind::CRASH_ANCHOR,
+                kind::THROWABLE_NODE,
+                kind::STACK_FRAME,
+                kind::LOG_SIGNAL,
+            ])
+            .layers([intermed_doctor_core::Layer::Log])
+            .regions([intermed_doctor_core::TargetRegion::Logs])
+            .coverage([
+                CoverageRequirement::RuntimeEvidence,
+                CoverageRequirement::TerminalRuntime,
+            ])
+            .proofs([ProofKind::Observation])
+    }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = incident_findings(ctx);
         for fact in ctx.store.by_kind(kind::LOG_SIGNAL) {
@@ -1027,6 +1074,14 @@ impl intermed_doctor_core::Rule for LogSignalRule {
                 .tag("log")
                 .tag(sig)
                 .tag(format!("crash-relevance:{relevance}"));
+            if matches!(signal_severity(sig), Severity::Error | Severity::Fatal) {
+                b = b
+                    .coverage_requirement(CoverageRequirement::RuntimeEvidence)
+                    .coverage_requirement(CoverageRequirement::TerminalRuntime)
+                    .proof_kind(ProofKind::Observation)
+                    .impact(Impact::RuntimeFailure)
+                    .evidence_origin(EvidenceOrigin::ObservedRuntime);
+            }
             if represented_by_incident {
                 b = b
                     .visibility(FindingVisibility::ExplainOnly)
@@ -1047,6 +1102,7 @@ fn incident_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let mut out = Vec::new();
     for anchor in ctx.store.by_kind(kind::CRASH_ANCHOR) {
         let event_id = anchor.subject.as_str();
+        let semantic = anchor.attr("semantic_fingerprint").unwrap_or(event_id);
         let event = ctx
             .store
             .by_kind(kind::RUNTIME_EVENT)
@@ -1106,6 +1162,15 @@ fn incident_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         };
         let fatal = root_type.contains("OutOfMemory") || root_type.contains("VirtualMachineError");
         let mut finding = Finding::builder("log-signal", format!("incident:{event_id}"))
+            .semantic_id(format!("incident-semantic:{semantic}"))
+            .occurrence_id(event_id)
+            .family("runtime-incident")
+            .channel("incident")
+            .coverage_requirement(CoverageRequirement::RuntimeEvidence)
+            .coverage_requirement(CoverageRequirement::TerminalRuntime)
+            .proof_kind(ProofKind::Observation)
+            .impact(Impact::RuntimeFailure)
+            .evidence_origin(EvidenceOrigin::ObservedRuntime)
             .severity(if fatal {
                 Severity::Fatal
             } else {
@@ -1618,7 +1683,7 @@ mod tests {
         let log = dir.join("latest.log");
         std::fs::write(
             &log,
-            "[12:00:00] [Render thread/ERROR]: net.minecraft.ReportedException: charTyped event handler\n\
+            "[12:00:00] [Render thread/FATAL]: net.minecraft.ReportedException: charTyped event handler\n\
              \tat com.simibubi.create.AllKeys.isKeyDown(AllKeys.java:10)\n\
              \tat com.createdieselgenerators.EntityFilterItem.appendHoverText(EntityFilterItem.java:42)\n\
              Caused by: java.lang.IllegalStateException: Encountered GL error off-thread GLFW 65539\n\
@@ -1712,7 +1777,7 @@ mod tests {
         let crashes = dir.join("crash-reports");
         std::fs::create_dir_all(&logs).unwrap();
         std::fs::create_dir_all(&crashes).unwrap();
-        let event = "[12:00:00] [main/ERROR]: java.lang.IllegalStateException: repeated\n";
+        let event = "[12:00:00] [main/FATAL]: java.lang.IllegalStateException: repeated\n";
         std::fs::write(logs.join("latest.log"), event).unwrap();
         std::fs::write(crashes.join("crash-repeat.txt"), event).unwrap();
         let target = Target::with_kind(&dir, TargetKind::Instance);

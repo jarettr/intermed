@@ -35,6 +35,11 @@ jobs:
           test -f docs/completions/intermed.fish
           test -f docs/completions/_intermed.ps1
           git diff --exit-code -- docs/man docs/completions
+      - name: Trust-contract gate
+        run: |
+          cargo test -p intermed-doctor-core --test trust_contract
+          cargo test -p intermed-rules legacy_pack_cannot_emit_an_uncontracted_hard_finding
+          cargo test -p intermed-rules columnar_backend_cannot_bypass_legacy_hard_severity_cap
       - name: Test
         run: cargo test
       - name: Mod-scale benchmarks (50/100/200 mods)

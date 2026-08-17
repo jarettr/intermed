@@ -172,12 +172,17 @@ pub struct DoctorArgs {
 /// Report rendering and profiling output.
 #[derive(Args, Default)]
 pub struct DoctorOutputArgs {
-    /// Emit the full report as `intermed-doctor-report-v1` JSON.
+    /// Emit the full report as canonical `intermed-doctor-report-v2` JSON.
     ///
     /// With no value, writes to stdout. With `FILE`, writes that artifact and can
     /// be combined with `--sarif FILE` / `--html FILE` in one scan.
     #[arg(long, value_name = "FILE", num_args = 0..=1)]
     pub json: Option<Option<PathBuf>>,
+
+    /// JSON report schema. `v1` is a temporary lossy compatibility writer
+    /// retained through 0.1.7; v2 is canonical.
+    #[arg(long = "report-schema", value_enum, default_value_t = ReportSchemaArg::V2)]
+    pub report_schema: ReportSchemaArg,
 
     /// Emit SARIF 2.1.0 (for IDE / CI code-scanning).
     ///
@@ -224,6 +229,13 @@ pub struct DoctorOutputArgs {
     /// genuine operational failure (bad target, unwritable output, etc.).
     #[arg(long = "exit-zero")]
     pub exit_zero: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ReportSchemaArg {
+    V1,
+    #[default]
+    V2,
 }
 
 /// Jar scan cache controls.
@@ -883,7 +895,7 @@ pub struct LabEvalArgs {
     #[arg(long, conflicts_with_all = ["report", "run"])]
     pub manifest: Option<PathBuf>,
 
-    /// A single Doctor report JSON (`intermed-doctor-report-v1`); use with `--run`.
+    /// A Doctor report JSON (`intermed-doctor-report-v1` or canonical v2); use with `--run`.
     #[arg(long, requires = "run")]
     pub report: Option<PathBuf>,
 

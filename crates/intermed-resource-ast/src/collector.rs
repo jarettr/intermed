@@ -12,6 +12,7 @@ use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, ResourceSettings, ScanSettings,
     Target, TargetKind,
 };
+use intermed_evidence::{CoverageGap, CoverageState};
 
 use crate::model::ResourceLevel;
 use crate::scan::{self, EXTRACTOR, JarAstScan};
@@ -51,6 +52,20 @@ impl Collector for ResourceAstCollector {
     fn layer(&self) -> Layer {
         Layer::DataSemantics
     }
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::PerArtifact,
+        )
+        .produces([
+            kind::RESOURCE_AST_PARSED,
+            kind::RESOURCE_REFERENCE,
+            kind::RESOURCE_SEMANTIC_DIFF,
+        ])
+        .regions([
+            intermed_doctor_core::TargetRegion::Datapacks,
+            intermed_doctor_core::TargetRegion::VanillaResources,
+        ])
+    }
 
     fn applies(&self, target: &Target) -> bool {
         mods_dir(target).is_some()
@@ -75,14 +90,16 @@ impl Collector for ResourceAstCollector {
                 // Opt-in vanilla resource index: scan the Minecraft jar
                 // (`--minecraft-jar`, shared with the mixin layer) so `minecraft:`
                 // references resolve and tags expand against real vanilla resources.
-                let vanilla = ctx
-                    .settings
-                    .minecraft_jar
-                    .as_deref()
-                    .map(|jar| scan_vanilla_records(jar, ctx.jar_cache, settings, level))
-                    .unwrap_or_default();
+                let vanilla = scan_vanilla_records(
+                    ctx.settings.minecraft_jar.as_deref(),
+                    ctx.jar_cache,
+                    settings,
+                    level,
+                );
+                let vanilla_requested = ctx.settings.minecraft_jar.is_some();
+                let vanilla_incomplete = vanilla_requested && !vanilla.coverage.is_complete();
                 let emitted = emit(ctx, scan, &vanilla, settings);
-                if incomplete {
+                if incomplete || vanilla_incomplete {
                     CollectorOutcome::incomplete(emitted.0, emitted.1)
                 } else {
                     CollectorOutcome::active(emitted.0, emitted.1)
@@ -93,17 +110,55 @@ impl Collector for ResourceAstCollector {
     }
 }
 
+/// Coverage-bearing result of the optional vanilla resource baseline.
+#[derive(Debug)]
+pub struct VanillaIndexResult {
+    pub records: Vec<ResourceAstRecord>,
+    pub coverage: CoverageState,
+    pub reasons: Vec<CoverageGap>,
+}
+
 /// Scan the Minecraft jar's own resources, attributed to the `minecraft` writer,
-/// for use as a vanilla index. Best-effort: any read error yields an empty index
-/// (the feature is opt-in and never blocks a run).
+/// for use as a vanilla index. Failures retain their exact coverage reason; an
+/// empty vector is never treated as proof that vanilla contains no resources.
 fn scan_vanilla_records(
-    jar: &Path,
+    jar: Option<&Path>,
     cache: Option<&JarCache>,
     settings: ResourceSettings,
     level: ResourceLevel,
-) -> Vec<ResourceAstRecord> {
+) -> VanillaIndexResult {
+    let Some(jar) = jar else {
+        let gap = CoverageGap::new(
+            "minecraft-jar-not-provided",
+            "no Minecraft JAR was supplied for the vanilla resource baseline",
+        )
+        .with_scope("vanilla-resources");
+        return VanillaIndexResult {
+            records: Vec::new(),
+            coverage: CoverageState::Unavailable {
+                reasons: vec![gap.clone()],
+            },
+            reasons: vec![gap],
+        };
+    };
     if !jar.is_file() {
-        return Vec::new();
+        let code = if jar.exists() {
+            "minecraft-jar-not-a-file"
+        } else {
+            "minecraft-jar-not-found"
+        };
+        let gap = CoverageGap::new(
+            code,
+            format!("Minecraft JAR cannot be read from {}", jar.display()),
+        )
+        .with_scope("vanilla-resources");
+        return VanillaIndexResult {
+            records: Vec::new(),
+            coverage: CoverageState::Unavailable {
+                reasons: vec![gap.clone()],
+            },
+            reasons: vec![gap],
+        };
     }
     let version = scan::cache_version(level);
     let max_bytes = settings.max_json_bytes;
@@ -115,16 +170,47 @@ fn scan_vanilla_records(
     };
     let archive = file_name_of(jar);
     match result {
-        JarAstScan::Ok(partial) => partial
-            .asts
-            .into_iter()
-            .map(|ast| ResourceAstRecord {
-                archive: archive.clone(),
-                writer: "minecraft".to_string(),
-                ast,
-            })
-            .collect(),
-        JarAstScan::Err(_) => Vec::new(),
+        JarAstScan::Ok(partial) => {
+            let reasons: Vec<CoverageGap> = partial
+                .truncations
+                .iter()
+                .map(|reason| {
+                    CoverageGap::new("vanilla-index-truncated", reason.clone())
+                        .with_scope("vanilla-resources")
+                })
+                .collect();
+            let coverage = if reasons.is_empty() {
+                CoverageState::Complete
+            } else {
+                CoverageState::Partial {
+                    gaps: reasons.clone(),
+                }
+            };
+            VanillaIndexResult {
+                records: partial
+                    .asts
+                    .into_iter()
+                    .map(|ast| ResourceAstRecord {
+                        archive: archive.clone(),
+                        writer: "minecraft".to_string(),
+                        ast,
+                    })
+                    .collect(),
+                coverage,
+                reasons,
+            }
+        }
+        JarAstScan::Err(reason) => {
+            let gap = CoverageGap::new("vanilla-index-unreadable", reason)
+                .with_scope("vanilla-resources");
+            VanillaIndexResult {
+                records: Vec::new(),
+                coverage: CoverageState::Unavailable {
+                    reasons: vec![gap.clone()],
+                },
+                reasons: vec![gap],
+            }
+        }
     }
 }
 
@@ -133,7 +219,7 @@ fn scan_vanilla_records(
 fn emit(
     ctx: &mut CollectCtx<'_>,
     scan: ResourceAstScan,
-    vanilla: &[ResourceAstRecord],
+    vanilla: &VanillaIndexResult,
     settings: ResourceSettings,
 ) -> (usize, String) {
     // The graph indexes pack resources *and* the vanilla index (definitions + tags
@@ -143,7 +229,7 @@ fn emit(
     for (ns, writer) in &scan.extra_owners {
         graph.add_owner(ns.clone(), writer.clone());
     }
-    graph.add_vanilla_index(vanilla);
+    graph.add_vanilla_index(&vanilla.records, vanilla.coverage.is_complete());
     let diffs = diff::compute(&scan.records);
 
     let mut emitted = crate::semantic::facts::emit(
@@ -175,6 +261,27 @@ fn emit(
             .attr("reason", reason.clone())
             .source(SourceRef::file(archive.clone()))
             .confidence(0.9)
+            .emit();
+        emitted += 1;
+    }
+
+    for gap in &vanilla.reasons {
+        if gap.code == "minecraft-jar-not-provided" {
+            continue;
+        }
+        ctx.store
+            .fact(EXTRACTOR, kind::SCAN_TRUNCATED)
+            .subject(
+                ctx.settings
+                    .minecraft_jar
+                    .as_ref()
+                    .map_or_else(|| "minecraft-jar".to_string(), |p| p.display().to_string()),
+            )
+            .attr("layer", "data-semantics")
+            .attr("reason", gap.detail.clone())
+            .attr("coverage_gap", gap.code.clone())
+            .attr("relevant_entry", true)
+            .confidence(1.0)
             .emit();
         emitted += 1;
     }
@@ -305,4 +412,99 @@ fn file_name_of(path: &Path) -> String {
         .and_then(|n| n.to_str())
         .unwrap_or("?")
         .to_string()
+}
+
+#[cfg(test)]
+mod vanilla_index_tests {
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    fn temp_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "intermed-vanilla-index-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn write_jar(path: &Path, body: &[u8]) {
+        let file = fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file(
+            "data/minecraft/recipes/example.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(body).unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn missing_and_unreadable_vanilla_inputs_are_distinct() {
+        let root = temp_dir();
+        let absent = root.join("absent.jar");
+        let corrupt = root.join("corrupt.jar");
+        fs::write(&corrupt, b"not a zip").unwrap();
+
+        let none = scan_vanilla_records(
+            None,
+            None,
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        );
+        let missing = scan_vanilla_records(
+            Some(&absent),
+            None,
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        );
+        let broken = scan_vanilla_records(
+            Some(&corrupt),
+            None,
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        );
+
+        assert_eq!(none.reasons[0].code, "minecraft-jar-not-provided");
+        assert_eq!(missing.reasons[0].code, "minecraft-jar-not-found");
+        assert_eq!(broken.reasons[0].code, "vanilla-index-unreadable");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vanilla_scan_reports_complete_and_partial_coverage() {
+        let root = temp_dir();
+        let jar = root.join("client.jar");
+        write_jar(&jar, br#"{"type":"minecraft:crafting_shapeless"}"#);
+
+        let complete = scan_vanilla_records(
+            Some(&jar),
+            None,
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        );
+        assert!(complete.coverage.is_complete());
+        assert_eq!(complete.records.len(), 1);
+
+        let partial = scan_vanilla_records(
+            Some(&jar),
+            None,
+            ResourceSettings {
+                max_json_bytes: 4,
+                ..ResourceSettings::default()
+            },
+            ResourceLevel::Semantic,
+        );
+        assert!(matches!(partial.coverage, CoverageState::Partial { .. }));
+        assert_eq!(partial.reasons[0].code, "vanilla-index-truncated");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

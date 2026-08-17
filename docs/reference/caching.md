@@ -14,14 +14,23 @@ Default `$XDG_CACHE_HOME/intermed`, or `~/.cache/intermed`. Override with
 
 ## How an entry is keyed
 
-A cache entry is keyed by the jar's content fingerprint together with a version
-string for the analyzer that produced it. A jar that has not changed hits the
-cache. A jar that changed — even a byte — misses and is rescanned.
+A cache entry is keyed by the jar's SHA-256 content identity together with the
+collector logic version and settings fingerprint. File size, modification time,
+and the short-lived fingerprint table are lookup hints only: InterMed verifies
+the current content hash before it trusts a persistent payload. Replacing a JAR
+with different bytes while preserving its size and mtime therefore cannot reuse
+the old result.
 
 The version string is what keeps a cache honest across upgrades. Each analyzer
 (mixins, resources, metadata) carries its own version; when its logic changes, the
 version changes, and every entry it produced is treated as stale and regenerated.
 You never need to clear the cache after an upgrade — the keying does it.
+
+Cache payload compatibility also includes the emitted-fact/schema version. A
+collector that depends on mappings incorporates the mapping source/hash,
+Minecraft version, source namespace, target namespace, and parser version into
+its settings identity. Any incompatible change invalidates the payload rather
+than attempting a best-effort migration.
 
 ## Pruning
 
@@ -32,7 +41,7 @@ The cache prunes itself, by age and by size:
 | Max size | 512 MiB, oldest first | `--cache-max-size <MIB>` |
 | Max age | 180 days | `--cache-max-age-days <DAYS>` |
 | Prune interval | every 1 day | (config `cache.prune_interval_days`) |
-| Fingerprint re-verify | every 30 days | (config `cache.fingerprint_reverify_days`) |
+| Fingerprint hint age | 30 days | (config `cache.fingerprint_reverify_days`; content is still hashed on every lookup) |
 
 Force maintenance by hand:
 

@@ -165,6 +165,22 @@ impl Collector for MixinCollector {
         Layer::Mixin
     }
 
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::PerArtifact,
+        )
+        .produces([
+            intermed_doctor_core::facts::kind::MIXIN_APPLICATION_SITE,
+            intermed_doctor_core::facts::kind::MIXIN_CLASSPATH_COVERAGE,
+            intermed_doctor_core::facts::kind::MIXIN_HANDLER_BODY,
+        ])
+        .regions([
+            intermed_doctor_core::TargetRegion::ModClasspath,
+            intermed_doctor_core::TargetRegion::MinecraftClasspath,
+            intermed_doctor_core::TargetRegion::Mappings,
+        ])
+    }
+
     fn applies(&self, target: &Target) -> bool {
         mods_dir(target).is_some()
     }

@@ -193,6 +193,21 @@ impl Collector for ScriptDynamicsCollector {
     fn layer(&self) -> Layer {
         Layer::Resource
     }
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::BoundedPartial,
+        )
+        .produces([
+            kind::RUNTIME_REMOVED_RECIPE,
+            kind::RUNTIME_REMOVED_ITEM,
+            kind::RUNTIME_REMOVED_TAG,
+            kind::RUNTIME_REMOVED_LOOT_TABLE,
+        ])
+        .regions([
+            intermed_doctor_core::TargetRegion::Logs,
+            intermed_doctor_core::TargetRegion::Scripts,
+        ])
+    }
     fn applies(&self, target: &Target) -> bool {
         matches!(target.kind, TargetKind::Server | TargetKind::Instance)
             && !script_log_files(target).is_empty()
@@ -209,9 +224,24 @@ impl Collector for ScriptDynamicsCollector {
 
         let mut emitted = 0usize;
         let mut scanned = 0usize;
+        let mut failures = 0usize;
         for file in &files {
-            let Ok(text) = std::fs::read_to_string(file) else {
-                continue;
+            let text = match std::fs::read_to_string(file) {
+                Ok(text) => text,
+                Err(error) => {
+                    ctx.store
+                        .fact(self.id(), kind::SCAN_TRUNCATED)
+                        .subject(file.display().to_string())
+                        .attr("layer", "resource-dynamics")
+                        .attr("reason", format!("cannot read script log: {error}"))
+                        .attr("relevant_entry", true)
+                        .source(SourceRef::file(file.display().to_string()))
+                        .confidence(1.0)
+                        .emit();
+                    emitted += 1;
+                    failures += 1;
+                    continue;
+                }
             };
             scanned += 1;
             let locator = file.display().to_string();
@@ -229,7 +259,12 @@ impl Collector for ScriptDynamicsCollector {
                 emitted += 1;
             }
         }
-        CollectorOutcome::active(emitted, format!("{scanned} script log(s) scanned"))
+        let summary = format!("{scanned} script log(s) scanned, {failures} read failure(s)");
+        if failures == 0 {
+            CollectorOutcome::active(emitted, summary)
+        } else {
+            CollectorOutcome::incomplete(emitted, summary)
+        }
     }
 }
 
@@ -325,16 +360,49 @@ impl Collector for StaticScriptCollector {
     fn layer(&self) -> Layer {
         Layer::Resource
     }
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::BoundedPartial,
+        )
+        .produces([
+            kind::RUNTIME_REMOVED_RECIPE,
+            kind::RUNTIME_REMOVED_ITEM,
+            kind::RUNTIME_REMOVED_TAG,
+            kind::RUNTIME_REMOVED_LOOT_TABLE,
+        ])
+        .regions([intermed_doctor_core::TargetRegion::Scripts])
+    }
     fn applies(&self, target: &Target) -> bool {
-        !script_scan::script_files(target).is_empty()
+        script_scan::has_script_roots(target)
     }
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
-        let n = script_scan::script_files(ctx.target).len();
-        if n == 0 {
+        let result = script_scan::emit(ctx.store, ctx.target);
+        if result.files_discovered == 0 && result.gaps.is_empty() {
             return CollectorOutcome::skipped("no KubeJS/CraftTweaker scripts found");
         }
-        let emitted = script_scan::emit(ctx.store, ctx.target);
-        CollectorOutcome::active(emitted, format!("{n} script file(s) scanned"))
+        let mut emitted = result.emitted;
+        for reason in &result.gaps {
+            ctx.store
+                .fact(self.id(), kind::SCAN_TRUNCATED)
+                .subject(ctx.target.path.display().to_string())
+                .attr("layer", "resource-dynamics")
+                .attr("reason", reason.clone())
+                .attr("relevant_entry", true)
+                .source(SourceRef::file(ctx.target.path.display().to_string()))
+                .confidence(1.0)
+                .emit();
+            emitted += 1;
+        }
+        let summary = format!(
+            "{} script file(s) discovered, {} coverage gap(s)",
+            result.files_discovered,
+            result.gaps.len()
+        );
+        if result.gaps.is_empty() {
+            CollectorOutcome::active(emitted, summary)
+        } else {
+            CollectorOutcome::incomplete(emitted, summary)
+        }
     }
 }
 

@@ -652,7 +652,7 @@ pub fn subject_edge(fact_id: FactId) -> EvidenceEdge {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use intermed_doctor_core::report::{Summary, TargetView};
+    use intermed_doctor_core::report::{REPORT_SCHEMA_V2, Summary, TargetView};
     use intermed_doctor_core::target::{Environment, TargetKind};
     use intermed_evidence::{Category, Severity};
     use intermed_facts::{FactStore, SourceRef, kind};
@@ -700,7 +700,7 @@ mod tests {
             .emit();
         let facts: Vec<Fact> = store.all().to_vec();
         let report = DoctorReport {
-            schema: "intermed-doctor-report-v1".into(),
+            schema: REPORT_SCHEMA_V2.into(),
             tool_version: "0.1.0".into(),
             generated_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
             target: TargetView {
@@ -728,6 +728,7 @@ mod tests {
             fact_stats: store.stats(),
             collectors: Vec::new(),
             analysis_configuration: Default::default(),
+            target_capabilities: Default::default(),
             mixin_coverage: Default::default(),
             rules: Vec::new(),
             operational_errors: Vec::new(),

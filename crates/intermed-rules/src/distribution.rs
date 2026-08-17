@@ -10,7 +10,7 @@ use ed25519_dalek::VerifyingKey;
 
 use crate::merge::merge_rule_packs;
 use crate::model::RulePack;
-use crate::pack::{default_core_pack_v2, default_core_pack_without_mixin, load_rule_pack};
+use crate::pack::{default_core_pack_v3, default_core_pack_without_mixin, load_rule_pack};
 use crate::signing::{
     PackOrigin, RuleRegistry, SigningError, TrustLevel, TrustPolicy, canonical_digest,
     default_registry, default_rule_pack_install_dir, install_pack_from_registry,
@@ -61,7 +61,7 @@ pub fn resolve_doctor_packs(
     let base = if without_mixin {
         default_core_pack_without_mixin()
     } else {
-        default_core_pack_v2()
+        default_core_pack_v3()
     };
     let trusted = load_trusted_keys_optional(selection.trusted_keys_path.as_deref())?;
     let policy = &selection.trust_policy;
@@ -313,6 +313,7 @@ fn load_trusted_keys_optional(path: Option<&Path>) -> Result<Vec<VerifyingKey>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::default_core_pack_v2;
     use crate::model::RULE_REGISTRY_SCHEMA;
     use crate::signing::{RegistryPackEntry, fetch_pack_for_entry, sign_rule_pack};
     use ed25519_dalek::SigningKey;

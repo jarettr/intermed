@@ -6,7 +6,7 @@ use intermed_doctor_core::{Rule, RuleCtx};
 use crate::RulePackError;
 use crate::interpreter::{dedupe_by_subject, evaluate_pack};
 use crate::model::RulePack;
-use crate::pack::{default_core_pack_v2, default_core_pack_without_mixin};
+use crate::pack::{default_core_pack_v3, default_core_pack_without_mixin};
 use crate::validate::validate_rule_pack;
 
 /// Interpreter-backed rule pack — single runtime for imperative and Datalog modes.
@@ -21,7 +21,7 @@ impl DeclarativeRulePack {
     }
 
     pub fn default_core() -> Self {
-        Self::new(default_core_pack_v2()).expect("embedded core rule pack is valid")
+        Self::new(default_core_pack_v3()).expect("embedded core rule pack is valid")
     }
 
     /// Metadata / loader / resource / SBOM rules only — defers mixin to Layer F imperative rule.
@@ -38,6 +38,10 @@ impl Rule for DeclarativeRulePack {
     fn id(&self) -> &'static str {
         // Stable wire id retained for reports, CLI e2e, and `--logic datalog` users.
         "datalog-rule-pack"
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        crate::requirements_for_pack(&self.pack)
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {

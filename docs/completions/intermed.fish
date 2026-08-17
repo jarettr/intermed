@@ -51,7 +51,9 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l logic -d 'R
 souffle\t'Soufflé Datalog backend (requires the `souffle` binary). Same IR, external engine'
 duckdb\t'In-process DuckDB SQL rule backend (requires `--features duckdb`). Same IR'"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l jobs -l threads -d 'Cap the worker thread count for parallel jar/log scanning. Unset or `0` uses all available cores; lower it on weak machines or shared CI runners' -r
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l json -d 'Emit the full report as `intermed-doctor-report-v1` JSON' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l json -d 'Emit the full report as canonical `intermed-doctor-report-v2` JSON' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l report-schema -d 'JSON report schema. `v1` is a temporary lossy compatibility writer retained through 0.1.7; v2 is canonical' -r -f -a "v1\t''
+v2\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l sarif -d 'Emit SARIF 2.1.0 (for IDE / CI code-scanning)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l html -d 'Write a self-contained HTML report (`index.html` style)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l profile -d 'Write wall-clock phase profile JSON (`intermed-doctor-profile-v1`)' -r -F
@@ -287,7 +289,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -s v -l verbose -d 'Increase informational detail (repeatable: `-v`, `-vv`)'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l manifest -d 'Dataset manifest (`intermed-eval-manifest-v1`) listing report/run pairs' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l report -d 'A single Doctor report JSON (`intermed-doctor-report-v1`); use with `--run`' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l report -d 'A Doctor report JSON (`intermed-doctor-report-v1` or canonical v2); use with `--run`' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l run -d 'A single lab run JSON (`intermed-lab-run-v1`); use with `--report`' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l min-severity -d 'Minimum prediction severity that counts as "flagged"' -r -f -a "note\t''
 warn\t''

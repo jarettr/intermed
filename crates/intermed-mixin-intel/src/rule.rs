@@ -5,8 +5,8 @@
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, Finding, FindingVisibility, FixCandidate,
-    ProofKind, Relation, RuntimeRefutability, Severity,
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FindingVisibility,
+    FixCandidate, Impact, ProofKind, Relation, RuntimeRefutability, Severity,
 };
 use intermed_doctor_core::facts::{FactId, kind};
 
@@ -25,6 +25,38 @@ pub struct MixinRiskRule;
 impl intermed_doctor_core::Rule for MixinRiskRule {
     fn id(&self) -> &'static str {
         RULE_ID
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([
+                kind::MIXIN_RISK_SCORE,
+                kind::MIXIN_APPLICATION_SITE,
+                kind::MIXIN_HANDLER_BODY,
+                kind::MIXIN_CLASSPATH_COVERAGE,
+                kind::LOG_SIGNAL,
+            ])
+            .layers([
+                intermed_doctor_core::Layer::Mixin,
+                intermed_doctor_core::Layer::Log,
+                intermed_doctor_core::Layer::Performance,
+            ])
+            .regions([
+                intermed_doctor_core::TargetRegion::ModClasspath,
+                intermed_doctor_core::TargetRegion::MinecraftClasspath,
+                intermed_doctor_core::TargetRegion::Mappings,
+                intermed_doctor_core::TargetRegion::Logs,
+            ])
+            .coverage([
+                CoverageRequirement::CompleteClasspath,
+                CoverageRequirement::CompatibleMappings,
+                CoverageRequirement::ApplicableMixin,
+            ])
+            .proofs([
+                ProofKind::Observation,
+                ProofKind::DeterministicDerivation,
+                ProofKind::Heuristic,
+            ])
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
@@ -207,6 +239,7 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
                     ))
                     .tag("mixin")
                     .tag("interaction")
+                    .tag("mixin-detail")
                     .confidence(f32::from(strength) / 100.0)
                     .build(),
             );
@@ -256,6 +289,7 @@ fn mod_complexity_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 ))
                 .tag("mixin")
                 .tag("complexity")
+                .tag("mixin-detail")
                 .confidence(f32::from(u8::try_from(score.clamp(0, 100)).unwrap_or(0)) / 100.0)
                 .build(),
         );
@@ -304,6 +338,7 @@ fn mixin_bloat_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 ))
                 .tag("mixin")
                 .tag("bloat")
+                .tag("mixin-detail")
                 // Confidence is evidence quality, not the bloat magnitude (that is
                 // the score/severity): static analysis can't observe non-target
                 // side effects, so this stays deliberately moderate.
@@ -497,6 +532,7 @@ fn mixin_plugin_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 .affects(f.subject.clone())
                 .tag("mixin")
                 .tag("config-plugin")
+                .tag("mixin-detail")
                 .confidence(0.9)
                 .build(),
         );
@@ -533,10 +569,18 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 format!("mixin-apply:{kind}:{}:{target}:{member}", f.subject),
             )
             .coverage_requirement(CoverageRequirement::CompleteClasspath)
+            .coverage_requirement(CoverageRequirement::CompatibleMappings)
+            .coverage_requirement(CoverageRequirement::ApplicableMixin)
             .proof_kind(if confirmed {
                 ProofKind::DeterministicDerivation
             } else {
                 ProofKind::Heuristic
+            })
+            .impact(Impact::StartupBlocking)
+            .evidence_origin(if confirmed {
+                EvidenceOrigin::StaticExact
+            } else {
+                EvidenceOrigin::StaticInferred
             })
             .severity(if confirmed {
                 Severity::Error
@@ -630,6 +674,12 @@ fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                         RULE_ID,
                         format!("mixin-runtime-confirmed:{}:{}", site.id, log_id),
                     )
+                    .coverage_requirement(CoverageRequirement::RuntimeEvidence)
+                    .coverage_requirement(CoverageRequirement::TerminalRuntime)
+                    .coverage_requirement(CoverageRequirement::LocalArtifact)
+                    .proof_kind(ProofKind::Observation)
+                    .impact(Impact::StartupBlocking)
+                    .evidence_origin(EvidenceOrigin::ObservedRuntime)
                     .severity(Severity::Error)
                     .category(Category::Mixin)
                     .title(format!("Mixin failure confirmed by runtime log: `{mixin}`"))
@@ -1260,7 +1310,9 @@ fn risk_cluster_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         ) {
             continue;
         }
-        let severity = parse_severity(f.attr("severity"));
+        // A cluster is a navigation roll-up, not an independent hard
+        // conclusion. Site-level apply/selector findings own Error severity.
+        let severity = parse_severity(f.attr("severity")).min(Severity::Warn);
         let target = f.attr("target_class").unwrap_or(&f.subject);
         let headline = f.attr("headline").unwrap_or("mixin risk cluster");
         let action = f
@@ -1422,6 +1474,7 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 .affects(f.subject.as_str())
                 .tag("mixin")
                 .tag("handler-intelligence")
+                .tag("mixin-detail")
                 .visibility(FindingVisibility::Verbose)
                 .confidence(0.88)
                 .build(),
@@ -1522,6 +1575,7 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .affects(target)
             .tag("mixin")
             .tag("mixin-effect-summary")
+            .tag("mixin-detail")
             .confidence(0.82);
 
         for rec in &recs {

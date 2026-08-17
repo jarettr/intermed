@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://intermed.dev/schemas/intermed-rule-pack-v3.schema.json",
+  "title": "InterMed Declarative Rule Pack v3",
+  "type": "object",
+  "required": ["schema", "id", "rules"],
+  "properties": {
+    "schema": { "const": "intermed-rule-pack-v3" },
+    "id": { "type": "string", "minLength": 1 },
+    "version": { "type": "string" },
+    "publisher": { "type": "string" },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "signature": { "type": "object" }
+  },
+  "$defs": {
+    "fact_source": {
+      "type": "object",
+      "required": ["kind", "alias"],
+      "properties": {
+        "kind": { "type": "string" },
+        "alias": { "type": "string" },
+        "select": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "assessment": {
+      "type": "object",
+      "required": ["impact", "proof_kind", "coverage_requirements"],
+      "properties": {
+        "impact": {
+          "enum": ["startup-blocking", "runtime-failure", "data-loss-risk", "compatibility-risk", "performance-degradation", "security-review", "pack-health", "informational"]
+        },
+        "proof_kind": {
+          "enum": ["observation", "deterministic-derivation", "heuristic"]
+        },
+        "coverage_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": ["local-artifact", "complete-pack", "complete-classpath", "runtime-evidence", "runtime-profile", "complete-provider-universe", "authoritative-loader", "active-descriptor", "known-bridge-semantics", "compatible-mappings", "applicable-mixin", "complete-resource-blobs", "relevant-resources", "complete-vanilla-baseline", "known-runtime-mutators", "terminal-runtime"]
+          }
+        },
+        "on_missing_prerequisite": { "const": "abstain" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": ["id", "severity", "category", "title", "explanation"],
+      "properties": {
+        "id": { "type": "string" },
+        "rule_id": { "type": "string" },
+        "severity": { "enum": ["info", "note", "warn", "error", "fatal"] },
+        "category": { "type": "string" },
+        "visibility": { "enum": ["default", "verbose", "explain-only", "overlay-only"] },
+        "title": { "type": "string" },
+        "explanation": { "type": "string" },
+        "fix": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "affects": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "required": ["id", "kind", "finding"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "enum": ["group-distinct", "fact-finding", "join", "aggregate", "correlation"] },
+        "input_kinds": { "type": "array", "items": { "type": "string" } },
+        "alias": { "type": "string" },
+        "where_all": { "type": "object" },
+        "where_not": { "type": "object" },
+        "group_by": { "type": "string" },
+        "group_by_fields": { "type": "array", "items": { "type": "string" } },
+        "distinct": { "type": "string" },
+        "min_count": { "type": "integer", "minimum": 1 },
+        "left": { "$ref": "#/$defs/fact_source" },
+        "right": { "$ref": "#/$defs/fact_source" },
+        "on": { "type": "string" },
+        "where": { "type": "string" },
+        "having": { "type": "string" },
+        "input": { "$ref": "#/$defs/fact_source" },
+        "anchor": { "$ref": "#/$defs/fact_source" },
+        "related_kinds": { "type": "array", "items": { "type": "string" } },
+        "match_on": { "type": "string" },
+        "evidence": { "type": "object" },
+        "assessment": { "$ref": "#/$defs/assessment" },
+        "finding": { "$ref": "#/$defs/finding" }
+      },
+      "allOf": [{
+        "if": {
+          "properties": {
+            "finding": {
+              "properties": { "severity": { "enum": ["error", "fatal"] } },
+              "required": ["severity"]
+            }
+          }
+        },
+        "then": { "required": ["assessment"] }
+      }]
+    }
+  }
+}

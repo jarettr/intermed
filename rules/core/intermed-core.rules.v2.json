@@ -1,7 +1,7 @@
 {
   "schema": "intermed-rule-pack-v2",
   "id": "intermed-core",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "intermed",
   "rules": [
     {
@@ -372,6 +372,22 @@
       }
     },
     {
+      "id": "resource-conflict-classification-unavailable",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "classification-unavailable" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Observed resource collision could not be classified: {subject}",
+        "explanation": "Pass 1 observed {writer_count} writer(s) for this path ({writers_list}), but the second-pass content read was incomplete. The collision is real; its merge/load-order semantics are unavailable. {attr:reason}",
+        "fix": "Inspect the unreadable archive and rerun after correcting the I/O/archive failure.",
+        "tags": ["resource", "collision-observed", "classification-unavailable", "incomplete"]
+      }
+    },
+    {
       "id": "tag-replace-platform",
       "kind": "fact-finding",
       "input_kinds": ["security_suspect_modification"],
@@ -410,8 +426,9 @@
       "where_all": { "attr:hot_path": "true" },
       "finding": {
         "id": "mixin-overlap:{subject}",
-        "severity": "error",
+        "severity": "note",
         "category": "mixin",
+        "visibility": "verbose",
         "title": "Mixin target overlap: {subject}",
         "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
         "fix": "Check mod compatibility notes and prefer versions known to share this target.",
@@ -425,8 +442,9 @@
       "where_all": { "attr:hot_path": "false" },
       "finding": {
         "id": "mixin-overlap:{subject}",
-        "severity": "warn",
+        "severity": "note",
         "category": "mixin",
+        "visibility": "verbose",
         "title": "Mixin target overlap: {subject}",
         "explanation": "Multiple mods target {subject}: {attr:mods}. Operations: {attr:operations}.",
         "fix": "Check mod compatibility notes and prefer versions known to share this target.",
@@ -440,7 +458,7 @@
       "where_all": { "attr:hot_path": "true" },
       "finding": {
         "id": "mixin-overwrite:{subject}->{attr:target}",
-        "severity": "error",
+        "severity": "warn",
         "category": "mixin",
         "title": "High-risk @Overwrite mixin: {attr:target}",
         "explanation": "{subject} overwrites code in {attr:target}. @Overwrite has a high compatibility risk because it replaces target behavior.",

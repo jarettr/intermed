@@ -1,6 +1,6 @@
 //! Ed25519 signing and verification for distributable rule packs.
 //!
-//! Signed packs use schema `intermed-rule-pack-v2`. The signature covers a
+//! Signed packs use schema `intermed-rule-pack-v2` or `intermed-rule-pack-v3`. The signature covers a
 //! canonical JSON payload (rules + metadata, without the signature block) so
 //! third-party marketplaces can pin trust to publisher keys.
 
@@ -14,7 +14,9 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::validate::validate_rule_pack;
-use crate::{RULE_PACK_SCHEMA_V2, RULE_REGISTRY_SCHEMA, RulePack, RulePackError};
+use crate::{
+    RULE_PACK_SCHEMA_V2, RULE_PACK_SCHEMA_V3, RULE_REGISTRY_SCHEMA, RulePack, RulePackError,
+};
 
 /// Maximum registry index download size (1 MiB).
 const MAX_REGISTRY_BYTES: usize = 1024 * 1024;
@@ -25,7 +27,7 @@ const MAX_PACK_BYTES: usize = 10 * 1024 * 1024;
 /// Supported signature algorithm (wire token).
 pub const SIGNATURE_ALGORITHM: &str = "ed25519";
 
-/// Detached signature envelope attached to a v2 rule pack.
+/// Detached signature envelope attached to a distributable rule pack.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulePackSignature {
     pub algorithm: String,
@@ -52,7 +54,7 @@ impl From<String> for SigningError {
     }
 }
 
-/// Canonical signing payload for a v2 pack (deterministic key order).
+/// Canonical signing payload for a distributable pack (deterministic key order).
 #[derive(Debug, Serialize)]
 struct CanonicalPack<'a> {
     schema: &'a str,
@@ -81,7 +83,7 @@ fn canonical_bytes(pack: &RulePack) -> Result<Vec<u8>, SigningError> {
         .map_err(|error| SigningError::Message(format!("canonicalize rule pack: {error}")))
 }
 
-/// Sign a validated v2 pack, stamping the current UTC time.
+/// Sign a validated v2/v3 pack, stamping the current UTC time.
 pub fn sign_rule_pack_now(
     pack: &RulePack,
     signing_key: &SigningKey,
@@ -89,15 +91,15 @@ pub fn sign_rule_pack_now(
     sign_rule_pack(pack, signing_key, &Utc::now().to_rfc3339())
 }
 
-/// Sign a validated v2 pack with a 32-byte Ed25519 seed (`signing.key` format).
+/// Sign a validated v2/v3 pack with a 32-byte Ed25519 seed (`signing.key` format).
 pub fn sign_rule_pack(
     pack: &RulePack,
     signing_key: &SigningKey,
     signed_at: &str,
 ) -> Result<RulePackSignature, SigningError> {
-    if pack.schema != RULE_PACK_SCHEMA_V2 {
+    if pack.schema != RULE_PACK_SCHEMA_V2 && pack.schema != RULE_PACK_SCHEMA_V3 {
         return Err(SigningError::Message(format!(
-            "only {RULE_PACK_SCHEMA_V2} packs can be signed"
+            "only {RULE_PACK_SCHEMA_V2} or {RULE_PACK_SCHEMA_V3} packs can be signed"
         )));
     }
     let verifying_key = signing_key.verifying_key();

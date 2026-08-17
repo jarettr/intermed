@@ -80,6 +80,11 @@ impl DiagnosticEngine {
         // semantics and could silently remove findings.
         let mut store = FactStore::new();
         let mut collector_outcomes = Vec::with_capacity(self.collectors.len());
+        let collector_scopes = self
+            .collectors
+            .iter()
+            .map(|collector| (collector.id(), collector.scope()))
+            .collect::<Vec<_>>();
         let mut collector_timings = Vec::with_capacity(self.collectors.len());
         let jar_cache_ref = self.jar_cache.as_ref();
 
@@ -145,16 +150,19 @@ impl DiagnosticEngine {
             findings.extend(produced);
         }
 
-        apply_cross_layer_certainty(&store, &mut findings);
-
-        // Incremental scan (`--changed-since`) sees only changed jars, so the fact
-        // universe is partial. Rules that reason over the *whole* pack (missing
-        // dependency, duplicate id, resource collisions, SBOM correlation) can
-        // then draw false absence-based conclusions — downgrade them and flag the
-        // run as partial so a stale-scan artifact is never reported as a hard error.
-        if self.settings.scan.changed_since.is_some() {
-            mark_partial_analysis(&mut findings);
+        let incremental = self.settings.scan.changed_since.is_some();
+        if incremental {
+            append_partial_analysis_notice(&mut findings);
         }
+        let capabilities = crate::TargetCapabilities::derive_with_scopes(
+            target,
+            &store,
+            &collector_outcomes,
+            &collector_scopes,
+            &self.settings,
+        );
+        crate::assessment::assess_findings(&store, &capabilities, &mut findings, incremental);
+        apply_runtime_contradictions(&store, &mut findings);
 
         // Now that findings (and their evidence edges) are computed, compact the
         // store so the persisted/exported snapshot stays bounded. Compaction is
@@ -198,7 +206,7 @@ impl DiagnosticEngine {
         .with_fact_inventory(generated_fact_stats, retained_fact_stats)
         .with_peak_rss(process_peak_rss_bytes());
 
-        let report = report::assemble_with_settings(
+        let report = report::assemble_with_settings_and_capabilities(
             &self.tool_version,
             target,
             &store,
@@ -208,6 +216,7 @@ impl DiagnosticEngine {
             operational_errors,
             Some(profile.clone()),
             &self.settings,
+            capabilities,
         );
         DiagnosticRun {
             report,
@@ -221,107 +230,11 @@ impl DiagnosticEngine {
 /// intentionally remain local; this pass prevents a local hard assertion from
 /// surviving when another layer supplies direct counter-evidence or lowers a
 /// prerequisite's certainty.
-fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
-    use intermed_evidence::{CoverageRequirement, EvidenceEdge, RuntimeRefutability, Severity};
+fn apply_runtime_contradictions(store: &FactStore, findings: &mut [Finding]) {
+    use intermed_evidence::{
+        AssessmentDisposition, CertaintyTier, ConclusionAdjustment, RuntimeRefutability, Severity,
+    };
     use intermed_facts::kind;
-
-    let target_loader = store
-        .by_kind(kind::ENVIRONMENT)
-        .find_map(|fact| fact.attr("loader"));
-    let metadata_incomplete = store
-        .by_kind(kind::SCAN_TRUNCATED)
-        .any(|fact| fact.attr("layer") == Some("metadata"))
-        || store
-            .by_kind(kind::UNPARSEABLE_ARCHIVE)
-            .any(|fact| fact.attr("failure_class") == Some("corrupt"))
-        || store
-            .by_kind(kind::INVALID_METADATA)
-            .any(|fact| fact.attr_bool("active_for_instance").unwrap_or(false));
-
-    for finding in findings.iter_mut().filter(|finding| {
-        finding
-            .coverage_requirements
-            .contains(&CoverageRequirement::CompletePack)
-    }) {
-        let reason = if target_loader.is_none() {
-            Some("the active target loader was not established")
-        } else if metadata_incomplete {
-            Some("relevant metadata coverage is incomplete")
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            if matches!(finding.severity, Severity::Fatal | Severity::Error) {
-                finding.severity = Severity::Warn;
-            }
-            finding.confidence = finding.confidence.min(0.65);
-            finding.explanation.push_str(&format!(
-                " This conclusion is not a hard Error because {reason}."
-            ));
-            finding.machine_tags.push("why-not-error".to_string());
-            finding
-                .machine_tags
-                .push(reason.replace(' ', "-").to_ascii_lowercase());
-        }
-    }
-
-    let mixin_incomplete = store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
-        fact.attr("layer") == Some("mixin") && fact.attr_bool("relevant_entry").unwrap_or(true)
-    });
-    if mixin_incomplete {
-        for finding in findings.iter_mut().filter(|finding| {
-            finding
-                .coverage_requirements
-                .contains(&CoverageRequirement::CompleteClasspath)
-        }) {
-            if matches!(finding.severity, Severity::Fatal | Severity::Error) {
-                finding.severity = Severity::Warn;
-            }
-            finding.confidence = finding.confidence.min(0.55);
-            finding.explanation.push_str(
-                " This absence assertion is inconclusive because relevant Mixin/classpath \
-                 coverage was truncated.",
-            );
-            finding.machine_tags.push("why-not-error".to_string());
-            finding
-                .machine_tags
-                .push("mixin-coverage-incomplete".to_string());
-        }
-    }
-    let bridges = store
-        .by_kind(kind::COMPATIBILITY_BRIDGE)
-        .filter(|bridge| {
-            target_loader.is_none_or(|loader| bridge.attr("to_loader") == Some(loader))
-        })
-        .collect::<Vec<_>>();
-
-    if let Some(bridge) = bridges.first() {
-        for finding in findings.iter_mut().filter(|finding| {
-            finding.id == "mixed-loader-pack:mods-dir"
-                || (finding.id.starts_with("loader-mismatch:")
-                    && bridges
-                        .iter()
-                        .any(|bridge| bridge.attr("scope") == Some("mod-runtime")))
-        }) {
-            if matches!(finding.severity, Severity::Fatal | Severity::Error) {
-                finding.severity = Severity::Warn;
-            }
-            finding.confidence = finding.confidence.min(0.65);
-            finding.title = "Cross-loader compatibility requires verification".to_string();
-            finding.explanation.push_str(&format!(
-                " Compatibility bridge `{}` was detected ({} -> {}), so mixed loader \
-                 metadata is not by itself proof that the artifact cannot load. Support \
-                 for this specific artifact remains undecidable statically.",
-                bridge.subject,
-                bridge.attr("from_loader").unwrap_or("unknown"),
-                bridge.attr("to_loader").unwrap_or("unknown")
-            ));
-            finding
-                .machine_tags
-                .push("compatibility-bridge-detected".to_string());
-            finding.evidence.push(EvidenceEdge::supports(bridge.id));
-        }
-    }
 
     // Runtime execution is stronger than a static "may be unused" heuristic.
     // If both endpoints occur in one event's owned frame chain, remove the
@@ -348,6 +261,7 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
             .values()
             .any(|mods| mods.contains(from.as_str()) && mods.contains(to.as_str()))
         {
+            let prior = finding.severity;
             finding.severity = Severity::Info;
             finding.visibility = intermed_evidence::FindingVisibility::ExplainOnly;
             finding.confidence = 0.1;
@@ -358,6 +272,16 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
             finding
                 .machine_tags
                 .push("runtime-contradicted".to_string());
+            finding.assessment.disposition = AssessmentDisposition::Downgraded;
+            finding.assessment.certainty = CertaintyTier::Confirmed;
+            finding.assessment.adjustments.push(ConclusionAdjustment {
+                code: "runtime-dependency-use-refutation".to_string(),
+                detail:
+                    "runtime frames directly contradict the static unused-dependency hypothesis"
+                        .to_string(),
+                from_severity: Some(prior),
+                to_severity: Some(Severity::Info),
+            });
         }
     }
 
@@ -379,6 +303,7 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
                 .is_some_and(|target| runtime_classes.contains(target))
         });
         if contradicted {
+            let prior = finding.severity;
             finding.severity = Severity::Note;
             finding.confidence = 0.2;
             finding.explanation.push_str(
@@ -388,6 +313,13 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
             finding
                 .machine_tags
                 .push("runtime-contradicted".to_string());
+            finding.assessment.disposition = AssessmentDisposition::Downgraded;
+            finding.assessment.adjustments.push(ConclusionAdjustment {
+                code: "runtime-class-presence-refutation".to_string(),
+                detail: "the allegedly absent class was observed at runtime".to_string(),
+                from_severity: Some(prior),
+                to_severity: Some(Severity::Note),
+            });
         }
     }
 
@@ -411,6 +343,7 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
             })
         });
         if contradicted {
+            let prior = finding.severity;
             finding.severity = Severity::Note;
             finding.confidence = 0.2;
             finding.explanation.push_str(
@@ -420,6 +353,13 @@ fn apply_cross_layer_certainty(store: &FactStore, findings: &mut [Finding]) {
             finding
                 .machine_tags
                 .push("runtime-contradicted".to_string());
+            finding.assessment.disposition = AssessmentDisposition::Downgraded;
+            finding.assessment.adjustments.push(ConclusionAdjustment {
+                code: "runtime-method-presence-refutation".to_string(),
+                detail: "the allegedly absent method was observed at runtime".to_string(),
+                from_severity: Some(prior),
+                to_severity: Some(Severity::Note),
+            });
         }
     }
 }
@@ -475,40 +415,10 @@ impl EngineBuilder {
     }
 }
 
-/// Prefixes of finding ids that conclude something about the *whole* pack and so
-/// become unreliable on an incremental (`--changed-since`) scan that only saw
-/// some jars.
-const PARTIAL_SENSITIVE_PREFIXES: &[&str] = &[
-    "missing-dependency:",
-    "duplicate-id:",
-    "resource-conflict:",
-    "dependency-unsat",
-    "sbom-security-correlation",
-    "modpack-incomplete:",
-];
-
-/// Downgrade whole-pack findings to at most `Warn`, annotate them as possibly a
-/// stale-scan artifact, and append a single partial-analysis caveat finding.
-fn mark_partial_analysis(findings: &mut Vec<Finding>) {
-    use intermed_evidence::{Category, Finding as F, Severity};
-
-    let caveat = " (partial scan: only changed jars were analyzed — re-run a full \
-                   scan to confirm this is not a stale-scan artifact)";
-    for f in findings.iter_mut() {
-        if PARTIAL_SENSITIVE_PREFIXES
-            .iter()
-            .any(|p| f.id.starts_with(p))
-        {
-            if matches!(f.severity, Severity::Error | Severity::Fatal) {
-                f.severity = Severity::Warn;
-            }
-            f.confidence = (f.confidence * 0.6).min(0.6);
-            if !f.explanation.contains("partial scan") {
-                f.explanation.push_str(caveat);
-            }
-            f.machine_tags.push("partial-analysis".to_string());
-        }
-    }
+/// Add one explicit incremental-coverage notice. Individual findings are gated
+/// by their typed coverage requirements in the assessment engine.
+fn append_partial_analysis_notice(findings: &mut Vec<Finding>) {
+    use intermed_evidence::{Category, EvidenceOrigin, Finding as F, Impact, ProofKind, Severity};
 
     findings.push(
         F::builder("analysis-partial", "analysis-partial")
@@ -522,6 +432,9 @@ fn mark_partial_analysis(findings: &mut Vec<Finding>) {
                  be incomplete — run a full scan for authoritative results.",
             )
             .confidence(0.95)
+            .impact(Impact::Informational)
+            .proof_kind(ProofKind::Observation)
+            .evidence_origin(EvidenceOrigin::HostObservation)
             .tag("partial-analysis")
             .build(),
     );
@@ -529,29 +442,63 @@ fn mark_partial_analysis(findings: &mut Vec<Finding>) {
 
 #[cfg(test)]
 mod partial_tests {
-    use super::{apply_cross_layer_certainty, mark_partial_analysis};
+    use super::{append_partial_analysis_notice, apply_runtime_contradictions};
+    use crate::TargetCapabilities;
+    use crate::assessment::assess_findings;
     use intermed_evidence::{
-        Category, CoverageRequirement, Finding, ProofKind, RuntimeRefutability, Severity,
+        Category, CoverageRequirement, CoverageState, Finding, ProofKind, RuntimeRefutability,
+        Severity,
     };
     use intermed_facts::{FactStore, kind};
+
+    fn complete_capabilities() -> TargetCapabilities {
+        TargetCapabilities {
+            authoritative_manifest: CoverageState::Complete,
+            materialized_artifacts: CoverageState::Complete,
+            loader_identity: CoverageState::Complete,
+            minecraft_identity: CoverageState::Complete,
+            mod_classpath: CoverageState::Complete,
+            minecraft_classpath: CoverageState::Complete,
+            loader_classpath: CoverageState::Complete,
+            mappings: CoverageState::Complete,
+            logs: CoverageState::Complete,
+            configs: CoverageState::Complete,
+            scripts: CoverageState::Complete,
+            runtime_mutators: CoverageState::Complete,
+            resource_blobs: CoverageState::Complete,
+            datapacks: CoverageState::Complete,
+            runtime_profile: CoverageState::Complete,
+            vanilla_resources: CoverageState::Complete,
+        }
+    }
 
     #[test]
     fn partial_downgrades_whole_pack_findings_and_adds_caveat() {
         let mut findings = vec![
             Finding::builder("dependency", "missing-dependency:a->b")
+                .coverage_requirement(CoverageRequirement::CompletePack)
+                .proof_kind(ProofKind::DeterministicDerivation)
                 .severity(Severity::Error)
                 .category(Category::Dependency)
                 .title("Missing dependency: b")
                 .explanation("a requires b.")
                 .build(),
             Finding::builder("mixin-risk", "mixin-risk:net.minecraft.Foo")
+                .coverage_requirement(CoverageRequirement::LocalArtifact)
+                .proof_kind(ProofKind::DeterministicDerivation)
                 .severity(Severity::Error)
                 .category(Category::Mixin)
                 .title("risk")
                 .explanation("e")
                 .build(),
         ];
-        mark_partial_analysis(&mut findings);
+        append_partial_analysis_notice(&mut findings);
+        assess_findings(
+            &FactStore::new(),
+            &complete_capabilities(),
+            &mut findings,
+            true,
+        );
 
         let dep = findings
             .iter()
@@ -562,8 +509,7 @@ mod partial_tests {
             Severity::Warn,
             "whole-pack finding downgraded"
         );
-        assert!(dep.explanation.contains("partial scan"));
-        assert!(dep.machine_tags.iter().any(|t| t == "partial-analysis"));
+        assert!(dep.machine_tags.iter().any(|t| t == "why-not-error"));
 
         // A non-universe finding (mixin risk on a present jar) is untouched.
         let mixin = findings
@@ -593,17 +539,20 @@ mod partial_tests {
             Finding::builder("loader", "loader-mismatch:fabric-mod")
                 .severity(Severity::Error)
                 .category(Category::Loader)
+                .coverage_requirement(CoverageRequirement::KnownBridgeSemantics)
+                .proof_kind(ProofKind::DeterministicDerivation)
                 .title("wrong loader")
                 .explanation("fabric on neoforge")
                 .build(),
         ];
-        apply_cross_layer_certainty(&store, &mut findings);
+        assess_findings(&store, &complete_capabilities(), &mut findings, false);
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(
             findings[0]
-                .machine_tags
+                .assessment
+                .blockers
                 .iter()
-                .any(|tag| tag == "compatibility-bridge-detected")
+                .any(|blocker| blocker.code == "bridge-compatibility-undecidable")
         );
     }
 
@@ -625,11 +574,13 @@ mod partial_tests {
             Finding::builder("loader", "loader-mismatch:unrelated-fabric-mod")
                 .severity(Severity::Error)
                 .category(Category::Loader)
+                .coverage_requirement(CoverageRequirement::KnownBridgeSemantics)
+                .proof_kind(ProofKind::DeterministicDerivation)
                 .title("wrong loader")
                 .explanation("fabric on forge")
                 .build(),
         ];
-        apply_cross_layer_certainty(&store, &mut findings);
+        assess_findings(&store, &complete_capabilities(), &mut findings, false);
         assert_eq!(findings[0].severity, Severity::Error);
     }
 
@@ -646,7 +597,7 @@ mod partial_tests {
                 .explanation("not installed")
                 .build(),
         ];
-        apply_cross_layer_certainty(&store, &mut findings);
+        assess_findings(&store, &TargetCapabilities::default(), &mut findings, false);
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(
             findings[0]
@@ -654,7 +605,7 @@ mod partial_tests {
                 .iter()
                 .any(|tag| tag == "why-not-error")
         );
-        assert!(findings[0].explanation.contains("active target loader"));
+        assert!(!findings[0].assessment.blockers.is_empty());
     }
 
     #[test]
@@ -681,7 +632,8 @@ mod partial_tests {
                 .affects("api")
                 .build(),
         ];
-        apply_cross_layer_certainty(&store, &mut findings);
+        assess_findings(&store, &complete_capabilities(), &mut findings, false);
+        apply_runtime_contradictions(&store, &mut findings);
         assert_eq!(findings[0].severity, Severity::Info);
         assert_eq!(
             findings[0].visibility,
@@ -708,7 +660,7 @@ mod partial_tests {
                 .explanation("not installed")
                 .build(),
         ];
-        apply_cross_layer_certainty(&store, &mut findings);
+        assess_findings(&store, &TargetCapabilities::default(), &mut findings, false);
         assert_eq!(findings[0].severity, Severity::Warn);
         assert!(
             findings[0]
@@ -716,5 +668,26 @@ mod partial_tests {
                 .iter()
                 .any(|tag| tag == "why-not-error")
         );
+    }
+
+    #[test]
+    fn assessment_is_idempotent_across_engine_and_report_passes() {
+        let store = FactStore::new();
+        let mut findings = vec![
+            Finding::builder("rule", "candidate")
+                .coverage_requirement(CoverageRequirement::CompletePack)
+                .proof_kind(ProofKind::DeterministicDerivation)
+                .severity(Severity::Error)
+                .category(Category::Dependency)
+                .title("candidate")
+                .explanation("candidate")
+                .build(),
+        ];
+        let unavailable = TargetCapabilities::default();
+        assess_findings(&store, &unavailable, &mut findings, false);
+        let once = findings[0].assessment.clone();
+        assess_findings(&store, &unavailable, &mut findings, false);
+        assert_eq!(findings[0].assessment, once);
+        assert_eq!(findings[0].severity, Severity::Warn);
     }
 }

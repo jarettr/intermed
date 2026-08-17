@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::{
-    Category, EvidenceEdge, Finding, FixCandidate, Relation, Severity,
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
+    ProofKind, Relation, Severity,
 };
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{CollectCtx, Collector, CollectorOutcome, Layer, Rule, RuleCtx, Target};
@@ -52,6 +53,34 @@ struct PerformanceRules {
 impl Rule for PerformanceRules {
     fn id(&self) -> &'static str {
         "performance"
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([
+                kind::HOT_METHOD,
+                kind::HOT_MOD,
+                kind::TICK_SPIKE,
+                kind::MIXIN_APPLICATION_SITE,
+                kind::RESOURCE_COLLISION,
+                kind::LOG_SIGNAL,
+            ])
+            .layers([
+                Layer::Performance,
+                Layer::Mixin,
+                Layer::Resource,
+                Layer::Log,
+            ])
+            .regions([
+                intermed_doctor_core::TargetRegion::RuntimeProfile,
+                intermed_doctor_core::TargetRegion::ModClasspath,
+                intermed_doctor_core::TargetRegion::Logs,
+            ])
+            .coverage([
+                CoverageRequirement::RuntimeProfile,
+                CoverageRequirement::LocalArtifact,
+            ])
+            .proofs([ProofKind::Observation, ProofKind::DeterministicDerivation])
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
@@ -156,10 +185,7 @@ fn perf_log_correlation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         .store
         .by_kind(kind::HOT_MOD)
         .map(|f| {
-            let pct = f
-                .attr("percent")
-                .and_then(|p| p.parse::<f64>().ok())
-                .unwrap_or(0.0);
+            let pct = f.attr_f64("percent").unwrap_or(0.0);
             (f.subject.as_str(), (pct, f.id))
         })
         .collect();
@@ -375,6 +401,20 @@ impl Collector for SparkCollector {
         Layer::Performance
     }
 
+    fn scope(&self) -> intermed_doctor_core::CollectorScope {
+        intermed_doctor_core::CollectorScope::new(
+            intermed_doctor_core::CompletenessModel::BoundedPartial,
+        )
+        .produces([
+            kind::TICK_SPIKE,
+            kind::GC_PAUSE,
+            kind::HEAP_PRESSURE,
+            kind::HOT_METHOD,
+            kind::HOT_MOD,
+        ])
+        .regions([intermed_doctor_core::TargetRegion::RuntimeProfile])
+    }
+
     fn applies(&self, target: &Target) -> bool {
         discover_report_paths(target).next().is_some()
     }
@@ -389,7 +429,12 @@ impl Collector for SparkCollector {
         match import_target(ctx.target) {
             Ok(import) => {
                 let emitted = emit_import(ctx, &import);
-                CollectorOutcome::active(
+                let outcome = if import.failures.is_empty() {
+                    CollectorOutcome::active
+                } else {
+                    CollectorOutcome::incomplete
+                };
+                outcome(
                     emitted,
                     format!(
                         "{} report(s), {} failure(s)",
@@ -777,6 +822,11 @@ impl Rule for PerformanceCorrelationRule {
             }
 
             let mut builder = Finding::builder(self.id(), format!("perf-mixin:{class}:{method}"))
+                .coverage_requirement(CoverageRequirement::RuntimeProfile)
+                .coverage_requirement(CoverageRequirement::LocalArtifact)
+                .proof_kind(ProofKind::DeterministicDerivation)
+                .impact(Impact::PerformanceDegradation)
+                .evidence_origin(EvidenceOrigin::ObservedRuntime)
                 .severity(severity)
                 .category(Category::Performance)
                 .title(format!(
@@ -830,6 +880,11 @@ impl Rule for PerformanceCorrelationRule {
                 Severity::Warn
             };
             let mut builder = Finding::builder(self.id(), format!("perf-hot-mod:{mod_id}"))
+                .coverage_requirement(CoverageRequirement::RuntimeProfile)
+                .coverage_requirement(CoverageRequirement::LocalArtifact)
+                .proof_kind(ProofKind::DeterministicDerivation)
+                .impact(Impact::PerformanceDegradation)
+                .evidence_origin(EvidenceOrigin::ObservedRuntime)
                 .severity(severity)
                 .category(Category::Performance)
                 .title(format!(
@@ -2096,7 +2151,7 @@ mod tests {
         store
             .fact(EXTRACTOR, kind::HOT_MOD)
             .subject("laggymod")
-            .attr("percent", 42.0)
+            .attr("percent", 17.5)
             .emit();
         store
             .fact("log-analyzer", kind::LOG_MENTIONS_MOD)
@@ -2113,9 +2168,11 @@ mod tests {
 
         let findings = evaluate(&store);
         assert!(
-            findings
-                .iter()
-                .any(|f| f.id == "perf-log-suspect:laggymod" && f.severity == Severity::Warn),
+            findings.iter().any(|f| {
+                f.id == "perf-log-suspect:laggymod"
+                    && f.severity == Severity::Warn
+                    && f.explanation.contains("17.5%")
+            }),
             "expected prime-suspect finding for laggymod"
         );
         assert!(

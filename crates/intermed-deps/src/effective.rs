@@ -164,13 +164,14 @@ enum RangeShape {
     Unconstrained,
     /// A real lower bound but no upper bound (`>=x`, `[x,)`) — a breaking major can slip in.
     UnboundedAbove,
-    /// Exactly one version (`=x`, `[x]`, `[x,x]`, bare `x`) — fragile to any other build.
+    /// Exactly one version (`=x`, `[x]`, `[x,x]`, or a bare value in dialects
+    /// where a bare value is a constraint) — fragile to any other build.
     ExactPin,
     /// Bounded on both sides, or unparseable — left alone.
     Other,
 }
 
-fn classify_range(range: &str) -> RangeShape {
+fn classify_range(range: &str, dialect: VersionDialect) -> RangeShape {
     let r = range.trim();
     if r.is_empty() || r == "*" || r == "any" {
         return RangeShape::Unconstrained;
@@ -197,7 +198,11 @@ fn classify_range(range: &str) -> RangeShape {
     let has_lower = r.contains(">=") || r.contains('>') || r.contains('^') || r.contains('~');
     let has_op = has_upper || has_lower || r.contains('=');
     if !has_op {
-        // A bare version string (`1.2.3`) means an exact match in mod metadata.
+        // Maven's bare form is a recommendation with an unbounded restriction;
+        // only `[1.2.3]` is an exact pin for Forge/NeoForge.
+        if dialect == VersionDialect::MavenRange {
+            return RangeShape::Unconstrained;
+        }
         return RangeShape::ExactPin;
     }
     if r.starts_with('=') && !has_upper && !r.contains(">=") {
@@ -366,7 +371,7 @@ fn range_shape_findings(
         let Some(versions) = installed_versions.get(&dep.to) else {
             continue;
         };
-        match classify_range(&dep.range) {
+        match classify_range(&dep.range, dep.version_dialect) {
             RangeShape::UnboundedAbove if dep.mandatory => out.push(
                 Finding::builder(
                     rule_id,
@@ -750,12 +755,24 @@ mod tests {
 
     #[test]
     fn range_shape_classification() {
-        assert_eq!(classify_range("*"), RangeShape::Unconstrained);
-        assert_eq!(classify_range(">=1.0"), RangeShape::UnboundedAbove);
-        assert_eq!(classify_range("[1.0,)"), RangeShape::UnboundedAbove);
-        assert_eq!(classify_range("1.2.3"), RangeShape::ExactPin);
-        assert_eq!(classify_range("=1.2.3"), RangeShape::ExactPin);
-        assert_eq!(classify_range("[1.0]"), RangeShape::ExactPin);
-        assert_eq!(classify_range(">=1.0 <2.0"), RangeShape::Other);
+        let generic = VersionDialect::GenericSemver;
+        assert_eq!(classify_range("*", generic), RangeShape::Unconstrained);
+        assert_eq!(classify_range(">=1.0", generic), RangeShape::UnboundedAbove);
+        assert_eq!(
+            classify_range("[1.0,)", generic),
+            RangeShape::UnboundedAbove
+        );
+        assert_eq!(classify_range("1.2.3", generic), RangeShape::ExactPin);
+        assert_eq!(classify_range("=1.2.3", generic), RangeShape::ExactPin);
+        assert_eq!(classify_range("[1.0]", generic), RangeShape::ExactPin);
+        assert_eq!(classify_range(">=1.0 <2.0", generic), RangeShape::Other);
+        assert_eq!(
+            classify_range("1.2.3", VersionDialect::MavenRange),
+            RangeShape::Unconstrained
+        );
+        assert_eq!(
+            classify_range("[1.2.3]", VersionDialect::MavenRange),
+            RangeShape::ExactPin
+        );
     }
 }

@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, Finding, FixCandidate, ProofKind, Severity,
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
+    ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{FactId, kind};
 
@@ -102,10 +103,12 @@ fn provider_status(
             }
         };
     }
-    // Prefer reporting an out-of-range provider (actionable) over an unknown one.
+    // A single unresolved provider keeps the universe undecidable: it may be the
+    // satisfying provider. `Unsatisfied` is sound only when every provider has a
+    // known version and every one is outside the range.
     match (out_of_range, unknown) {
-        (Some(p), _) => ProviderStatus::Unsatisfied(p.fact, p.scope.clone()),
-        (None, Some(p)) => ProviderStatus::Unknown(p.fact, p.scope.clone()),
+        (_, Some(p)) => ProviderStatus::Unknown(p.fact, p.scope.clone()),
+        (Some(p), None) => ProviderStatus::Unsatisfied(p.fact, p.scope.clone()),
         (None, None) => ProviderStatus::Absent,
     }
 }
@@ -256,6 +259,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                         rule_id,
                         format!("dependency-identity-undecidable:{modid}->{dep_id}"),
                     )
+                    .family("dependency-identity-undecidable")
                     .severity(Severity::Note)
                     .confidence(0.35)
                     .category(Category::Dependency)
@@ -309,6 +313,13 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 // range: a genuine, actionable incompatibility.
                 RangeStatus::InRange => out.push(
                     Finding::builder(rule_id, format!("incompatible-mod:{modid}->{dep_id}"))
+                        .family("incompatible-mod")
+                        .coverage_requirement(CoverageRequirement::LocalArtifact)
+                        .coverage_requirement(CoverageRequirement::ActiveDescriptor)
+                        .coverage_requirement(CoverageRequirement::KnownBridgeSemantics)
+                        .proof_kind(ProofKind::DeterministicDerivation)
+                        .impact(Impact::StartupBlocking)
+                        .evidence_origin(EvidenceOrigin::StaticExact)
                         .severity(Severity::Error)
                         .category(Category::Dependency)
                         .title(format!("Incompatible with installed mod: {dep_id}"))
@@ -317,6 +328,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                         ))
                         .evidence(EvidenceEdge::subject(dep.id))
                         .affects(modid)
+                        .affects(dep_id)
                         .fix(FixCandidate::advice(format!(
                             "Remove {modid} or change the installed version of {dep_id}."
                         )))
@@ -551,8 +563,13 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                 } else {
                     let dup = is_duplicated(dep_id);
                     let mut b = Finding::builder(rule_id, format!("wrong-version:{modid}->{dep_id}"))
+                        .family("wrong-version")
                         .coverage_requirement(CoverageRequirement::CompletePack)
+                        .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
+                        .coverage_requirement(CoverageRequirement::ActiveDescriptor)
                         .proof_kind(ProofKind::DeterministicDerivation)
+                        .impact(Impact::StartupBlocking)
+                        .evidence_origin(EvidenceOrigin::StaticExact)
                         .severity(if mandatory { Severity::Error } else { Severity::Warn })
                         .confidence(if dup { 0.6 } else { 0.9 })
                         .category(Category::Dependency)
@@ -600,8 +617,13 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                             rule_id,
                             format!("provided-version-mismatch:{modid}->{dep_id}"),
                         )
+                        .family("wrong-version")
                         .coverage_requirement(CoverageRequirement::CompletePack)
+                        .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
+                        .coverage_requirement(CoverageRequirement::ActiveDescriptor)
                         .proof_kind(ProofKind::DeterministicDerivation)
+                        .impact(Impact::StartupBlocking)
+                        .evidence_origin(EvidenceOrigin::StaticExact)
                         .severity(if mandatory { Severity::Error } else { Severity::Warn })
                         .category(Category::Dependency)
                         .title(format!("Provided {dep_id} does not satisfy {range}"))
@@ -659,6 +681,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                                 rule_id,
                                 format!("provider-identity-unresolved:{modid}->{dep_id}"),
                             )
+                            .family("provider-identity-unresolved")
                             .severity(Severity::Warn)
                             .confidence(0.55)
                             .category(Category::Dependency)
@@ -680,8 +703,13 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                     }
                     out.push(
                         Finding::builder(rule_id, format!("missing-dependency:{modid}->{dep_id}"))
+                            .family("missing-dependency")
                             .coverage_requirement(CoverageRequirement::CompletePack)
+                            .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
+                            .coverage_requirement(CoverageRequirement::ActiveDescriptor)
                             .proof_kind(ProofKind::DeterministicDerivation)
+                            .impact(Impact::StartupBlocking)
+                            .evidence_origin(EvidenceOrigin::StaticExact)
                             .severity(Severity::Error)
                             .category(Category::Dependency)
                             .title(format!("Missing dependency: {dep_id}"))
@@ -690,6 +718,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                             ))
                             .evidence(EvidenceEdge::subject(dep.id))
                             .affects(modid)
+                            .affects(dep_id)
                             .fix(FixCandidate::advice(format!(
                                 "Install {dep_id} matching {range}."
                             )))
@@ -704,4 +733,44 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod provider_truth_table_tests {
+    use super::*;
+
+    fn provider(version: Option<&str>, fact: u64) -> ProviderEntry {
+        ProviderEntry {
+            version: version.map(str::to_string),
+            version_ambiguous: false,
+            fact: FactId(fact),
+            scope: "global".to_string(),
+        }
+    }
+
+    #[test]
+    fn unknown_provider_prevents_out_of_range_assertion() {
+        let providers = vec![provider(Some("1.0.0"), 1), provider(None, 2)];
+        assert!(matches!(
+            provider_status(
+                Some(&providers),
+                ">=2.0.0",
+                VersionDialect::FabricExtendedSemver,
+            ),
+            ProviderStatus::Unknown(FactId(2), _)
+        ));
+    }
+
+    #[test]
+    fn all_known_out_of_range_is_unsatisfied() {
+        let providers = vec![provider(Some("1.0.0"), 1), provider(Some("1.5.0"), 2)];
+        assert!(matches!(
+            provider_status(
+                Some(&providers),
+                ">=2.0.0",
+                VersionDialect::FabricExtendedSemver,
+            ),
+            ProviderStatus::Unsatisfied(..)
+        ));
+    }
 }

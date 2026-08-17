@@ -153,7 +153,7 @@ fn stage_overlay_preview(
         if collision.class == ConflictClass::Identical {
             continue;
         }
-        let safe = collision.class.is_safe_merge();
+        let safe = collision.is_safe_merge();
         // The core safety rule: a deterministic, order-independent merge is the
         // only thing we apply by default. Order-dependent collisions are just a
         // lexical-winner *preview* and must be opted into — otherwise the user

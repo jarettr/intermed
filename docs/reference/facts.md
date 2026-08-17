@@ -64,17 +64,21 @@ See [Reading a report](../guides/reading-a-report.md#explaining-one-finding).
 
 ## The report schema
 
-The JSON report is schema `intermed-doctor-report-v1`. Its fields are listed in
+The canonical JSON report is schema `intermed-doctor-report-v2`. Its fields are listed in
 [Output formats](output-formats.md#json). Other stable schema names you may see:
 
 | Schema | Produced by |
 |--------|-------------|
-| `intermed-doctor-report-v1` | `doctor --json` |
+| `intermed-doctor-report-v2` | `doctor --json` (canonical) |
+| `intermed-doctor-report-v1` | `doctor --json --report-schema v1` (lossy compatibility writer through 0.1.7) |
 | `intermed-doctor-profile-v1` | `doctor --profile` |
 | `intermed-telemetry-event-v1` | explicit `doctor --telemetry-out` / `--telemetry-endpoint` |
 | `intermed-modpack-graph-v1` | `deps graph` |
 | `intermed-deps-resolution-v1` | `deps resolve` |
 | `intermed-config-v1` | the config file and `--dump-config` |
+
+See [Schema and migration policy](schema-migrations.md) for the v1 compatibility
+window and the breaking/additive change rules.
 
 The predicate catalog is also lifecycle-checked in CI. Every built-in `kind::`
 predicate must be referenced by production code or marked `reserved = true` in

@@ -5,7 +5,7 @@
 //! `--explain <finding>` output (Phase 2) can show *why* InterMed concluded
 //! something — never an unsourced verdict.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +49,7 @@ impl Severity {
 }
 
 /// Broad classification used for grouping and rule-pack organisation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
     Environment,
@@ -97,10 +97,22 @@ pub enum CoverageRequirement {
     CompletePack,
     CompleteClasspath,
     RuntimeEvidence,
+    RuntimeProfile,
+    CompleteProviderUniverse,
+    AuthoritativeLoader,
+    ActiveDescriptor,
+    KnownBridgeSemantics,
+    CompatibleMappings,
+    ApplicableMixin,
+    CompleteResourceBlobs,
+    RelevantResources,
+    CompleteVanillaBaseline,
+    KnownRuntimeMutators,
+    TerminalRuntime,
 }
 
 /// Strength of the derivation represented by a finding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProofKind {
     Observation,
@@ -116,6 +128,175 @@ pub enum RuntimeRefutability {
     ExactMethodPresence,
     AppliedMixin,
     DependencyUse,
+}
+
+/// Provenance class of evidence contributing to a conclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceOrigin {
+    ObservedRuntime,
+    StaticExact,
+    StaticInferred,
+    Heuristic,
+    ReconstructedInput,
+    HostObservation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AssessmentDisposition {
+    Asserted,
+    Downgraded,
+    #[default]
+    Abstained,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CertaintyTier {
+    Confirmed,
+    Probable,
+    Possible,
+    #[default]
+    Undecidable,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Impact {
+    StartupBlocking,
+    RuntimeFailure,
+    DataLossRisk,
+    CompatibilityRisk,
+    PerformanceDegradation,
+    SecurityReview,
+    PackHealth,
+    #[default]
+    Informational,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrerequisiteResult {
+    pub requirement: CoverageRequirement,
+    pub satisfied: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CoverageAssessment {
+    pub region: String,
+    pub state: CoverageState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrerequisiteFailure {
+    pub code: String,
+    pub requirement: CoverageRequirement,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConclusionAdjustment {
+    pub code: String,
+    pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_severity: Option<Severity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_severity: Option<Severity>,
+}
+
+/// Final trust contract produced by the assessment engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindingAssessment {
+    pub disposition: AssessmentDisposition,
+    pub impact: Impact,
+    pub certainty: CertaintyTier,
+    pub proof_kind: ProofKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<PrerequisiteResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<CoverageAssessment>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub provenance: BTreeSet<EvidenceOrigin>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blockers: Vec<PrerequisiteFailure>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub adjustments: Vec<ConclusionAdjustment>,
+}
+
+impl Default for FindingAssessment {
+    fn default() -> Self {
+        Self {
+            disposition: AssessmentDisposition::Abstained,
+            impact: Impact::Informational,
+            certainty: CertaintyTier::Undecidable,
+            proof_kind: ProofKind::Heuristic,
+            prerequisites: Vec::new(),
+            coverage: Vec::new(),
+            provenance: BTreeSet::new(),
+            blockers: Vec::new(),
+            adjustments: Vec::new(),
+        }
+    }
+}
+
+/// A machine-readable reason why an input region is not fully covered.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CoverageGap {
+    pub code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    pub detail: String,
+}
+
+impl CoverageGap {
+    pub fn new(code: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            scope: None,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+}
+
+/// Completeness of one evidence/input region.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "kebab-case")]
+pub enum CoverageState {
+    Complete,
+    Partial { gaps: Vec<CoverageGap> },
+    Unavailable { reasons: Vec<CoverageGap> },
+}
+
+impl Default for CoverageState {
+    fn default() -> Self {
+        Self::Unavailable {
+            reasons: vec![CoverageGap::new(
+                "coverage-not-recorded",
+                "the source report predates explicit coverage state",
+            )],
+        }
+    }
+}
+
+impl CoverageState {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    pub fn gaps(&self) -> &[CoverageGap] {
+        match self {
+            Self::Complete => &[],
+            Self::Partial { gaps } => gaps,
+            Self::Unavailable { reasons } => reasons,
+        }
+    }
 }
 
 impl FindingVisibility {
@@ -260,6 +441,20 @@ impl FixCandidate {
 pub struct Finding {
     /// Stable, unique id for this occurrence (e.g. `missing-dependency:create->fabric-api`).
     pub id: String,
+    /// Stable semantic identity used to compare equivalent conclusions across
+    /// runs. Unlike `id`, it need not identify a physical occurrence.
+    #[serde(default)]
+    pub semantic_id: String,
+    /// Physical occurrence identity, when the conclusion is occurrence-bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence_id: Option<String>,
+    /// Stable conclusion family for grouping and policy; never inferred from an
+    /// id prefix by the assessment engine.
+    #[serde(default)]
+    pub family: String,
+    /// Product surface such as `incident`, `pack-health`, or `context`.
+    #[serde(default)]
+    pub channel: String,
     /// Id of the rule that produced it.
     pub rule_id: String,
     pub severity: Severity,
@@ -296,6 +491,15 @@ pub struct Finding {
     pub proof_kind: Option<ProofKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runtime_refutability: Vec<RuntimeRefutability>,
+    /// Candidate impact proposed by the rule before central assessment.
+    #[serde(default)]
+    pub proposed_impact: Impact,
+    /// Evidence provenance declared by the producing rule.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub evidence_origins: BTreeSet<EvidenceOrigin>,
+    /// Canonical v2 trust assessment. Populated centrally before reporting.
+    #[serde(default)]
+    pub assessment: FindingAssessment,
 }
 
 /// Fluent builder so rules read declaratively.
@@ -308,6 +512,10 @@ impl Finding {
         FindingBuilder {
             finding: Finding {
                 id: id.into(),
+                semantic_id: String::new(),
+                occurrence_id: None,
+                family: String::new(),
+                channel: String::new(),
                 rule_id: rule_id.to_string(),
                 severity: Severity::Warn,
                 category: Category::Environment,
@@ -324,6 +532,9 @@ impl Finding {
                 coverage_requirements: Vec::new(),
                 proof_kind: None,
                 runtime_refutability: Vec::new(),
+                proposed_impact: Impact::Informational,
+                evidence_origins: BTreeSet::new(),
+                assessment: FindingAssessment::default(),
             },
         }
     }
@@ -376,6 +587,30 @@ impl FindingBuilder {
         self.finding.proof_kind = Some(proof_kind);
         self
     }
+    pub fn impact(mut self, impact: Impact) -> Self {
+        self.finding.proposed_impact = impact;
+        self
+    }
+    pub fn evidence_origin(mut self, origin: EvidenceOrigin) -> Self {
+        self.finding.evidence_origins.insert(origin);
+        self
+    }
+    pub fn family(mut self, family: impl Into<String>) -> Self {
+        self.finding.family = family.into();
+        self
+    }
+    pub fn channel(mut self, channel: impl Into<String>) -> Self {
+        self.finding.channel = channel.into();
+        self
+    }
+    pub fn semantic_id(mut self, semantic_id: impl Into<String>) -> Self {
+        self.finding.semantic_id = semantic_id.into();
+        self
+    }
+    pub fn occurrence_id(mut self, occurrence_id: impl Into<String>) -> Self {
+        self.finding.occurrence_id = Some(occurrence_id.into());
+        self
+    }
     pub fn runtime_refutability(mut self, refutability: RuntimeRefutability) -> Self {
         if !self.finding.runtime_refutability.contains(&refutability) {
             self.finding.runtime_refutability.push(refutability);
@@ -388,7 +623,29 @@ impl FindingBuilder {
         self
     }
     pub fn build(self) -> Finding {
-        self.finding
+        let mut finding = self.finding;
+        if finding.semantic_id.is_empty() {
+            finding.semantic_id = finding.id.clone();
+        }
+        if finding.family.is_empty() {
+            finding.family = finding.rule_id.clone();
+        }
+        if finding.channel.is_empty() {
+            finding.channel = match finding.category {
+                Category::Runtime | Category::Log => "incident",
+                Category::Environment
+                | Category::Metadata
+                | Category::Dependency
+                | Category::Loader
+                | Category::Resource
+                | Category::Mixin
+                | Category::Security
+                | Category::Performance
+                | Category::Packaging => "pack-health",
+            }
+            .to_string();
+        }
+        finding
     }
 }
 

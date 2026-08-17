@@ -105,11 +105,13 @@ fn maven_version_in_range(version: &str, range: &str) -> Option<bool> {
     let version = MavenVersion::parse(version)?;
     let range = range.trim();
     if !range.starts_with(['[', '(']) {
-        // A bare Forge/NeoForge requirement is treated as an exact constraint in
-        // the static model. Maven itself calls this a soft recommendation, but
-        // InterMed has no repository selection step in which to apply one.
-        let expected = range.strip_prefix('=').unwrap_or(range);
-        return Some(version.cmp(&MavenVersion::parse(expected)?) == Ordering::Equal);
+        // Maven records a bare version as the recommended version and adds
+        // Restriction::EVERYTHING. Forge/NeoForge then call containsVersion(),
+        // so this is not an exact dependency constraint. Bracket syntax
+        // (`[1.0]`) is the exact form. Validate the token before declaring the
+        // recommendation unbounded.
+        MavenVersion::parse(range)?;
+        return Some(true);
     }
     let intervals = split_maven_intervals(range);
     if intervals.is_empty() {
@@ -899,6 +901,19 @@ mod tests {
         );
         assert!(MavenVersion::parse("1.0.0-1").unwrap() < MavenVersion::parse("1.0.0.1").unwrap());
         assert_eq!(MavenVersion::parse("1a1"), MavenVersion::parse("1-alpha-1"));
+    }
+
+    #[test]
+    fn maven_bare_version_is_a_recommendation_not_an_exact_constraint() {
+        let dialect = VersionDialect::MavenRange;
+        assert_eq!(
+            version_in_range_with_dialect("0.5.1.i", "0.5.1.f", dialect),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("0.5.1.i", "[0.5.1.f]", dialect),
+            Some(false)
+        );
     }
 
     #[test]

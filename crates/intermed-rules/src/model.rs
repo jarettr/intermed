@@ -1,4 +1,4 @@
-//! Declarative rule-pack data model (v1 + v2).
+//! Declarative rule-pack data model (v1 through v3).
 //!
 //! v2 extends v1 with [`RuleKind::Join`], [`RuleKind::Aggregate`], and
 //! [`RuleKind::Correlation`] so one JSON pack can drive the interpreter,
@@ -8,11 +8,15 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use intermed_doctor_core::evidence::{CoverageRequirement, Impact, ProofKind};
+
 /// Unsigned legacy rule-pack schema.
 pub const RULE_PACK_SCHEMA: &str = "intermed-rule-pack-v1";
 
 /// Signed distributable rule-pack schema with extended rule kinds.
 pub const RULE_PACK_SCHEMA_V2: &str = "intermed-rule-pack-v2";
+/// Trust-contract rule-pack schema. Error/Fatal rules must declare assessment.
+pub const RULE_PACK_SCHEMA_V3: &str = "intermed-rule-pack-v3";
 
 /// Rule-pack marketplace / auto-update index schema.
 pub const RULE_REGISTRY_SCHEMA: &str = "intermed-rule-registry-v1";
@@ -100,7 +104,27 @@ pub struct RuleSpec {
     pub settings_refs: BTreeMap<String, String>,
     #[serde(default)]
     pub evidence: Option<RelatedEvidenceSpec>,
+    /// Required in v3 for every Error/Fatal conclusion.
+    #[serde(default)]
+    pub assessment: Option<RuleAssessmentContract>,
     pub finding: FindingTemplate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleAssessmentContract {
+    pub impact: Impact,
+    pub proof_kind: ProofKind,
+    #[serde(default)]
+    pub coverage_requirements: Vec<CoverageRequirement>,
+    #[serde(default)]
+    pub on_missing_prerequisite: MissingPrerequisiteBehavior,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MissingPrerequisiteBehavior {
+    #[default]
+    Abstain,
 }
 
 /// One arm of a join / aggregate / correlation rule.

@@ -14,7 +14,7 @@ use intermed_doctor_core::{Rule, RuleCtx, RuleError};
 
 #[cfg(feature = "duckdb")]
 use intermed_rules::evaluate_pack;
-use intermed_rules::{RulePack, default_core_pack_v2};
+use intermed_rules::{RulePack, default_core_pack_v3};
 
 /// Whether this build linked embedded DuckDB.
 #[must_use]
@@ -38,13 +38,17 @@ impl DuckdbRulePack {
 
 impl Default for DuckdbRulePack {
     fn default() -> Self {
-        Self::new(default_core_pack_v2())
+        Self::new(default_core_pack_v3())
     }
 }
 
 impl Rule for DuckdbRulePack {
     fn id(&self) -> &'static str {
         "duckdb-rule-pack"
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_rules::requirements_for_pack(&self.pack)
     }
 
     #[allow(unused_variables)]

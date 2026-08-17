@@ -53,7 +53,8 @@ Register-ArgumentCompleter -Native -CommandName 'intermed' -ScriptBlock {
             [CompletionResult]::new('--logic', '--logic', [CompletionResultType]::ParameterName, 'Rule backend. The in-process columnar query engine is the default and only in-process engine; `souffle`/`duckdb` are optional external backends over the same IR (require their tool / build feature)')
             [CompletionResult]::new('--jobs', '--jobs', [CompletionResultType]::ParameterName, 'Cap the worker thread count for parallel jar/log scanning. Unset or `0` uses all available cores; lower it on weak machines or shared CI runners')
             [CompletionResult]::new('--threads', '--threads', [CompletionResultType]::ParameterName, 'Cap the worker thread count for parallel jar/log scanning. Unset or `0` uses all available cores; lower it on weak machines or shared CI runners')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the full report as `intermed-doctor-report-v1` JSON')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the full report as canonical `intermed-doctor-report-v2` JSON')
+            [CompletionResult]::new('--report-schema', '--report-schema', [CompletionResultType]::ParameterName, 'JSON report schema. `v1` is a temporary lossy compatibility writer retained through 0.1.7; v2 is canonical')
             [CompletionResult]::new('--sarif', '--sarif', [CompletionResultType]::ParameterName, 'Emit SARIF 2.1.0 (for IDE / CI code-scanning)')
             [CompletionResult]::new('--html', '--html', [CompletionResultType]::ParameterName, 'Write a self-contained HTML report (`index.html` style)')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Write wall-clock phase profile JSON (`intermed-doctor-profile-v1`)')
@@ -431,7 +432,7 @@ Register-ArgumentCompleter -Native -CommandName 'intermed' -ScriptBlock {
         }
         'intermed;lab;eval' {
             [CompletionResult]::new('--manifest', '--manifest', [CompletionResultType]::ParameterName, 'Dataset manifest (`intermed-eval-manifest-v1`) listing report/run pairs')
-            [CompletionResult]::new('--report', '--report', [CompletionResultType]::ParameterName, 'A single Doctor report JSON (`intermed-doctor-report-v1`); use with `--run`')
+            [CompletionResult]::new('--report', '--report', [CompletionResultType]::ParameterName, 'A Doctor report JSON (`intermed-doctor-report-v1` or canonical v2); use with `--run`')
             [CompletionResult]::new('--run', '--run', [CompletionResultType]::ParameterName, 'A single lab run JSON (`intermed-lab-run-v1`); use with `--report`')
             [CompletionResult]::new('--min-severity', '--min-severity', [CompletionResultType]::ParameterName, 'Minimum prediction severity that counts as "flagged"')
             [CompletionResult]::new('--out', '--out', [CompletionResultType]::ParameterName, 'Output accuracy report path (`intermed-rule-accuracy-v3`)')

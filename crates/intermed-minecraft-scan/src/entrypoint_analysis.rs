@@ -19,6 +19,8 @@
 use std::collections::BTreeSet;
 use std::io::{Read, Seek};
 
+use intermed_doctor_core::bounded_zip::MAX_CLASS_BYTES;
+
 use cafebabe::attributes::{Annotation, AnnotationElementValue, AttributeData};
 use cafebabe::bytecode::Opcode;
 use cafebabe::constant_pool::ConstantPoolItem;
@@ -256,6 +258,9 @@ pub(crate) struct JarIntel {
     pub capabilities: Vec<String>,
     pub referenced_packages: Vec<String>,
     pub references_truncated: bool,
+    pub classes_seen: usize,
+    pub classes_scanned: usize,
+    pub coverage_gaps: Vec<String>,
 }
 
 /// Scan up to [`MAX_CLASSES_SCANNED`] of a jar's classes for event subscriptions
@@ -269,8 +274,10 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
     let mut events = Vec::new();
     let mut caps: BTreeSet<&'static str> = BTreeSet::new();
     let mut referenced_packages = BTreeSet::new();
-    let limit = archive.len().min(MAX_CLASSES_SCANNED);
-    for i in 0..limit {
+    let mut classes_seen = 0usize;
+    let mut classes_scanned = 0usize;
+    let mut coverage_gaps: Vec<String> = Vec::new();
+    for i in 0..archive.len() {
         let (dotted, bytes) = {
             let Ok(mut entry) = archive.by_index(i) else {
                 continue;
@@ -279,14 +286,32 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
             if !name.ends_with(".class") || name.contains("module-info") {
                 continue;
             }
+            classes_seen += 1;
+            if classes_scanned >= MAX_CLASSES_SCANNED {
+                if !coverage_gaps.iter().any(|gap| gap.contains("class budget")) {
+                    coverage_gaps.push(format!(
+                        "class budget exhausted after {MAX_CLASSES_SCANNED} class entries"
+                    ));
+                }
+                continue;
+            }
             let dotted = name
                 .strip_suffix(".class")
                 .unwrap_or(&name)
                 .replace('/', ".");
             let mut bytes = Vec::new();
-            if entry.read_to_end(&mut bytes).is_err() {
+            let mut bounded = entry.by_ref().take(MAX_CLASS_BYTES.saturating_add(1));
+            if bounded.read_to_end(&mut bytes).is_err() {
+                coverage_gaps.push(format!("failed to read class entry {name}"));
                 continue;
             }
+            if bytes.len() as u64 > MAX_CLASS_BYTES {
+                coverage_gaps.push(format!(
+                    "class entry {name} exceeds {MAX_CLASS_BYTES} byte cap"
+                ));
+                continue;
+            }
+            classes_scanned += 1;
             (dotted, bytes)
         };
         let is_entry = entrypoint_classes.contains(&dotted);
@@ -307,6 +332,9 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
             .take(MAX_REFERENCED_PACKAGES)
             .collect(),
         references_truncated,
+        classes_seen,
+        classes_scanned,
+        coverage_gaps,
     }
 }
 
@@ -544,6 +572,23 @@ pub(crate) mod testgen {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+
+    fn archive_with_entries(entries: impl IntoIterator<Item = (String, Vec<u8>)>) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            for (name, bytes) in entries {
+                writer.start_file(name, options).unwrap();
+                writer.write_all(&bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
 
     #[test]
     fn subscribe_event_method_yields_event_from_first_parameter() {
@@ -573,5 +618,43 @@ mod tests {
     fn simple_class_strips_package_and_inner() {
         assert_eq!(simple_class("net/minecraft/Foo"), "Foo");
         assert_eq!(simple_class("net.minecraft.Foo$Bar"), "Bar");
+    }
+
+    #[test]
+    fn class_budget_counts_classes_not_leading_assets() {
+        let class =
+            testgen::subscribe_event_class("Lnet/minecraftforge/event/server/ServerStartingEvent;");
+        let entries = (0..7_000)
+            .map(|i| (format!("assets/test/filler/{i}.txt"), vec![0]))
+            .chain((0..10).map(|i| (format!("example/Class{i}.class"), class.clone())));
+        let bytes = archive_with_entries(entries);
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let intel = analyze_jar(&mut archive, &BTreeSet::new());
+
+        assert_eq!(intel.classes_seen, 10);
+        assert_eq!(intel.classes_scanned, 10);
+        assert!(intel.coverage_gaps.is_empty(), "{:?}", intel.coverage_gaps);
+        assert_eq!(intel.events, vec!["ServerStartingEvent"]);
+    }
+
+    #[test]
+    fn oversized_compressed_class_marks_bytecode_coverage_incomplete() {
+        let bytes = archive_with_entries([(
+            "example/Bomb.class".to_string(),
+            vec![0; MAX_CLASS_BYTES as usize + 1],
+        )]);
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let intel = analyze_jar(&mut archive, &BTreeSet::new());
+
+        assert_eq!(intel.classes_seen, 1);
+        assert_eq!(intel.classes_scanned, 0);
+        assert!(
+            intel
+                .coverage_gaps
+                .iter()
+                .any(|gap| gap.contains("exceeds")),
+            "{:?}",
+            intel.coverage_gaps
+        );
     }
 }

@@ -21,7 +21,7 @@ use intermed_doctor_core::facts::{AttrValue, Fact};
 use intermed_doctor_core::{Rule, RuleCtx};
 
 use crate::model::{RuleKind, RulePack};
-use crate::pack::default_core_pack_v2;
+use crate::pack::default_core_pack_v3;
 use crate::tsv::escape_souffle_symbol;
 use crate::{Lowering, RulePackError, evaluate_pack, fact_finding_findings, rule_to_ir};
 
@@ -40,7 +40,7 @@ impl SouffleRulePack {
 
 impl Default for SouffleRulePack {
     fn default() -> Self {
-        Self::new(default_core_pack_v2())
+        Self::new(default_core_pack_v3())
     }
 }
 
@@ -49,9 +49,15 @@ impl Rule for SouffleRulePack {
         "souffle-rule-pack"
     }
 
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        crate::requirements_for_pack(&self.pack)
+    }
+
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        run_souffle(&self.pack, ctx)
-            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))
+        let mut findings = run_souffle(&self.pack, ctx)
+            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))?;
+        crate::apply_pack_trust_contract(&self.pack, &mut findings);
+        Ok(findings)
     }
 }
 
@@ -65,7 +71,7 @@ pub fn souffle_available() -> bool {
 /// The generated Soufflé program for the embedded core pack (schema + one clause per
 /// IR-lowerable FactFinding rule). Exposed for `rules generate --backend datalog`.
 pub fn souffle_program() -> String {
-    let pack = default_core_pack_v2();
+    let pack = default_core_pack_v3();
     let mut out = String::from(FACT_SCHEMA);
     for (i, rule) in pack.rules.iter().enumerate() {
         if let Lowering::Ir(ir) = rule_to_ir(rule)

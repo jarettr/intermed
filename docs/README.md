@@ -1,6 +1,6 @@
 # Documentation
 
-InterMed is at `0.1.5-alpha`. Read the [project status](PROJECT_STATUS.md) for
+InterMed is at `0.1.6-alpha`. Read the [project status](PROJECT_STATUS.md) for
 the validated scope and limits, and the [roadmap](ROADMAP.md) for what comes next.
 
 The documentation has three layers. Start at the top and go deeper only when you
@@ -49,7 +49,9 @@ Complete and precise. Look here for the exact behaviour of a flag or a field.
 - [Caching](reference/caching.md) — the jar scan cache: how it keys, prunes, and
   invalidates.
 - [Facts and schema](reference/facts.md) — the fact model and the
-  `intermed-doctor-report-v1` JSON schema.
+  canonical `intermed-doctor-report-v2` JSON schema and the temporary v1 compatibility writer.
+- [Schema and migration policy](reference/schema-migrations.md) — compatibility
+  windows and invalidation rules for reports, rule packs, and cache payloads.
 - [Project status](PROJECT_STATUS.md) — maturity, validation corpus, support
   boundary, and deferred work.
 

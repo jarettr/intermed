@@ -42,7 +42,8 @@ souffle\:"Soufflé Datalog backend (requires the \`souffle\` binary). Same IR, e
 duckdb\:"In-process DuckDB SQL rule backend (requires \`--features duckdb\`). Same IR"))' \
 '--jobs=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
 '--threads=[Cap the worker thread count for parallel jar/log scanning. Unset or \`0\` uses all available cores; lower it on weak machines or shared CI runners]:N:_default' \
-'--json=[Emit the full report as \`intermed-doctor-report-v1\` JSON]::FILE:_files' \
+'--json=[Emit the full report as canonical \`intermed-doctor-report-v2\` JSON]::FILE:_files' \
+'--report-schema=[JSON report schema. \`v1\` is a temporary lossy compatibility writer retained through 0.1.7; v2 is canonical]:REPORT_SCHEMA:(v1 v2)' \
 '--sarif=[Emit SARIF 2.1.0 (for IDE / CI code-scanning)]::FILE:_files' \
 '--html=[Write a self-contained HTML report (\`index.html\` style)]:FILE:_files' \
 '--profile=[Write wall-clock phase profile JSON (\`intermed-doctor-profile-v1\`)]:FILE:_files' \
@@ -534,7 +535,7 @@ _arguments "${_arguments_options[@]}" : \
 (eval)
 _arguments "${_arguments_options[@]}" : \
 '(--report --run)--manifest=[Dataset manifest (\`intermed-eval-manifest-v1\`) listing report/run pairs]:MANIFEST:_files' \
-'--report=[A single Doctor report JSON (\`intermed-doctor-report-v1\`); use with \`--run\`]:REPORT:_files' \
+'--report=[A Doctor report JSON (\`intermed-doctor-report-v1\` or canonical v2); use with \`--run\`]:REPORT:_files' \
 '--run=[A single lab run JSON (\`intermed-lab-run-v1\`); use with \`--report\`]:RUN:_files' \
 '--min-severity=[Minimum prediction severity that counts as "flagged"]:MIN_SEVERITY:(note warn error)' \
 '--out=[Output accuracy report path (\`intermed-rule-accuracy-v3\`)]:OUT:_files' \

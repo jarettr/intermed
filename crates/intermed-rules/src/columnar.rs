@@ -24,7 +24,7 @@ use intermed_doctor_core::facts::{Fact, FactId};
 use intermed_doctor_core::{Rule, RuleCtx};
 
 use crate::model::{RuleKind, RulePack};
-use crate::pack::default_core_pack_v2;
+use crate::pack::default_core_pack_v3;
 use crate::{Lowering, RulePackError, evaluate_pack, fact_finding_findings, rule_to_ir};
 
 /// In-process columnar Layer-J backend (`--logic columnar`).
@@ -44,7 +44,7 @@ impl ColumnarRulePack {
 
 impl Default for ColumnarRulePack {
     fn default() -> Self {
-        Self::new(default_core_pack_v2())
+        Self::new(default_core_pack_v3())
     }
 }
 
@@ -53,9 +53,15 @@ impl Rule for ColumnarRulePack {
         "columnar-rule-pack"
     }
 
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        crate::requirements_for_pack(&self.pack)
+    }
+
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        run_columnar(&self.pack, ctx)
-            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))
+        let mut findings = run_columnar(&self.pack, ctx)
+            .map_err(|error| intermed_doctor_core::RuleError::new(error.to_string()))?;
+        crate::apply_pack_trust_contract(&self.pack, &mut findings);
+        Ok(findings)
     }
 }
 
@@ -162,6 +168,7 @@ fn run_columnar(pack: &RulePack, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, Rule
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::default_core_pack_v3;
     use intermed_doctor_core::facts::FactStore;
     use intermed_doctor_core::{Target, TargetKind};
 
@@ -200,7 +207,7 @@ mod tests {
 
         let columnar = ColumnarRulePack::default().evaluate(&ctx).unwrap();
         // Same pack via the interpreter.
-        let interp = evaluate_pack(&default_core_pack_v2(), &ctx);
+        let interp = evaluate_pack(&default_core_pack_v3(), &ctx);
 
         let ids = |fs: &[Finding]| {
             let mut v: Vec<String> = fs.iter().map(|f| f.id.clone()).collect();
@@ -212,6 +219,33 @@ mod tests {
             columnar
                 .iter()
                 .all(|f| f.machine_tags.iter().any(|t| t == "columnar"))
+        );
+    }
+
+    #[test]
+    fn columnar_backend_cannot_bypass_legacy_hard_severity_cap() {
+        let mut store = FactStore::new();
+        for archive in ["a.jar", "b.jar"] {
+            store
+                .fact("c", "mod")
+                .subject("duplicate")
+                .attr("file", archive)
+                .attr("version", "1.0.0")
+                .emit();
+        }
+        let mut pack = crate::default_core_pack_v2();
+        pack.rules.retain(|rule| rule.id == "duplicate-id");
+        let target = test_target();
+        let ctx = RuleCtx::for_test(&store, &target);
+        let findings = ColumnarRulePack::new(pack).evaluate(&ctx).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, intermed_evidence::Severity::Warn);
+        assert!(
+            findings[0]
+                .assessment
+                .blockers
+                .iter()
+                .any(|blocker| blocker.code == "legacy-rule-pack-has-no-proof-contract")
         );
     }
 }

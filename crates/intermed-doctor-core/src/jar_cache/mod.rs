@@ -1,15 +1,15 @@
 //! On-disk jar scan cache (read-through helper for collectors).
 //!
 //! ```text
-//!   jar on disk ──▶ fp mtime+size ──▶ SHA-256 (on fp miss) ──▶ JSON payload
-//!                        │ fast hit           │ miss
-//!                        └──────── scan() ◀───┘
+//!   jar on disk ──▶ SHA-256 of current bytes ──▶ JSON payload
+//!          │             │ miss
+//!          └── fp hint ──└──────────────▶ scan()
 //! ```
 //!
 //! Cache files live at:
 //! `{root}/{collector_id}/{cache_version}/{sha[0:2]}/{sha256}.json`
 //!
-//! Fingerprints (mtime+size → sha256, skip full-jar hashing on repeat runs):
+//! Fingerprints (mtime+size → last observed sha256, lookup/telemetry hint only):
 //! `{root}/{collector_id}/fp/{digest[0:2]}/{digest}.json`
 //!
 //! Default root: `$XDG_CACHE_HOME/intermed/jars` (fallback `~/.cache/intermed/jars`).
@@ -57,12 +57,11 @@ use crate::io_util::write_atomic;
 use fingerprint::FingerprintManager;
 use prune::{disk_usage, maybe_prune};
 use util::{
-    WRITE_SHARDS, default_cache_root, file_mtime, new_write_locks, sanitize_segment, sha256_file,
-    shard_index,
+    WRITE_SHARDS, default_cache_root, file_mtime, new_write_locks, sanitize_segment, shard_index,
 };
 
 /// Schema tag embedded in every cache record.
-pub const CACHE_SCHEMA: &str = "intermed-jar-cache-v1";
+pub const CACHE_SCHEMA: &str = "intermed-jar-cache-v2";
 
 /// Hit/miss/write counters accumulated during one doctor run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,7 +69,7 @@ pub struct CacheStats {
     pub hits: u64,
     pub misses: u64,
     pub writes: u64,
-    /// Lookups that skipped full-jar SHA-256 via the fingerprint sidecar.
+    /// Lookups whose fingerprint hint matched before content verification.
     pub fast_hits: u64,
     /// Concurrent scans of the same content that were coalesced by single-flight
     /// (i.e. the expensive `scan()` they would have duplicated was avoided).
@@ -337,7 +336,7 @@ impl JarCache {
         let size_bytes = meta.len();
 
         let fp = self.fingerprints();
-        let (sha256, from_fingerprint) =
+        let (sha256, fingerprint_hint_matched) =
             match fp.resolve_sha256(collector_id, jar, mtime_secs, mtime_nanos, size_bytes) {
                 Some(pair) => pair,
                 None => {
@@ -346,41 +345,12 @@ impl JarCache {
                 }
             };
 
-        // A fingerprint-derived sha may be stale, so it bypasses the memory tier; a
-        // freshly-computed sha is trustworthy and keeps the duplicate-content win.
-        let first = if from_fingerprint {
-            self.try_load_cached_fingerprint(collector_id, cache_version, &sha256)
-        } else {
-            self.try_load_cached(collector_id, cache_version, &sha256)
-        };
-        if let Some(payload) = first {
-            if from_fingerprint {
+        // `sha256` was computed from the current bytes. The fingerprint only
+        // records whether its lookup hint agreed; it never authorizes a payload.
+        if let Some(payload) = self.try_load_cached(collector_id, cache_version, &sha256) {
+            if fingerprint_hint_matched {
                 self.fast_hits.fetch_add(1, Ordering::Relaxed);
             }
-            let _ = fp.save(
-                collector_id,
-                jar,
-                mtime_secs,
-                mtime_nanos,
-                size_bytes,
-                &sha256,
-            );
-            return payload;
-        }
-
-        let sha256 = if from_fingerprint {
-            match sha256_file(jar) {
-                Ok(s) => s,
-                Err(_) => {
-                    self.misses.fetch_add(1, Ordering::Relaxed);
-                    return scan();
-                }
-            }
-        } else {
-            sha256
-        };
-
-        if let Some(payload) = self.try_load_cached(collector_id, cache_version, &sha256) {
             let _ = fp.save(
                 collector_id,
                 jar,
@@ -454,24 +424,7 @@ impl JarCache {
         cache_version: &str,
         sha256: &str,
     ) -> Option<T> {
-        // The true-sha path trusts the memory tier; see `read_cached_fingerprint`.
         let text = self.read_cached_text(collector_id, cache_version, sha256, true)?;
-        parse_record::<T>(&text, sha256, cache_version)
-    }
-
-    /// Like [`read_cached`], but for the **fingerprint fast-path**, where the sha
-    /// is derived from a (mtime+size) fingerprint that may be *stale* if a file's
-    /// content changed without its mtime/size. The memory tier is bypassed here so
-    /// that a stale-sha lookup behaves exactly like the disk tier (which the prune
-    /// / eviction safety relies on); the memory tier is only trusted once the sha
-    /// has been freshly computed from the file's actual bytes.
-    fn read_cached_fingerprint<T: Serialize + DeserializeOwned>(
-        &self,
-        collector_id: &str,
-        cache_version: &str,
-        sha256: &str,
-    ) -> Option<T> {
-        let text = self.read_cached_text(collector_id, cache_version, sha256, false)?;
         parse_record::<T>(&text, sha256, cache_version)
     }
 
@@ -564,19 +517,6 @@ impl JarCache {
         sha256: &str,
     ) -> Option<T> {
         let payload = self.read_cached(collector_id, cache_version, sha256)?;
-        self.hits.fetch_add(1, Ordering::Relaxed);
-        Some(payload)
-    }
-
-    /// [`try_load_cached`](Self::try_load_cached) for the fingerprint fast-path
-    /// (memory tier bypassed — the sha may be stale).
-    fn try_load_cached_fingerprint<T: Serialize + DeserializeOwned>(
-        &self,
-        collector_id: &str,
-        cache_version: &str,
-        sha256: &str,
-    ) -> Option<T> {
-        let payload = self.read_cached_fingerprint(collector_id, cache_version, sha256)?;
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(payload)
     }
@@ -882,7 +822,34 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_avoids_sha_on_repeat_lookup() {
+    fn same_size_same_mtime_rewrite_never_reuses_stale_payload() {
+        let root = temp_root("same-metadata-rewrite");
+        let jar = root.join("mod.jar");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&jar, b"archive-A").unwrap();
+        let original_mtime = fs::metadata(&jar).unwrap().modified().unwrap();
+
+        let cache = JarCache::new(true, Some(root.clone())).unwrap();
+        let first: String = cache.get_or_scan("c", "v1", &jar, || "facts-A".into());
+        assert_eq!(first, "facts-A");
+
+        fs::write(&jar, b"archive-B").unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&jar).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(original_mtime))
+            .unwrap();
+        let rewritten = fs::metadata(&jar).unwrap();
+        assert_eq!(rewritten.len(), b"archive-A".len() as u64);
+        assert_eq!(rewritten.modified().unwrap(), original_mtime);
+
+        let cached: String = cache.get_or_scan("c", "v1", &jar, || "facts-B".into());
+        let uncached: String =
+            JarCache::disabled().get_or_scan("c", "v1", &jar, || "facts-B".into());
+        assert_eq!(cached, uncached);
+        assert_eq!(cached, "facts-B");
+    }
+
+    #[test]
+    fn matching_fingerprint_records_a_verified_fast_hit() {
         let root = temp_root("fp");
         let jar = root.join("mod.jar");
         fs::create_dir_all(&root).unwrap();

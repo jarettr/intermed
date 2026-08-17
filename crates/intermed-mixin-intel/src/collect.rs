@@ -919,6 +919,12 @@ pub fn emit_scan_with_settings(
     }
 
     for af in &scan.apply_failures {
+        let activation = scan
+            .classes
+            .iter()
+            .find(|class| class.class_name == af.mixin && class.mod_id == af.mod_id)
+            .map(|class| class.activation.as_str())
+            .unwrap_or("unknown");
         ctx.store
             .fact(extractor, af.kind.as_str())
             .subject(af.mod_id.clone())
@@ -927,6 +933,11 @@ pub fn emit_scan_with_settings(
             .attr("member", af.member.clone())
             .attr("detail", af.detail.clone())
             .attr("confirmed", af.confirmed)
+            .attr("activation", activation)
+            .attr(
+                "activation_applicable",
+                matches!(activation, "active-confirmed" | "active-assumed"),
+            )
             .source(SourceRef::file(af.mixin.clone()))
             .confidence(if af.confirmed { 0.95 } else { 0.6 })
             .emit();

@@ -17,7 +17,7 @@
 //! and folds the byte one's evidence into it (recording the contributing rule in
 //! `rule_sources`) rather than dropping it.
 
-use intermed_evidence::{Finding, Severity};
+use intermed_evidence::{AssessmentDisposition, ConclusionAdjustment, Finding, Severity};
 use intermed_facts::{FactStore, kind};
 use intermed_resource_identity::ResourceKey;
 
@@ -105,15 +105,6 @@ pub fn apply_semantic_override_suppression(findings: &mut Vec<Finding>) -> usize
     removed
 }
 
-/// Finding-id prefixes whose subject is a recipe resource path, paired with the
-/// fact kinds that mean "a data-pack script touches this recipe".
-const RECIPE_OVERRIDE_PREFIXES: &[&str] = &[
-    "recipe-output-override:",
-    "recipe-type-override:",
-    "recipe-ingredient-override:",
-    "recipe-condition-override:",
-];
-
 /// Downgrade a static resource finding when a data-pack script (KubeJS /
 /// CraftTweaker) removes or replaces the very resource it concerns.
 ///
@@ -145,16 +136,32 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
 
     let mut downgraded = 0;
     for f in findings.iter_mut() {
-        let scripted = if let Some(path) = strip_any_prefix(&f.id, RECIPE_OVERRIDE_PREFIXES) {
-            recipe_is_scripted(path, &scripted_recipes)
-        } else if let Some(path) = f.id.strip_prefix("loot-table-output-override:") {
-            recipe_is_scripted(path, &scripted_loot)
-        } else {
-            false
+        let path = f.affected_components.first().map(String::as_str);
+        let scripted = match (f.family.as_str(), path) {
+            (
+                "recipe-output-override"
+                | "recipe-type-override"
+                | "recipe-ingredient-override"
+                | "recipe-condition-override",
+                Some(path),
+            ) => recipe_is_scripted(path, &scripted_recipes),
+            ("loot-table-output-override", Some(path)) => recipe_is_scripted(path, &scripted_loot),
+            _ => false,
         };
         if scripted {
+            let prior = f.severity;
             if f.severity > Severity::Note {
                 f.severity = Severity::Note;
+            }
+            f.assessment.disposition = AssessmentDisposition::Downgraded;
+            if prior != f.severity {
+                f.assessment.adjustments.push(ConclusionAdjustment {
+                    code: "runtime-resource-mutator-observed".to_string(),
+                    detail: "runtime script evidence can replace the static resource before use"
+                        .to_string(),
+                    from_severity: Some(prior),
+                    to_severity: Some(f.severity),
+                });
             }
             f.confidence = (f.confidence * 0.7).min(0.7);
             if !f.explanation.contains("data-pack script") {
@@ -186,10 +193,6 @@ fn recipe_is_scripted(path: &str, scripted: &std::collections::BTreeSet<String>)
     key.namespace
         .as_deref()
         .is_some_and(|ns| scripted.contains(ns))
-}
-
-fn strip_any_prefix<'a>(id: &'a str, prefixes: &[&str]) -> Option<&'a str> {
-    prefixes.iter().find_map(|p| id.strip_prefix(p))
 }
 
 #[cfg(test)]
@@ -263,6 +266,8 @@ mod tests {
                 "resource-semantics",
                 "recipe-output-override:data/create/recipes/crushing/tuff.json",
             )
+            .family("recipe-output-override")
+            .affects("data/create/recipes/crushing/tuff.json")
             .severity(Severity::Warn)
             .build(),
         ];
@@ -290,6 +295,8 @@ mod tests {
                 "resource-semantics",
                 "recipe-output-override:data/create/recipes/x.json",
             )
+            .family("recipe-output-override")
+            .affects("data/create/recipes/x.json")
             .severity(Severity::Warn)
             .build(),
         ];
@@ -309,6 +316,8 @@ mod tests {
                 "resource-semantics",
                 "recipe-output-override:data/create/recipes/x.json",
             )
+            .family("recipe-output-override")
+            .affects("data/create/recipes/x.json")
             .severity(Severity::Warn)
             .build(),
         ];

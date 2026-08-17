@@ -79,7 +79,7 @@ fn doctor_dump_facts_contains_phase_two_and_three_facts() {
     assert_success(&output);
 
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema"], "intermed-doctor-report-v1");
+    assert_eq!(report["schema"], "intermed-doctor-report-v2");
 
     let facts: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(facts).unwrap()).unwrap();
@@ -123,7 +123,7 @@ fn doctor_writes_multiple_report_artifacts_in_one_run() {
 
     let report: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
-    assert_eq!(report["schema"], "intermed-doctor-report-v1");
+    assert_eq!(report["schema"], "intermed-doctor-report-v2");
     let sarif_doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(sarif).unwrap()).unwrap();
     assert_eq!(sarif_doc["version"], "2.1.0");
@@ -973,7 +973,7 @@ fn real_mods_directory_runs_doctor_and_vfs() {
             || doctor.status.code() == Some(2)
     );
     let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    assert_eq!(report["schema"], "intermed-doctor-report-v1");
+    assert_eq!(report["schema"], "intermed-doctor-report-v2");
 }
 
 // ── VFS / Layer-M regression corpus ─────────────────────────────────────────

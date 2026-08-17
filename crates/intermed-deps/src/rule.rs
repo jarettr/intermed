@@ -3,7 +3,8 @@
 use std::collections::BTreeSet;
 
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, Finding, FixCandidate, ProofKind, Severity,
+    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
+    ProofKind, Severity,
 };
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{Rule, RuleCtx};
@@ -20,6 +21,30 @@ pub struct DependencyRule;
 impl Rule for DependencyRule {
     fn id(&self) -> &'static str {
         "dependency"
+    }
+
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        use intermed_doctor_core::{Layer, RuleRequirements, TargetRegion};
+        RuleRequirements::default()
+            .facts([
+                kind::DEPENDENCY,
+                kind::MOD,
+                kind::PLUGIN,
+                kind::PROVIDED_DEPENDENCY,
+                kind::ARTIFACT_IDENTITY,
+            ])
+            .layers([Layer::Metadata, Layer::Dependency, Layer::Sbom])
+            .regions([TargetRegion::Artifacts, TargetRegion::Metadata])
+            .coverage([
+                CoverageRequirement::CompletePack,
+                CoverageRequirement::CompleteProviderUniverse,
+                CoverageRequirement::ActiveDescriptor,
+            ])
+            .proofs([
+                ProofKind::Observation,
+                ProofKind::DeterministicDerivation,
+                ProofKind::Heuristic,
+            ])
     }
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
@@ -43,12 +68,22 @@ fn should_emit_pubgrub_unsat(
     proof_dependencies: &[(String, String)],
 ) -> bool {
     !proof_dependencies.iter().any(|(from, to)| {
-        let edge = format!("{from}->{to}");
         pairwise.iter().any(|finding| {
-            finding.id.ends_with(&edge)
-                && (matches!(finding.severity, Severity::Error)
-                    || finding.id.starts_with("provider-identity-unresolved:")
-                    || finding.id.starts_with("dependency-identity-undecidable:"))
+            finding
+                .affected_components
+                .iter()
+                .any(|component| component == from)
+                && finding
+                    .affected_components
+                    .iter()
+                    .any(|component| component == to)
+                && matches!(
+                    finding.family.as_str(),
+                    "missing-dependency"
+                        | "wrong-version"
+                        | "provider-identity-unresolved"
+                        | "dependency-identity-undecidable"
+                )
         })
     })
 }
@@ -113,8 +148,13 @@ fn pubgrub_unsat_finding(
     proof_dependencies: &[(String, String)],
 ) -> Finding {
     let mut builder = Finding::builder(rule_id, "dependency-unsat:global")
+        .family("dependency-unsat")
         .coverage_requirement(CoverageRequirement::CompletePack)
+        .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
+        .coverage_requirement(CoverageRequirement::ActiveDescriptor)
         .proof_kind(ProofKind::DeterministicDerivation)
+        .impact(Impact::StartupBlocking)
+        .evidence_origin(EvidenceOrigin::StaticInferred)
         .severity(Severity::Error)
         .category(Category::Dependency)
         .title("Dependency constraints cannot be satisfied together")

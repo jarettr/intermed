@@ -162,6 +162,40 @@ fn summary_section(report: &DoctorReport) -> String {
     }
     out.push_str("</tbody></table>");
 
+    let capabilities = &report.target_capabilities;
+    out.push_str("<h3>Target capabilities</h3><table class=\"kv\">");
+    for (name, state) in [
+        (
+            "Authoritative manifest",
+            &capabilities.authoritative_manifest,
+        ),
+        (
+            "Materialized artifacts",
+            &capabilities.materialized_artifacts,
+        ),
+        ("Loader identity", &capabilities.loader_identity),
+        ("Minecraft identity", &capabilities.minecraft_identity),
+        ("Mod classpath", &capabilities.mod_classpath),
+        ("Minecraft classpath", &capabilities.minecraft_classpath),
+        ("Loader classpath", &capabilities.loader_classpath),
+        ("Mappings", &capabilities.mappings),
+        ("Logs", &capabilities.logs),
+        ("Configs", &capabilities.configs),
+        ("Scripts", &capabilities.scripts),
+        ("Runtime mutators", &capabilities.runtime_mutators),
+        ("Resource blobs", &capabilities.resource_blobs),
+        ("Datapacks", &capabilities.datapacks),
+        ("Runtime profile", &capabilities.runtime_profile),
+        ("Vanilla resources", &capabilities.vanilla_resources),
+    ] {
+        out.push_str(&format!(
+            "<tr><th>{}</th><td>{}</td></tr>",
+            escape(name),
+            escape(&coverage_state_text(state)),
+        ));
+    }
+    out.push_str("</table>");
+
     let mixin = &report.analysis_configuration.mixin;
     let fingerprint = &report.analysis_configuration.fingerprint;
     out.push_str("<h3>Analysis configuration</h3><table class=\"kv\">");
@@ -245,6 +279,27 @@ fn summary_section(report: &DoctorReport) -> String {
     out
 }
 
+fn coverage_state_text(state: &intermed_evidence::CoverageState) -> String {
+    match state {
+        intermed_evidence::CoverageState::Complete => "complete".to_string(),
+        intermed_evidence::CoverageState::Partial { gaps } => format!(
+            "partial: {}",
+            gaps.iter()
+                .map(|gap| format!("{} ({})", gap.code, gap.detail))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+        intermed_evidence::CoverageState::Unavailable { reasons } => format!(
+            "unavailable: {}",
+            reasons
+                .iter()
+                .map(|gap| format!("{} ({})", gap.code, gap.detail))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ),
+    }
+}
+
 // ── Findings tab (filter + provenance) ───────────────────────────────────────
 
 fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> String {
@@ -317,12 +372,52 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
             }
             detail.push_str("</ul>");
         }
+        detail.push_str(&assessment_html(f));
         detail.push_str(&provenance_html(f, by_id));
         out.push_str(&format!(
             "<tr class=\"detail\" id=\"d{i}\" style=\"display:none\"><td></td><td colspan=\"4\">{detail}</td></tr>"
         ));
     }
     out.push_str("</tbody></table>");
+    out
+}
+
+fn assessment_html(f: &intermed_doctor_core::evidence::Finding) -> String {
+    let assessment = &f.assessment;
+    let mut out = format!(
+        "<p><strong>Trust assessment:</strong> disposition=<code>{}</code>, certainty=<code>{}</code>, impact=<code>{}</code>, proof=<code>{}</code></p>",
+        escape(&format!("{:?}", assessment.disposition).to_lowercase()),
+        escape(&format!("{:?}", assessment.certainty).to_lowercase()),
+        escape(&format!("{:?}", assessment.impact).to_lowercase()),
+        escape(&format!("{:?}", assessment.proof_kind).to_lowercase()),
+    );
+    if !assessment.prerequisites.is_empty() {
+        out.push_str("<p><strong>Prerequisites:</strong></p><ul>");
+        for prerequisite in &assessment.prerequisites {
+            out.push_str(&format!(
+                "<li><code>{}</code>: {} — {}</li>",
+                escape(&format!("{:?}", prerequisite.requirement).to_lowercase()),
+                if prerequisite.satisfied {
+                    "met"
+                } else {
+                    "not met"
+                },
+                escape(&prerequisite.detail),
+            ));
+        }
+        out.push_str("</ul>");
+    }
+    if !assessment.blockers.is_empty() {
+        out.push_str("<p><strong>Why InterMed abstained/downgraded:</strong></p><ul>");
+        for blocker in &assessment.blockers {
+            out.push_str(&format!(
+                "<li><code>{}</code> — {}</li>",
+                escape(&blocker.code),
+                escape(&blocker.detail),
+            ));
+        }
+        out.push_str("</ul>");
+    }
     out
 }
 

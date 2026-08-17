@@ -128,12 +128,24 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
     // collapsed to a one-line summary; the rest are grouped by family so a pack
     // with many similar findings prints one stanza per family, not per finding.
     let mut safe_merges = 0usize;
+    let mut explain_only_details = 0usize;
     let mut overlay_only = 0usize;
     let mut verbose_only = 0usize;
     let mut visible_findings: Vec<&intermed_evidence::Finding> = Vec::new();
     for f in &report.findings {
         match f.visibility {
-            FindingVisibility::ExplainOnly => safe_merges += 1,
+            FindingVisibility::ExplainOnly => {
+                if f.machine_tags.iter().any(|tag| {
+                    matches!(
+                        tag.as_str(),
+                        "safe-merge" | "safe-crdt-merge" | "safe-json-object-merge"
+                    )
+                }) {
+                    safe_merges += 1;
+                } else {
+                    explain_only_details += 1;
+                }
+            }
             FindingVisibility::OverlayOnly => overlay_only += 1,
             FindingVisibility::Verbose => verbose_only += 1,
             FindingVisibility::Default => visible_findings.push(f),
@@ -174,6 +186,14 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
             p.dim("Use --vfs-explain-safe to inspect them.")
         );
     }
+    if explain_only_details > 0 {
+        let _ = writeln!(
+            out,
+            "{} {} additional explain-only detail(s) are retained in JSON/explain output.",
+            p.dim("note:"),
+            p.bold(&explain_only_details.to_string())
+        );
+    }
     if overlay_only > 0 {
         let _ = writeln!(
             out,
@@ -191,7 +211,7 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
             p.bold(&verbose_only.to_string())
         );
     }
-    if safe_merges > 0 || overlay_only > 0 {
+    if safe_merges > 0 || explain_only_details > 0 || overlay_only > 0 || verbose_only > 0 {
         out.push('\n');
     }
 
@@ -260,6 +280,24 @@ fn render_finding(out: &mut String, p: &Palette, f: &intermed_evidence::Finding)
             "      {} {}",
             p.dim("affects:"),
             f.affected_components.join(", ")
+        );
+    }
+    let _ = writeln!(
+        out,
+        "      {} disposition={:?}, certainty={:?}, impact={:?}, proof={:?}",
+        p.dim("trust:"),
+        f.assessment.disposition,
+        f.assessment.certainty,
+        f.assessment.impact,
+        f.assessment.proof_kind,
+    );
+    for blocker in &f.assessment.blockers {
+        let _ = writeln!(
+            out,
+            "      {} {} — {}",
+            p.paint("33", "↳ abstained:"),
+            blocker.code,
+            blocker.detail,
         );
     }
     for fix in &f.fix_candidates {

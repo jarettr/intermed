@@ -36,6 +36,11 @@ jobs:
         run: |
           INTERMED_GENERATE_CLI_DOCS=1 cargo build
           git diff --exit-code -- docs/man docs/completions
+      - name: Trust-contract gate
+        run: |
+          cargo test -p intermed-doctor-core --test trust_contract
+          cargo test -p intermed-rules legacy_pack_cannot_emit_an_uncontracted_hard_finding
+          cargo test -p intermed-rules columnar_backend_cannot_bypass_legacy_hard_severity_cap
       - name: Test
         run: cargo test --locked
       - name: Install cargo-audit

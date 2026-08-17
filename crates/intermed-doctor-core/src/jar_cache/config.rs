@@ -16,7 +16,7 @@ pub const DEFAULT_CACHE_MIN_BYTES: u64 = 4 * 1024 * 1024;
 /// Default interval between prune passes.
 pub const DEFAULT_PRUNE_INTERVAL_DAYS: u64 = 1;
 
-/// Default TTL for trusting a fingerprint's `mtime+size → sha256` mapping.
+/// Default TTL for counting a matching fingerprint as a verified fast-hit hint.
 pub const DEFAULT_FINGERPRINT_REVERIFY_DAYS: u64 = 30;
 
 /// Limits governing on-disk jar cache behaviour.
@@ -30,7 +30,8 @@ pub struct JarCacheConfig {
     pub min_bytes: u64,
     /// Run pruning at most once per interval.
     pub prune_interval: Duration,
-    /// How long a fingerprint mapping is trusted before re-hashing.
+    /// How long a matching fingerprint remains eligible for fast-hit telemetry.
+    /// Payload identity is still re-hashed on every lookup.
     pub fingerprint_reverify_ttl: Duration,
 }
 

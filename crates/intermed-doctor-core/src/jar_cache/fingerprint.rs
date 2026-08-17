@@ -1,5 +1,4 @@
-//! Fingerprint sidecars: `mtime+size → sha256` mappings that skip full-jar
-//! hashing on repeat runs.
+//! Fingerprint sidecars: `mtime+size → sha256` lookup hints.
 
 use std::fs;
 use std::io;
@@ -15,18 +14,15 @@ use super::util::{WRITE_SHARDS, jar_path_digest, now_unix_secs, sha256_file, sha
 
 pub(crate) const FINGERPRINT_SCHEMA: &str = "intermed-jar-fp-v1";
 
-/// Maps a jar's cheap identity (`mtime` + `size`) to its content `sha256`, so
-/// repeat runs skip the full-jar hash.
+/// Maps a jar's cheap identity (`mtime` + `size`) to its last observed content
+/// `sha256`.
 ///
 /// **Trust model.** `mtime + size` is a *heuristic* for "same content", not a
-/// proof. We trust it on a match to avoid re-hashing on every run, but the
-/// heuristic can lie — a same-size, same-mtime in-place rewrite (rare, but
-/// possible on copies or certain filesystems) leaves the sidecar pointing at a
-/// stale SHA. `get_or_scan` defends against this: the fingerprint SHA only
-/// short-circuits when it *also* resolves a usable payload; otherwise we fall
-/// back to a real `sha256_file`, so a stale fingerprint costs one wasted lookup,
-/// never a wrong result. `last_verified_secs` records when the mapping was last
-/// confirmed (diagnostic provenance, and a hook for a future re-verify TTL).
+/// proof. It must never authorize a persistent payload lookup: same-size,
+/// same-mtime in-place rewrites are possible. `get_or_scan` always computes the
+/// current content hash before reading a payload; this sidecar is only a lookup
+/// hint/diagnostic signal. `last_verified_secs` records when the mapping was
+/// last confirmed.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct FingerprintRecord {
     pub schema: String,
@@ -122,7 +118,10 @@ impl<'a> FingerprintManager<'a> {
         Ok(())
     }
 
-    /// Resolve content SHA-256, returning `(sha256, from_fingerprint)`.
+    /// Resolve the current content SHA-256, returning `(sha256, hint_matched)`.
+    ///
+    /// The full hash is deliberately computed even when metadata matches a
+    /// sidecar. A fingerprint is a hint, never evidence of content identity.
     pub(crate) fn resolve_sha256(
         &self,
         collector_id: &str,
@@ -131,21 +130,15 @@ impl<'a> FingerprintManager<'a> {
         mtime_nanos: u32,
         size_bytes: u64,
     ) -> Option<(String, bool)> {
-        if let Some(fp) = self.load(collector_id, jar)
-            && fp.mtime_secs == mtime_secs
-            && fp.mtime_nanos == mtime_nanos
-            && fp.size_bytes == size_bytes
-            && !fingerprint_expired(&fp, self.reverify_ttl)
-        {
-            // Counted as a fast hit only once it yields a usable payload (see
-            // `get_or_scan`); a stale fingerprint must not inflate the metric.
-            return Some((fp.sha256, true));
-        }
-        // Metadata matched but the mapping is past its re-verify TTL: fall
-        // through to a real hash so a same-mtime+size rewrite cannot be
-        // trusted indefinitely. The fresh hash refreshes `last_verified_secs`.
+        let hint = self.load(collector_id, jar).filter(|fp| {
+            fp.mtime_secs == mtime_secs
+                && fp.mtime_nanos == mtime_nanos
+                && fp.size_bytes == size_bytes
+                && !fingerprint_expired(fp, self.reverify_ttl)
+        });
         let sha256 = sha256_file(jar).ok()?;
-        Some((sha256, false))
+        let hint_matched = hint.is_some_and(|fp| fp.sha256 == sha256);
+        Some((sha256, hint_matched))
     }
 }
 

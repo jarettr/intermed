@@ -85,6 +85,39 @@ fn content_cache_never_reuses_the_old_archive_locator() {
 }
 
 #[test]
+fn content_cache_does_not_freeze_pack_specific_corpus_trust() {
+    let root = temp_dir("cache-corpus-context");
+    let first = root.join("first");
+    let second = root.join("second");
+    let first_mods = first.join("mods");
+    let second_mods = second.join("mods");
+    std::fs::create_dir_all(&first_mods).unwrap();
+    std::fs::create_dir_all(&second_mods).unwrap();
+    let original = first_mods.join("alpha.jar");
+    write_fabric_jar(&original, "alpha");
+    std::fs::copy(&original, second_mods.join("alpha.jar")).unwrap();
+    std::fs::write(
+        second.join("corpus.lock"),
+        r#"{"schema":"intermed-corpus-lock-v1","mods":[{"project_id":"alpha"}]}"#,
+    )
+    .unwrap();
+    let cache = JarCache::new(true, Some(root.join("cache"))).unwrap();
+
+    let without_lock = scan_mods_dir_with_cache(&first_mods, Some(&cache)).unwrap();
+    let with_lock = scan_mods_dir_with_cache(&second_mods, Some(&cache)).unwrap();
+
+    assert!(!without_lock.records[0].in_corpus_lock);
+    assert_eq!(without_lock.records[0].trust_breakdown.corpus_lock, 0);
+    assert!(with_lock.records[0].in_corpus_lock);
+    assert_eq!(with_lock.records[0].trust_breakdown.corpus_lock, 7);
+    assert!(
+        cache.stats().hits >= 1,
+        "second scan must exercise the cache hit"
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn scan_records_forge_mods_toml_identity() {
     let root = temp_dir("forge");
     let mods = root.join("mods");

@@ -16,13 +16,19 @@ intermed doctor ./mods --json            # to stdout
 intermed doctor ./mods --json report.json
 ```
 
-Schema `intermed-doctor-report-v1`. Top-level keys:
+The canonical schema is `intermed-doctor-report-v2`. Use
+`--report-schema v1` only for a consumer that has not migrated yet; that
+compatibility representation omits the trust-contract detail described below.
+
+Top-level keys:
 
 | Key | Contents |
 |-----|----------|
 | `schema`, `tool_version`, `generated_at` | Identity of the report. |
 | `target` | The path and detected kind. |
 | `environment` | Loader, Minecraft version, side, OS, Java — detected or inferred. |
+| `analysis_environment` | Host process information, kept separate from the analyzed runtime. |
+| `target_capabilities` | Coverage of the manifest, artifacts, classpaths, mappings, logs, configs, scripts, datapacks, and runtime profile. |
 | `summary` | Counts: `fatal`, `error`, `warn`, `note`, `info`, `total`, and `worst`. |
 | `findings` | The flat list (see below). Not grouped — group them as you like. |
 | `fix_plan` | Suggested fixes, aggregated across findings. |
@@ -36,7 +42,9 @@ Each finding:
 
 | Field | Contents |
 |-------|----------|
-| `id` | Stable, unique within a report. The argument to `--explain`. |
+| `id` | Presentation/compatibility identifier, unique within a report. The argument to `--explain`. |
+| `semantic_id`, `occurrence_id` | Stable conclusion identity and, when applicable, the physical occurrence identity. |
+| `family`, `channel` | Typed conclusion family and report channel. |
 | `rule_id` | The rule that produced it. |
 | `severity` | `fatal` / `error` / `warn` / `note` / `info`. |
 | `category` | The analysis area (dependency, resource, mixin, security, …). |
@@ -48,6 +56,29 @@ Each finding:
 | `fix_candidates` | Suggested fixes. |
 | `machine_tags` | Stable tags for filtering. |
 | `visibility` | Whether the finding is shown by default. |
+| `assessment` | Final disposition, impact, certainty, proof kind, provenance, required coverage, evaluated prerequisites, blockers, and severity adjustments. |
+
+`assessment.disposition` is `asserted`, `downgraded`, or `abstained`. An
+`abstained` record preserves the candidate conclusion and evidence but is not a
+hard claim. Its `blockers` explain exactly which prerequisite was missing; for
+example an incomplete provider universe or incompatible mappings. Error and
+Fatal conclusions are permitted only when their declared contract is satisfied.
+
+## Schema compatibility
+
+- `intermed-doctor-report-v2` is canonical from 0.1.6.
+- The v1 reader remains supported.
+- `doctor --report-schema v1` is a temporary, lossy writer through 0.1.7. It
+  removes assessment and target-capability detail that v1 consumers cannot
+  represent.
+- Additive optional fields do not change the schema identifier. Removing a
+  field, changing its meaning/type, or making an optional field mandatory
+  requires a new schema identifier.
+
+Rule packs follow the same explicit policy. `intermed-rule-pack-v3` requires an
+assessment contract for Error/Fatal rules. Legacy v1/v2 packs still load, but
+their hard findings are capped at Warn and carry the
+`legacy-rule-pack-has-no-proof-contract` blocker.
 
 ## SARIF
 

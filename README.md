@@ -9,7 +9,7 @@ It explains; it does not change anything. A run never edits your pack, downloads
 mods, or starts the game. Output is a report you read in a terminal, or JSON /
 SARIF / HTML for tools and CI.
 
-This is `0.1.5-alpha`. The analysis runs and is tested; commands, flags, and
+This is `0.1.6-alpha`. The analysis runs and is tested; commands, flags, and
 output shapes may still change. The [project status](docs/PROJECT_STATUS.md)
 states the validated scope and known limits; the [roadmap](docs/ROADMAP.md)
 tracks what comes next.
@@ -19,15 +19,15 @@ intermed doctor ./mods
 ```
 
 ```
-InterMed Doctor v0.1.5-alpha
+InterMed Doctor v0.1.6-alpha · intermed-doctor-report-v2
 Target: ./mods (mods directory)
 Env:    loader=fabric  mc=1.20.1  java=21
 
-ERROR Missing dependency: cloth-config
-      bewitchment requires cloth-config (*), but it is not installed.
-      → Install cloth-config, or remove bewitchment.
+WARN Missing dependency could not be confirmed: cloth-config
+      Provider coverage is partial; InterMed abstained from an absence claim.
+      trust: disposition=Abstained, certainty=Undecidable
 
-WARNINGS  1 actionable, 10 informational  (0 fatal, 1 error, 0 warn, 10 note · 1073 facts)
+Status: 0 confirmed · 1 review · 1 incomplete · 10 context
 ```
 
 ## What it looks at

@@ -56,6 +56,19 @@ that compounds with time (data).
 - [x] **Schema honesty as a CI gate**: a test asserts every `kind::` predicate is
   either emitted/read or explicitly reserved — phantom predicates become
   impossible by construction.
+- [x] **Typed trust contract:** every Error/Fatal declares its proof kind and
+  coverage prerequisites. `FindingAssessment`, `RuleRequirements`, collector
+  scopes, and target capabilities turn missing prerequisites into a structured
+  abstention instead of a confident guess. Report v2 is canonical; legacy rule
+  packs cannot bypass the hard-severity gate.
+- [x] **Correctness-preserving cache and retention:** persistent scan payloads are
+  trusted only after content hashing, and fact compaction occurs without changing
+  semantic finding identities. Same-size/same-mtime cache replacement and tiny-
+  retention parity are regression-tested.
+- [x] **Minimal trust corpus:** positive and abstention fixtures cover dependency,
+  loader bridge, Mixin coverage, runtime terminality, resource mutators, cache
+  identity, and VFS merge safety. Real-pack validation additionally checks that
+  every surviving hard finding satisfies its assessment contract.
 - [x] **Perf micro-levers:** ancestor-set cache in `related()`
   (the last few percent of mixin time); `group_key` via the type-safe `HashKey`;
   zip central-directory CRC32 in VFS pass 1 (the remaining ~47% of VFS, if

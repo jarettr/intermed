@@ -318,6 +318,9 @@ impl TargetClassIndex {
             // certainty gates absence, not an exact present-class match.
             return true;
         }
+        if mappings.is_some_and(|mapping| !mapping.target_compatible()) {
+            return false;
+        }
         let target_namespace = minecraft_class_namespace(target);
         match self.minecraft_class_namespace() {
             MinecraftClassNamespace::Intermediary => {
@@ -478,6 +481,36 @@ impl TargetClassIndex {
                 TargetResolution::Unchecked
             };
         };
+        if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
+            let Some(descriptor) = descriptor else {
+                return TargetResolution::NameOnlyMatch;
+            };
+            let Some(mapping) = mappings.filter(|mapping| mapping.target_compatible()) else {
+                return TargetResolution::Unchecked;
+            };
+            let Some(from_namespace) = mapping_source_namespace(mapping, dotted) else {
+                return TargetResolution::Unchecked;
+            };
+            let mapped = mapping.resolve_method_symbol(
+                dotted,
+                name,
+                descriptor,
+                from_namespace,
+                "official",
+                None,
+            );
+            let crate::refmap::MappingResolution::Exact { value, .. } = mapped else {
+                return TargetResolution::Unchecked;
+            };
+            if !members.method_names.contains(&value.name) {
+                return TargetResolution::MissingMethod;
+            }
+            return if members.methods.contains(&(value.name, value.descriptor)) {
+                TargetResolution::ExactMatch
+            } else {
+                TargetResolution::DescriptorMismatch
+            };
+        }
         let resolved_name = self.resolve_target_method_name(dotted, name, mappings);
         if !members.method_names.contains(&resolved_name) {
             return TargetResolution::MissingMethod;
@@ -485,9 +518,6 @@ impl TargetClassIndex {
         // Class/method identity is mapped, but descriptors in an obfuscated jar
         // require type-symbol translation too. Until that edge is complete, a
         // name match is useful evidence but descriptor absence is inconclusive.
-        if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
-            return TargetResolution::NameOnlyMatch;
-        }
         let Some(descriptor) = descriptor else {
             return TargetResolution::NameOnlyMatch;
         };
@@ -719,6 +749,26 @@ fn minecraft_class_namespace(target: &str) -> MinecraftClassNamespace {
     }
 }
 
+fn mapping_source_namespace(mapping: &TinyMappings, target: &str) -> Option<&'static str> {
+    use intermed_doctor_core::evidence::MappingNamespace;
+    match minecraft_class_namespace(target) {
+        MinecraftClassNamespace::Intermediary if mapping.has_namespace("intermediary") => {
+            Some("intermediary")
+        }
+        MinecraftClassNamespace::MojmapNamed
+            if mapping.namespace_family("named") == MappingNamespace::MojmapNamed =>
+        {
+            Some("named")
+        }
+        MinecraftClassNamespace::YarnNamed
+            if mapping.namespace_family("named") == MappingNamespace::YarnNamed =>
+        {
+            Some("named")
+        }
+        _ => None,
+    }
+}
+
 /// Whether a `remap=false` Minecraft target resolves verbatim under `runtime`.
 ///
 /// Unobfuscated targets (`com.mojang.*` libraries — see [`is_intermediary_obfuscated`])
@@ -905,8 +955,36 @@ fn detect_for_class(
         // mixins targeting vanilla-inherited methods).
         if index.contains_class(&slash) {
             let name = method_simple_name(&inj.resolved);
-            let resolved_name =
-                index.resolve_target_method_name(&inj.target, name, global_mappings);
+            let descriptor = inj.resolved.find('(').map(|offset| &inj.resolved[offset..]);
+            let resolved_name = if index.minecraft_class_namespace()
+                == MinecraftClassNamespace::OfficialObfuscated
+            {
+                let Some(mapping) = global_mappings.filter(|mapping| mapping.target_compatible())
+                else {
+                    continue;
+                };
+                let Some(from_namespace) = mapping_source_namespace(mapping, &inj.target) else {
+                    continue;
+                };
+                let Some(descriptor) = descriptor else {
+                    continue;
+                };
+                let crate::refmap::MappingResolution::Exact { value, .. } = mapping
+                    .resolve_method_symbol(
+                        &inj.target,
+                        name,
+                        descriptor,
+                        from_namespace,
+                        "official",
+                        None,
+                    )
+                else {
+                    continue;
+                };
+                value.name
+            } else {
+                index.resolve_target_method_name(&inj.target, name, global_mappings)
+            };
             if !name.is_empty() && index.method_resolves(&slash, &resolved_name) == Some(false) {
                 let require = inj.meta.require.unwrap_or(0) >= 1;
                 out.push(ApplyFailure {

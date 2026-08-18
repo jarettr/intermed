@@ -124,6 +124,49 @@ fn summary_section(report: &DoctorReport) -> String {
         out.push_str("</ul></div>");
     }
 
+    if !report.incidents.is_empty() {
+        out.push_str("<h3>Primary runtime incident</h3>");
+        for incident in report.incidents.iter().take(5) {
+            out.push_str("<div class=\"finding sev-error\">");
+            if let Some(cause) = &incident.primary_cause {
+                out.push_str(&format!(
+                    "<p><strong>{}</strong>{}</p>",
+                    escape(&cause.throwable_type),
+                    cause
+                        .message
+                        .as_deref()
+                        .map(|message| format!(": {}", escape(message)))
+                        .unwrap_or_default(),
+                ));
+            }
+            out.push_str(&format!(
+                "<p>{} physical occurrence(s); fuzzy fingerprint <code>{}</code></p>",
+                incident.occurrences.len(),
+                escape(&incident.fuzzy_fingerprint)
+            ));
+            if let Some(transition) = &incident.caller_transition {
+                out.push_str(&format!(
+                    "<p><strong>Caller transition:</strong> {}</p>",
+                    escape(&transition.rationale)
+                ));
+            }
+            if !incident.evidence_path.is_empty() {
+                out.push_str("<details><summary>Evidence path</summary><ol>");
+                for edge in &incident.evidence_path {
+                    out.push_str(&format!(
+                        "<li><code>{}</code> — {} → {} (fact {})</li>",
+                        escape(&format!("{:?}", edge.relation)),
+                        escape(&format!("{:?}", edge.from)),
+                        escape(&format!("{:?}", edge.to)),
+                        edge.source_fact.0,
+                    ));
+                }
+                out.push_str("</ol></details>");
+            }
+            out.push_str("</div>");
+        }
+    }
+
     let default_ids = report
         .findings
         .iter()
@@ -373,6 +416,19 @@ fn findings_section(report: &DoctorReport, by_id: &BTreeMap<FactId, &Fact>) -> S
             detail.push_str("</ul>");
         }
         detail.push_str(&assessment_html(f));
+        if !f.evidence_path.is_empty() {
+            detail.push_str("<details><summary>Cross-layer evidence path</summary><ol>");
+            for edge in &f.evidence_path {
+                detail.push_str(&format!(
+                    "<li><code>{}</code> — {} → {} (fact {})</li>",
+                    escape(&format!("{:?}", edge.relation)),
+                    escape(&format!("{:?}", edge.from)),
+                    escape(&format!("{:?}", edge.to)),
+                    edge.source_fact.0,
+                ));
+            }
+            detail.push_str("</ol></details>");
+        }
         detail.push_str(&provenance_html(f, by_id));
         out.push_str(&format!(
             "<tr class=\"detail\" id=\"d{i}\" style=\"display:none\"><td></td><td colspan=\"4\">{detail}</td></tr>"

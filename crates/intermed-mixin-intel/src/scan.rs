@@ -25,7 +25,7 @@ use crate::refmap::{MappingContext, Namespace, Refmap, TinyMappings, dotted_name
 
 const EXTRACTOR: &str = "mixin-analyzer";
 /// Bump trailing revision when parse / analysis logic changes within a release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r29");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r31");
 
 /// Stable collector / fact extractor id (`mixin-analyzer`).
 pub fn extractor_id() -> &'static str {
@@ -74,6 +74,29 @@ pub fn scan_mods_dir_filtered(
     mixin: MixinSettings,
     minecraft_jar: Option<&Path>,
     minecraft_mappings: Option<&Path>,
+) -> Result<MixinScan, MixinScanError> {
+    scan_mods_dir_filtered_with_environment(
+        dir,
+        cache,
+        scan,
+        mixin,
+        minecraft_jar,
+        minecraft_mappings,
+        None,
+    )
+}
+
+/// Environment-aware variant used by the collector. The target Minecraft
+/// version is kept distinct from mapping-file identity and is used only to
+/// reject wrong-version mapping graphs.
+pub fn scan_mods_dir_filtered_with_environment(
+    dir: &Path,
+    cache: Option<&JarCache>,
+    scan: &intermed_doctor_core::ScanSettings,
+    mixin: MixinSettings,
+    minecraft_jar: Option<&Path>,
+    minecraft_mappings: Option<&Path>,
+    target_minecraft_version: Option<&str>,
 ) -> Result<MixinScan, MixinScanError> {
     if !dir.is_dir() {
         return Err(MixinScanError(format!(
@@ -125,7 +148,11 @@ pub fn scan_mods_dir_filtered(
         }
     }
 
-    let global_mappings = minecraft_mappings.and_then(load_tiny_mappings_file);
+    let global_mappings = minecraft_mappings
+        .and_then(load_tiny_mappings_file)
+        .map(|mapping| {
+            mapping.with_target_minecraft_version(target_minecraft_version.map(str::to_string))
+        });
 
     // Optional Minecraft jar broadens the index to MC classes, so apply-failure
     // checks cover vanilla-targeting mixins (not just mod-targeting ones).
@@ -213,7 +240,7 @@ fn rebind_archive(cached: &mut CachedMixinJar, archive: &str) {
 /// Load a Yarn/Mojmap Tiny v2 file for global named↔intermediary bridging.
 fn load_tiny_mappings_file(path: &Path) -> Option<TinyMappings> {
     let text = std::fs::read_to_string(path).ok()?;
-    TinyMappings::parse(&text)
+    TinyMappings::parse_with_identity(&text, path.display().to_string(), None)
 }
 
 #[derive(Debug)]
@@ -260,6 +287,19 @@ fn ingest_minecraft_jar(
         Some(format!(
             "Minecraft class index is incomplete: {}",
             truncations.join("; ")
+        ))
+    } else if mappings.is_some_and(|mapping| !mapping.target_compatible()) {
+        let mapping = mappings.expect("checked above");
+        Some(format!(
+            "mapping file targets Minecraft {}, but the analyzed environment is {}; absence checks were disabled",
+            mapping
+                .identity()
+                .minecraft_version
+                .as_deref()
+                .unwrap_or("unknown"),
+            mapping
+                .target_minecraft_version()
+                .unwrap_or("a different version")
         ))
     } else if namespace == crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
         && mappings.is_some_and(|mapping| {
@@ -622,7 +662,8 @@ fn discover_tiny_mappings(archive: &mut zip::ZipArchive<std::fs::File>) -> Optio
         "mappings.tiny",
     ] {
         if let Some(text) = read_zip_text(archive, name)
-            && let Some(map) = TinyMappings::parse(&text)
+            && let Some(map) =
+                TinyMappings::parse_with_identity(&text, format!("embedded:{name}"), None)
         {
             return Some(map);
         }

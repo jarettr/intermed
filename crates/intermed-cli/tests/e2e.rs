@@ -1351,17 +1351,34 @@ fn normalize_stdout(output: &Output, root: &Path) -> String {
 }
 
 fn normalize_fact_ids(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == 'f' && chars.peek().is_some_and(|c| c.is_ascii_digit()) {
-            out.push_str("f#");
-            while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
-                chars.next();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        let starts_fact_id = ch == 'f'
+            && chars.get(index + 1).is_some_and(char::is_ascii_digit)
+            && index
+                .checked_sub(1)
+                .and_then(|previous| chars.get(previous))
+                .is_none_or(|previous| !previous.is_ascii_alphanumeric());
+
+        if starts_fact_id {
+            let mut end = index + 1;
+            while chars.get(end).is_some_and(char::is_ascii_digit) {
+                end += 1;
             }
-        } else {
-            out.push(ch);
+            if chars
+                .get(end)
+                .is_none_or(|next| !next.is_ascii_alphanumeric())
+            {
+                out.push_str("f#");
+                index = end;
+                continue;
+            }
         }
+        out.push(ch);
+        index += 1;
     }
     out
 }

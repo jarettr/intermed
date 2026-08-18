@@ -190,13 +190,18 @@ impl Collector for MixinCollector {
             return CollectorOutcome::skipped("no mods directory for mixin scan");
         };
 
-        match scan::scan_mods_dir_filtered(
+        let target_minecraft_version = ctx
+            .store
+            .by_kind(intermed_doctor_core::facts::kind::ENVIRONMENT)
+            .find_map(|fact| fact.attr("mc_version"));
+        match scan::scan_mods_dir_filtered_with_environment(
             &dir,
             ctx.jar_cache,
             &ctx.settings.scan,
             ctx.settings.mixin,
             ctx.settings.minecraft_jar.as_deref(),
             ctx.settings.minecraft_mappings.as_deref(),
+            target_minecraft_version,
         ) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);

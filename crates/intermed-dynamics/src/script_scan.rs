@@ -7,17 +7,16 @@
 //! positive). This module reads the script *source* and extracts the
 //! removals/replacements with a confidence label.
 //!
-//! Honesty: this is a line/keyword heuristic, not a JS/ZenScript parser. We only
-//! emit a fact when a concrete namespaced id literal (`mod:path`) is present on a
-//! removal/replacement line, and stamp it with a confidence below the structural
-//! collectors. A dynamic expression (computed id) yields no fact rather than a
-//! guess.
+//! Honesty: this is a bounded tokenizer and call-context recognizer, not a full
+//! JS/ZenScript parser. It ignores comments and string contents when classifying
+//! calls, and emits only when a concrete namespaced id literal (`mod:path`) is an
+//! argument to a supported removal/replacement call. Dynamic expressions yield
+//! no fact rather than a guess.
 
 use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::Target;
 use intermed_doctor_core::facts::{FactStore, SourceRef, kind};
-use regex::Regex;
 
 /// Confidence for a concrete `mod:id` literal on a removal/replace line.
 const CONF_EXACT: f32 = 0.8;
@@ -30,11 +29,6 @@ const MAX_SCRIPT_FILES: usize = 5_000;
 const MAX_SCRIPT_BYTES: u64 = 4 * 1024 * 1024;
 /// Max directory recursion depth under a script root.
 const MAX_DEPTH: usize = 12;
-
-/// A namespaced id (`mod:path`) or bare namespace literal inside quotes.
-fn id_regex() -> Regex {
-    Regex::new(r#"['"](#?[a-z0-9_.\-]+(?::[a-z0-9_./\-]+)?)['"]"#).expect("valid id regex")
-}
 
 /// Locate script files under the target's roots. Returns `(path, engine)`.
 pub fn script_files(target: &Target) -> Vec<(PathBuf, &'static str)> {
@@ -126,8 +120,26 @@ fn collect_files(
         ));
         return;
     }
-    if out.len() >= MAX_SCRIPT_FILES || !dir.is_dir() {
+    if out.len() >= MAX_SCRIPT_FILES || !dir.exists() {
         return;
+    }
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            gaps.push(format!(
+                "script discovery rejected symlinked directory {}",
+                dir.display()
+            ));
+            return;
+        }
+        Ok(metadata) if !metadata.is_dir() => return,
+        Err(error) => {
+            gaps.push(format!(
+                "cannot inspect script directory {}: {error}",
+                dir.display()
+            ));
+            return;
+        }
+        _ => {}
     }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -148,9 +160,24 @@ fn collect_files(
             }
         };
         let path = entry.path();
-        if path.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                gaps.push(format!(
+                    "cannot inspect script entry {}: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            gaps.push(format!(
+                "script discovery rejected symlink {}",
+                path.display()
+            ));
+        } else if file_type.is_dir() {
             collect_files(&path, ext, engine, depth + 1, out, gaps);
-        } else if path.extension().and_then(|e| e.to_str()) == Some(ext) {
+        } else if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some(ext) {
             out.push((path, engine));
         }
         if out.len() >= MAX_SCRIPT_FILES {
@@ -170,38 +197,47 @@ struct ScriptHit {
 }
 
 /// Scan one script file's text for removals/replacements.
-fn scan_text(text: &str, engine: &str, id_re: &Regex) -> Vec<ScriptHit> {
+fn scan_text(text: &str, engine: &str) -> Vec<ScriptHit> {
     let mut hits = Vec::new();
+    let mut in_block_comment = false;
     for (lineno, raw) in text.lines().enumerate() {
+        let parsed = tokenize_line(raw, &mut in_block_comment);
         let line = raw.trim();
-        if line.is_empty() || line.starts_with("//") || line.starts_with('*') {
+        if parsed.code.is_empty() {
             continue;
         }
-        let lower = line.to_ascii_lowercase();
 
-        // Classify the action on this line (replace > remove; mod-scoped remove).
-        let (fact_kind, via, mod_scoped) =
-            if lower.contains("replaceoutput") || lower.contains("replaceinput") {
-                (
-                    kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
-                    "recipe-replaced",
-                    false,
-                )
-            } else if lower.contains("removebymodid") || lower.contains("removebymod(") {
-                (kind::RUNTIME_REMOVED_RECIPE, "recipe-removed", true)
-            } else if is_tag_removal(&lower) {
-                (kind::RUNTIME_REMOVED_TAG, "tag-removed", false)
-            } else if is_recipe_removal(&lower, engine) {
-                (kind::RUNTIME_REMOVED_RECIPE, "recipe-removed", false)
-            } else {
-                continue;
-            };
+        // Classify actual call tokens, not arbitrary keyword presence in prose or strings.
+        let (fact_kind, via, mod_scoped) = if parsed.calls.iter().any(|call| {
+            matches!(
+                call.as_str(),
+                "replaceoutput" | "replaceinput" | "event.replaceoutput" | "event.replaceinput"
+            )
+        }) {
+            (
+                kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
+                "recipe-replaced",
+                false,
+            )
+        } else if parsed
+            .calls
+            .iter()
+            .any(|call| call.ends_with("removebymodid") || call.ends_with("removebymod"))
+        {
+            (kind::RUNTIME_REMOVED_RECIPE, "recipe-removed", true)
+        } else if is_tag_removal(&parsed) {
+            (kind::RUNTIME_REMOVED_TAG, "tag-removed", false)
+        } else if is_recipe_removal(&parsed, engine) {
+            (kind::RUNTIME_REMOVED_RECIPE, "recipe-removed", false)
+        } else {
+            continue;
+        };
 
         // The first namespaced/namespace literal on the line is the target.
-        let Some(cap) = id_re.captures(line).and_then(|c| c.get(1)) else {
+        let Some(target) = parsed.strings.iter().find(|value| valid_id_literal(value)) else {
             continue; // dynamic / computed id — no confident fact.
         };
-        let target = cap.as_str().to_string();
+        let target = target.clone();
         let has_colon = target.trim_start_matches('#').contains(':');
         // A mod-scoped removal names a namespace; otherwise we need a full id.
         let confidence = if mod_scoped {
@@ -225,22 +261,119 @@ fn scan_text(text: &str, engine: &str, id_re: &Regex) -> Vec<ScriptHit> {
     hits
 }
 
-fn is_recipe_removal(lower: &str, engine: &str) -> bool {
+#[derive(Debug, Default)]
+struct ParsedLine {
+    code: String,
+    calls: Vec<String>,
+    strings: Vec<String>,
+    identifiers: Vec<String>,
+}
+
+fn tokenize_line(raw: &str, in_block_comment: &mut bool) -> ParsedLine {
+    let mut parsed = ParsedLine::default();
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if *in_block_comment {
+            if chars.get(index) == Some(&'*') && chars.get(index + 1) == Some(&'/') {
+                *in_block_comment = false;
+                index += 2;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
+        if chars.get(index) == Some(&'/') && chars.get(index + 1) == Some(&'*') {
+            *in_block_comment = true;
+            index += 2;
+            continue;
+        }
+        if chars.get(index) == Some(&'/') && chars.get(index + 1) == Some(&'/') {
+            break;
+        }
+        if matches!(chars[index], '\'' | '"') {
+            let quote = chars[index];
+            index += 1;
+            let mut value = String::new();
+            while index < chars.len() {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    value.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                if chars[index] == quote {
+                    index += 1;
+                    break;
+                }
+                value.push(chars[index]);
+                index += 1;
+            }
+            parsed.strings.push(value);
+            parsed.code.push_str(" <string> ");
+            continue;
+        }
+        parsed.code.push(chars[index]);
+        index += 1;
+    }
+    let chars = parsed.code.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index].is_ascii_alphabetic() || matches!(chars[index], '_' | '$') {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || matches!(chars[index], '_' | '$' | '.'))
+            {
+                index += 1;
+            }
+            let ident = chars[start..index]
+                .iter()
+                .collect::<String>()
+                .trim_matches('.')
+                .to_ascii_lowercase();
+            let mut next = index;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if chars.get(next) == Some(&'(') {
+                parsed.calls.push(ident.clone());
+            }
+            parsed.identifiers.push(ident);
+        } else {
+            index += 1;
+        }
+    }
+    parsed
+}
+
+fn valid_id_literal(value: &str) -> bool {
+    let value = value.trim_start_matches('#');
+    !value.is_empty()
+        && value.chars().all(|ch| {
+            ch.is_ascii_lowercase()
+                || ch.is_ascii_digit()
+                || matches!(ch, '_' | '.' | '-' | ':' | '/')
+        })
+}
+
+fn is_recipe_removal(parsed: &ParsedLine, engine: &str) -> bool {
     if engine == crate::engine::CRAFTTWEAKER {
-        lower.contains("removebyname")
-            || lower.contains("removerecipe")
-            || lower.contains("recipes.remove")
-            || lower.contains(".remove(")
+        parsed.calls.iter().any(|call| {
+            call.ends_with("removebyname")
+                || call.ends_with("removerecipe")
+                || call == "recipes.remove"
+                || call.ends_with(".remove")
+        })
     } else {
-        // KubeJS: event.remove(...) inside a recipes(event => …) block.
-        lower.contains(".remove(") || lower.contains("event.remove")
+        parsed.calls.iter().any(|call| call == "event.remove")
     }
 }
 
-fn is_tag_removal(lower: &str) -> bool {
-    lower.contains("tag") && (lower.contains(".remove(") || lower.contains("removefrom"))
+fn is_tag_removal(parsed: &ParsedLine) -> bool {
+    parsed.identifiers.iter().any(|identifier| identifier.contains("tag"))
+        && parsed.calls.iter().any(|call| call.ends_with(".remove") || call.ends_with("removefrom"))
         // Avoid double-counting recipe removals that merely mention "tag".
-        && !lower.contains("recipe")
+        && !parsed.identifiers.iter().any(|identifier| identifier.contains("recipe"))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -270,7 +403,6 @@ pub fn emit(store: &mut FactStore, target: &Target) -> ScriptScanResult {
             gaps,
         };
     }
-    let id_re = id_regex();
     let mut emitted = 0usize;
     for (path, engine) in &files {
         let meta = match std::fs::metadata(path) {
@@ -295,13 +427,23 @@ pub fn emit(store: &mut FactStore, target: &Target) -> ScriptScanResult {
             }
         };
         let locator = path.display().to_string();
-        for hit in scan_text(&text, engine, &id_re) {
+        let scope = if locator.contains("/server_scripts/") {
+            "server"
+        } else if locator.contains("/client_scripts/") {
+            "client"
+        } else if locator.contains("/startup_scripts/") {
+            "startup"
+        } else {
+            "shared"
+        };
+        for hit in scan_text(&text, engine) {
             store
                 .fact("static-script-scanner", hit.fact_kind)
                 .subject(hit.target)
                 .attr("engine", *engine)
                 .attr("via", hit.via)
                 .attr("source_kind", "script")
+                .attr("script_scope", scope)
                 .attr("line", (hit.lineno as i64) + 1)
                 .attr("excerpt", hit.excerpt)
                 .source(SourceRef::at_line(locator.clone(), (hit.lineno as u32) + 1))
@@ -327,7 +469,7 @@ mod tests {
     fn kubejs_remove_captures_recipe_id() {
         let text =
             "ServerEvents.recipes(event => {\n  event.remove({ id: 'minecraft:cobblestone' })\n})";
-        let hits = scan_text(text, crate::engine::KUBEJS, &id_regex());
+        let hits = scan_text(text, crate::engine::KUBEJS);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].target, "minecraft:cobblestone");
         assert_eq!(hits[0].fact_kind, kind::RUNTIME_REMOVED_RECIPE);
@@ -337,14 +479,14 @@ mod tests {
     #[test]
     fn kubejs_replace_output_is_modify() {
         let text = "event.replaceOutput({}, 'minecraft:diamond', 'minecraft:coal')";
-        let hits = scan_text(text, crate::engine::KUBEJS, &id_regex());
+        let hits = scan_text(text, crate::engine::KUBEJS);
         assert_eq!(hits[0].fact_kind, kind::RUNTIME_SCRIPT_MODIFIES_RECIPE);
     }
 
     #[test]
     fn crafttweaker_remove_by_name() {
         let text = r#"craftingTable.removeByName("minecraft:torch");"#;
-        let hits = scan_text(text, crate::engine::CRAFTTWEAKER, &id_regex());
+        let hits = scan_text(text, crate::engine::CRAFTTWEAKER);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].target, "minecraft:torch");
         assert_eq!(hits[0].fact_kind, kind::RUNTIME_REMOVED_RECIPE);
@@ -353,7 +495,7 @@ mod tests {
     #[test]
     fn remove_by_modid_is_mod_scoped() {
         let text = r#"craftingTable.removeByModid("create");"#;
-        let hits = scan_text(text, crate::engine::CRAFTTWEAKER, &id_regex());
+        let hits = scan_text(text, crate::engine::CRAFTTWEAKER);
         assert_eq!(hits[0].target, "create");
         assert_eq!(hits[0].confidence, CONF_MOD_SCOPED);
     }
@@ -361,14 +503,24 @@ mod tests {
     #[test]
     fn dynamic_id_yields_no_fact() {
         let text = "event.remove({ id: someVariable })";
-        let hits = scan_text(text, crate::engine::KUBEJS, &id_regex());
+        let hits = scan_text(text, crate::engine::KUBEJS);
         assert!(hits.is_empty());
     }
 
     #[test]
     fn comment_lines_ignored() {
         let text = "// event.remove({ id: 'minecraft:cobblestone' })";
-        let hits = scan_text(text, crate::engine::KUBEJS, &id_regex());
+        let hits = scan_text(text, crate::engine::KUBEJS);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn keywords_in_strings_and_unrelated_calls_do_not_create_actions() {
+        let text = r#"
+            console.info("event.remove('minecraft:diamond')");
+            helper.remove("minecraft:diamond");
+        "#;
+        let hits = scan_text(text, crate::engine::KUBEJS);
         assert!(hits.is_empty());
     }
 }

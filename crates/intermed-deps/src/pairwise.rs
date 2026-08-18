@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
-    ProofKind, Severity,
+    Category, ConclusionKind, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding,
+    FixCandidate, Impact, ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{FactId, kind};
 
@@ -564,6 +564,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                     let dup = is_duplicated(dep_id);
                     let mut b = Finding::builder(rule_id, format!("wrong-version:{modid}->{dep_id}"))
                         .family("wrong-version")
+                        .conclusion_kind(ConclusionKind::WrongVersion)
                         .coverage_requirement(CoverageRequirement::CompletePack)
                         .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
                         .coverage_requirement(CoverageRequirement::ActiveDescriptor)
@@ -618,6 +619,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                             format!("provided-version-mismatch:{modid}->{dep_id}"),
                         )
                         .family("wrong-version")
+                        .conclusion_kind(ConclusionKind::WrongVersion)
                         .coverage_requirement(CoverageRequirement::CompletePack)
                         .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
                         .coverage_requirement(CoverageRequirement::ActiveDescriptor)
@@ -704,6 +706,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                     out.push(
                         Finding::builder(rule_id, format!("missing-dependency:{modid}->{dep_id}"))
                             .family("missing-dependency")
+                            .conclusion_kind(ConclusionKind::MissingDependency)
                             .coverage_requirement(CoverageRequirement::CompletePack)
                             .coverage_requirement(CoverageRequirement::CompleteProviderUniverse)
                             .coverage_requirement(CoverageRequirement::ActiveDescriptor)

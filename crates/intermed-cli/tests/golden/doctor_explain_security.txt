@@ -1,5 +1,7 @@
 WARN Mod `risky` — 1 security API signal(s) in 1 of 1 class(es)
 id: security-api-risk:risky
+semantic id: finding:generic:81d8d4bb06ed2069342154bc
+occurrence id: finding-occurrence:98ea80d09d6a9776a6236e96469dd20d003595b44889c6d07d31e9fad55e3e94
 rule: security-api-risk
 
 Static method-reference evidence in `risky.jar` (1 of 1 class(es) carry direct dangerous calls) indicates: process spawn [medium] (1 class(es)). These are preflight hints from constant-pool analysis (MethodRef/InterfaceMethodRef), not proof of malicious runtime behavior.
@@ -11,3 +13,9 @@ Evidence:
 - f# Subject weight=1.00: uses_process_spawn subject=risky
   attrs: {"affected_classes":1,"archive":"risky.jar","classes_scanned":1,"dangerous_classes":1,"evidence_strength":"medium","provenance":"structural"}
   source: risky.jar!classes extractor=security-scanner
+
+Cross-layer evidence path:
+- Artifact(ArtifactId("sha256:6bc5dd4671d877f36fda6bba303d06805c51baaf80f57ee189af782adcd29c68")) --Corroborates/Corroborating--> Mod(ModInstanceId { artifact: ArtifactId("sha256:6bc5dd4671d877f36fda6bba303d06805c51baaf80f57ee189af782adcd29c68"), declared_id: "risky", descriptor_kind: Fabric, ordinal: 0 }) (fact f#)
+
+Shared recommendations:
+- recommendation:f10692e63afd6546660d81cf4f20f745c85f7c27a1bbc4ddbc6515503e494040

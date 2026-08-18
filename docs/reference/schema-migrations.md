@@ -5,8 +5,10 @@ part of the data, not an implied property of the executable version.
 
 ## Doctor reports
 
-`intermed-doctor-report-v2` is the canonical output from 0.1.6. It adds typed
-finding assessments and target capabilities. The v1 reader remains supported,
+`intermed-doctor-report-v2` is the canonical output from 0.1.6. In 0.1.7 it gains
+additive evidence-graph, incident, shared-recommendation, semantic identity, and
+evidence-path fields. It already permits unknown optional fields, so these do
+not require a v3 schema name. The v1 reader remains supported,
 and `doctor --report-schema v1` provides a lossy compatibility writer through
 0.1.7. V1 cannot preserve assessment prerequisites, blockers, adjustments, or
 target-capability coverage.
@@ -19,8 +21,9 @@ assessment.
 
 ## Rule packs
 
-`intermed-rule-pack-v3` is canonical from 0.1.6. Every rule proposing Error or
-Fatal must declare its impact, proof kind, coverage prerequisites, and behavior
+`intermed-rule-pack-v3` is canonical from 0.1.6. From 0.1.7 every rule proposing
+Error or Fatal must also declare a typed `conclusion_kind`, in addition to its
+impact, proof kind, coverage prerequisites, and behavior
 when a prerequisite is missing. V1 and v2 packs remain loadable, but their
 Error/Fatal output is capped at Warn with a structured
 `legacy-rule-pack-has-no-proof-contract` blocker. Local, remote, signed, and

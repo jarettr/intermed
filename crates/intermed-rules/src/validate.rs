@@ -78,6 +78,12 @@ fn validate_assessment_contract(
                 rule.id
             )));
         }
+        if contract.conclusion_kind.is_none() {
+            return Err(RulePackError(format!(
+                "{}: v3 Error/Fatal rule requires a typed conclusion_kind",
+                rule.id
+            )));
+        }
         if contract.proof_kind == intermed_doctor_core::evidence::ProofKind::Heuristic {
             return Err(RulePackError(format!(
                 "{}: heuristic proof cannot directly emit Error/Fatal",
@@ -340,7 +346,7 @@ mod tests {
             .replace("\"severity\": \"warn\"", "\"severity\": \"error\"")
             .replace(
                 "\"finding\":",
-                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"heuristic\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
+                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"heuristic\", \"conclusion_kind\": \"generic\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
             )
             .replace("ALIAS", "m");
         let err = parse_rule_pack(&bad, "t.json").unwrap_err();
@@ -354,7 +360,7 @@ mod tests {
             .replace("\"severity\": \"warn\"", "\"severity\": \"error\"")
             .replace(
                 "\"finding\":",
-                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"deterministic-derivation\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
+                "\"assessment\": {\"impact\": \"startup-blocking\", \"proof_kind\": \"deterministic-derivation\", \"conclusion_kind\": \"generic\", \"coverage_requirements\": [\"complete-pack\"]}, \"finding\":",
             )
             .replace("ALIAS", "m");
         assert!(parse_rule_pack(&good, "t.json").is_ok());

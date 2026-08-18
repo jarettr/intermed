@@ -18,6 +18,9 @@ pub struct RuntimeEvent {
     pub occurrence_id: String,
     /// Content identity shared by equivalent normalized failures.
     pub semantic_fingerprint: String,
+    /// Rebuild-stable crash family identity: deepest exception, normalized
+    /// message, and class+method frames (no source lines or unstable wrappers).
+    pub fuzzy_fingerprint: String,
     pub timestamp: Option<String>,
     pub thread: Option<String>,
     pub level: Option<String>,
@@ -94,6 +97,9 @@ pub struct ThrowableNode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackFrame {
+    /// Loader module owner parsed from frames such as
+    /// `TRANSFORMER/create@6.0.10/com.example.Class.method(...)`.
+    pub module: Option<String>,
     pub class: String,
     pub method: String,
     pub source: Option<String>,
@@ -236,6 +242,61 @@ fn semantic_fingerprint(event: &RuntimeEvent) -> String {
     finish_digest(digest)
 }
 
+fn fuzzy_fingerprint(event: &RuntimeEvent) -> String {
+    let mut digest = Sha256::new();
+    hash_field(&mut digest, "schema", b"runtime-fuzzy-v1");
+    let deepest = event.exception_chain.iter().rfind(|node| !node.suppressed);
+    if let Some(node) = deepest {
+        let family = node
+            .throwable_type
+            .rsplit('.')
+            .next()
+            .unwrap_or(&node.throwable_type);
+        hash_field(&mut digest, "exception-family", family.as_bytes());
+        hash_field(
+            &mut digest,
+            "normalized-message",
+            normalize_unstable_message(node.message.as_deref().unwrap_or("")).as_bytes(),
+        );
+        for (index, frame) in node.frames.iter().enumerate() {
+            hash_field(
+                &mut digest,
+                &format!("frame:{index}:class"),
+                frame.class.as_bytes(),
+            );
+            hash_field(
+                &mut digest,
+                &format!("frame:{index}:method"),
+                frame.method.as_bytes(),
+            );
+        }
+    } else {
+        hash_field(
+            &mut digest,
+            "message",
+            normalize_unstable_message(&event.message).as_bytes(),
+        );
+    }
+    finish_digest(digest)
+}
+
+fn normalize_unstable_message(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut in_digits = false;
+    for ch in message.trim().chars() {
+        if ch.is_ascii_digit() {
+            if !in_digits {
+                out.push('#');
+            }
+            in_digits = true;
+        } else {
+            in_digits = false;
+            out.extend(ch.to_lowercase());
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn occurrence_id(event: &RuntimeEvent, source: &str, ordinal: usize) -> String {
     let normalized_source = source.replace('\\', "/");
     let mut source_digest = Sha256::new();
@@ -344,6 +405,7 @@ pub fn normalize_events(text: &str, source: &str) -> Vec<RuntimeEvent> {
         if let Some(mut event) = event.take() {
             attach_exception_chain(&mut event);
             event.semantic_fingerprint = semantic_fingerprint(&event);
+            event.fuzzy_fingerprint = fuzzy_fingerprint(&event);
             event.occurrence_id = occurrence_id(&event, source, out.len());
             out.push(event);
         }
@@ -355,6 +417,7 @@ pub fn normalize_events(text: &str, source: &str) -> Vec<RuntimeEvent> {
             current = Some(RuntimeEvent {
                 occurrence_id: String::new(),
                 semantic_fingerprint: String::new(),
+                fuzzy_fingerprint: String::new(),
                 timestamp: captures.name("time").map(|m| m.as_str().to_string()),
                 thread: captures.name("thread").map(|m| m.as_str().to_string()),
                 level: captures.name("level").map(|m| m.as_str().to_string()),
@@ -383,6 +446,7 @@ pub fn normalize_events(text: &str, source: &str) -> Vec<RuntimeEvent> {
             current = Some(RuntimeEvent {
                 occurrence_id: String::new(),
                 semantic_fingerprint: String::new(),
+                fuzzy_fingerprint: String::new(),
                 timestamp: None,
                 thread: None,
                 level: None,
@@ -541,8 +605,17 @@ fn throwable_node(exception: &Exception, cause: Option<usize>, suppressed: bool)
 
 fn parse_frame(frame: &str) -> StackFrame {
     let trimmed = frame.trim().trim_start_matches("at ");
-    let Some(captures) = patterns().frame.captures(trimmed) else {
+    // NeoForge/Forge append the source archive after the Java frame. Strip it
+    // before looking for the module separator; otherwise the final `/` inside
+    // `jar!/:version` is mistaken for the module boundary.
+    let symbol_with_module = trimmed
+        .split_once(" ~[")
+        .or_else(|| trimmed.split_once(" ["))
+        .map_or(trimmed, |(symbol, _)| symbol);
+    let (module, symbol) = split_module_qualified_frame(symbol_with_module);
+    let Some(captures) = patterns().frame.captures(symbol) else {
         return StackFrame {
+            module,
             class: trimmed.to_string(),
             method: String::new(),
             source: None,
@@ -552,6 +625,7 @@ fn parse_frame(frame: &str) -> StackFrame {
     };
     let class = captures["class"].to_string();
     StackFrame {
+        module,
         classification: classify_frame(&class),
         class,
         method: captures["method"].to_string(),
@@ -560,6 +634,28 @@ fn parse_frame(frame: &str) -> StackFrame {
             .name("line")
             .and_then(|m| m.as_str().parse::<u32>().ok()),
     }
+}
+
+fn split_module_qualified_frame(frame: &str) -> (Option<String>, &str) {
+    let Some((prefix, symbol)) = frame.rsplit_once('/') else {
+        return (None, frame);
+    };
+    if !symbol.contains('(') || !symbol.contains('.') {
+        return (None, frame);
+    }
+    let module = prefix
+        .rsplit('/')
+        .next()
+        .and_then(|segment| segment.split('@').next())
+        .filter(|module| {
+            !module.is_empty()
+                && !matches!(
+                    *module,
+                    "minecraft" | "java.base" | "MC-BOOTSTRAP" | "TRANSFORMER"
+                )
+        })
+        .map(str::to_string);
+    (module, symbol)
 }
 
 fn classify_frame(class: &str) -> FrameClassification {
@@ -632,6 +728,20 @@ mod tests {
         let b = normalize_events(line, "crash-reports/crash.txt");
         assert_ne!(a[0].occurrence_id, b[0].occurrence_id);
         assert_eq!(a[0].semantic_fingerprint, b[0].semantic_fingerprint);
+    }
+
+    #[test]
+    fn fuzzy_fingerprint_ignores_wrappers_lines_and_unstable_numbers() {
+        let a = normalize_events(
+            "[12:00:00] [main/FATAL]: net.minecraft.ReportedException: wrapper 10\n\tat wrapper.Host.run(Host.java:10)\nCaused by: java.lang.IllegalStateException: GLFW error 65539\n\tat example.Mod.tick(Mod.java:20)",
+            "latest.log",
+        );
+        let b = normalize_events(
+            "[12:00:01] [main/FATAL]: java.lang.RuntimeException: rebuilt wrapper 99\n\tat other.Wrapper.call(Wrapper.java:500)\nCaused by: java.lang.IllegalStateException: GLFW error 12345\n\tat example.Mod.tick(Mod.java:900)",
+            "crash-reports/new.txt",
+        );
+        assert_ne!(a[0].semantic_fingerprint, b[0].semantic_fingerprint);
+        assert_eq!(a[0].fuzzy_fingerprint, b[0].fuzzy_fingerprint);
     }
 
     #[test]
@@ -718,5 +828,20 @@ mod tests {
             "latest.log",
         );
         assert_eq!(events[0].terminality, EventTerminality::Recovered);
+    }
+
+    #[test]
+    fn neoforge_module_qualified_frame_preserves_symbol_and_mod_owner() {
+        let frame = parse_frame(
+            "TRANSFORMER/createdieselgenerators@1.3.15/com.jesz.createdieselgenerators.EntityFilterItem.appendHoverText(EntityFilterItem.java:46) ~[createdieselgenerators.jar%23521!/:?]",
+        );
+        assert_eq!(frame.module.as_deref(), Some("createdieselgenerators"));
+        assert_eq!(
+            frame.class,
+            "com.jesz.createdieselgenerators.EntityFilterItem"
+        );
+        assert_eq!(frame.method, "appendHoverText");
+        assert_eq!(frame.line, Some(46));
+        assert_eq!(frame.classification, FrameClassification::ModOrLibrary);
     }
 }

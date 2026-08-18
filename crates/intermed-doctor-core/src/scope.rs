@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use intermed_evidence::{CoverageGap, CoverageRequirement, CoverageState, ProofKind};
-use intermed_facts::{FactStore, kind};
+use intermed_facts::{Fact, FactStore, kind};
 use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectorOutcome, CollectorStatus};
@@ -144,10 +144,17 @@ impl TargetCapabilities {
         scopes: &[(&'static str, CollectorScope)],
         settings: &DiagnosisSettings,
     ) -> Self {
-        let env = store.by_kind(kind::ENVIRONMENT).next();
-        let manifest_source = env
+        let env_facts = store.by_kind(kind::ENVIRONMENT).collect::<Vec<_>>();
+        let (best_loader, loader_conflict) =
+            strongest_environment_fact(&env_facts, "loader", &["loader_source", "evidence_source"]);
+        let (best_minecraft, minecraft_conflict) = strongest_environment_fact(
+            &env_facts,
+            "mc_version",
+            &["mc_version_source", "loader_source", "evidence_source"],
+        );
+        let manifest_source = best_loader
             .and_then(|fact| fact.attr("loader_source"))
-            .or_else(|| env.and_then(|fact| fact.attr("mc_version_source")));
+            .or_else(|| best_minecraft.and_then(|fact| fact.attr("mc_version_source")));
         let authoritative_manifest = if settings.pack_manifest.is_some()
             || matches!(manifest_source, Some("explicit-pack-manifest"))
         {
@@ -181,7 +188,11 @@ impl TargetCapabilities {
                 "no materialized mod artifact directory is available",
             )
         };
-        let loader_identity = match env.and_then(|fact| fact.attr("loader")) {
+        let loader_identity = match best_loader.and_then(|fact| fact.attr("loader")) {
+            Some(_) if loader_conflict => partial(
+                "loader-identity-conflict",
+                "equally authoritative environment sources disagree on the target loader",
+            ),
             Some(_)
                 if matches!(
                     manifest_source,
@@ -199,10 +210,14 @@ impl TargetCapabilities {
                 "the target loader could not be established",
             ),
         };
-        let minecraft_identity = match env.and_then(|fact| fact.attr("mc_version")) {
+        let minecraft_identity = match best_minecraft.and_then(|fact| fact.attr("mc_version")) {
+            Some(_) if minecraft_conflict => partial(
+                "minecraft-identity-conflict",
+                "equally authoritative environment sources disagree on the Minecraft version",
+            ),
             Some(_)
                 if matches!(
-                    env.and_then(|fact| fact.attr("mc_version_source")),
+                    best_minecraft.and_then(|fact| fact.attr("mc_version_source")),
                     Some("explicit-pack-manifest" | "instance-manifest" | "runtime-log")
                 ) =>
             {
@@ -332,10 +347,10 @@ impl TargetCapabilities {
                     Layer::DataSemantics,
                     "vanilla-resources",
                 );
-                if store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
-                    fact.attr("coverage_gap")
-                        .is_some_and(|gap| gap.starts_with("vanilla-"))
-                }) {
+                if store
+                    .by_kind(kind::SCAN_TRUNCATED)
+                    .any(|fact| fact.attr("coverage_scope") == Some("vanilla-resources"))
+                {
                     partial(
                         "vanilla-index-incomplete",
                         "the requested vanilla resource index was incomplete",
@@ -567,6 +582,54 @@ fn collector_coverage(
     }
 }
 
+fn environment_evidence_priority(source: Option<&str>) -> u8 {
+    match source.unwrap_or("") {
+        "explicit-pack-manifest"
+        | "pack-manifest"
+        | "modrinth-manifest"
+        | "curseforge-manifest" => 100,
+        "instance-manifest" | "launcher-manifest" | "instance-metadata" => 90,
+        "runtime-log" => 80,
+        "artifact-consensus" => 50,
+        "filesystem-heuristic" => 10,
+        _ => 40,
+    }
+}
+
+fn strongest_environment_fact<'a>(
+    facts: &[&'a Fact],
+    value_attr: &str,
+    source_attrs: &[&str],
+) -> (Option<&'a Fact>, bool) {
+    let best_priority = facts
+        .iter()
+        .filter(|fact| fact.attr(value_attr).is_some())
+        .map(|fact| environment_evidence_priority(environment_fact_source(fact, source_attrs)))
+        .max();
+    let Some(best_priority) = best_priority else {
+        return (None, false);
+    };
+    let mut candidates = facts
+        .iter()
+        .copied()
+        .filter(|fact| {
+            fact.attr(value_attr).is_some()
+                && environment_evidence_priority(environment_fact_source(fact, source_attrs))
+                    == best_priority
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|fact| fact.id);
+    let values = candidates
+        .iter()
+        .filter_map(|fact| fact.attr(value_attr))
+        .collect::<BTreeSet<_>>();
+    (candidates.first().copied(), values.len() > 1)
+}
+
+fn environment_fact_source<'a>(fact: &'a Fact, attrs: &[&str]) -> Option<&'a str> {
+    attrs.iter().find_map(|attr| fact.attr(attr))
+}
+
 fn target_region_presence(target: &Target, name: &str, code: &str) -> CoverageState {
     if target
         .candidate_roots()
@@ -641,5 +704,13 @@ mod tests {
             region_coverage(&outcomes, &scopes, TargetRegion::Logs, "logs"),
             CoverageState::Partial { .. }
         ));
+    }
+
+    #[test]
+    fn runtime_environment_outranks_filesystem_inference_for_capability_gating() {
+        assert!(
+            environment_evidence_priority(Some("runtime-log"))
+                > environment_evidence_priority(Some("filesystem-heuristic"))
+        );
     }
 }

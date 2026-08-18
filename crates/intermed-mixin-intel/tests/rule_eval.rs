@@ -134,7 +134,12 @@ fn mixin_effect_summary_includes_recommendations_and_historical_boost() {
         .unwrap();
     let summary = findings
         .iter()
-        .find(|f| f.id == "mixin-effect-summary:m0()V@HEAD")
+        .find(|f| {
+            f.id.starts_with("mixin-effect-summary:")
+                && f.machine_tags
+                    .iter()
+                    .any(|tag| tag == "mixin-effect-summary")
+        })
         .expect("effect summary finding");
     assert_eq!(summary.severity, Severity::Warn);
     assert!(summary.explanation.contains("Historical runtime logs"));

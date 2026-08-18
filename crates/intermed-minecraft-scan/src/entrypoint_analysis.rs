@@ -26,6 +26,7 @@ use cafebabe::bytecode::Opcode;
 use cafebabe::constant_pool::ConstantPoolItem;
 use cafebabe::descriptors::FieldType;
 use cafebabe::{ParseOptions, parse_class_with_options};
+use serde::{Deserialize, Serialize};
 
 /// `@SubscribeEvent` method-annotation descriptors (Forge + NeoForge).
 const SUBSCRIBE_EVENT: &[&str] = &[
@@ -41,6 +42,18 @@ const EVENT_BUS_SUBSCRIBER: &[&str] = &[
 /// Keep ordinary call/reference evidence bounded even for shaded library jars.
 /// The sorted set also makes emitted facts deterministic across ZIP ordering.
 const MAX_REFERENCED_PACKAGES: usize = 1_024;
+const MAX_CALL_EDGES: usize = 2_048;
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct CallEdge {
+    pub caller_class: String,
+    pub caller_method: String,
+    pub caller_descriptor: String,
+    pub target_class: String,
+    pub target_method: String,
+    pub target_descriptor: String,
+    pub dispatch: String,
+}
 
 /// Structural facts extracted from one entrypoint class.
 #[derive(Default, Debug, PartialEq, Eq)]
@@ -261,6 +274,8 @@ pub(crate) struct JarIntel {
     pub classes_seen: usize,
     pub classes_scanned: usize,
     pub coverage_gaps: Vec<String>,
+    pub call_edges: Vec<CallEdge>,
+    pub call_edges_truncated: bool,
 }
 
 /// Scan up to [`MAX_CLASSES_SCANNED`] of a jar's classes for event subscriptions
@@ -277,6 +292,7 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
     let mut classes_seen = 0usize;
     let mut classes_scanned = 0usize;
     let mut coverage_gaps: Vec<String> = Vec::new();
+    let mut call_edges = BTreeSet::new();
     for i in 0..archive.len() {
         let (dotted, bytes) = {
             let Ok(mut entry) = archive.by_index(i) else {
@@ -317,13 +333,16 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
         let is_entry = entrypoint_classes.contains(&dotted);
         scan_class_signals(
             &bytes,
+            &dotted,
             is_entry,
             &mut events,
             &mut caps,
             &mut referenced_packages,
+            &mut call_edges,
         );
     }
     let references_truncated = referenced_packages.len() > MAX_REFERENCED_PACKAGES;
+    let call_edges_truncated = call_edges.len() > MAX_CALL_EDGES;
     JarIntel {
         events,
         capabilities: caps.into_iter().map(str::to_string).collect(),
@@ -335,6 +354,8 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
         classes_seen,
         classes_scanned,
         coverage_gaps,
+        call_edges: call_edges.into_iter().take(MAX_CALL_EDGES).collect(),
+        call_edges_truncated,
     }
 }
 
@@ -342,10 +363,12 @@ pub(crate) fn analyze_jar<R: Read + Seek>(
 /// `register` opcodes (entry classes only) + capability constant-pool references.
 fn scan_class_signals(
     bytes: &[u8],
+    caller_class: &str,
     is_entry: bool,
     events: &mut Vec<String>,
     caps: &mut BTreeSet<&'static str>,
     referenced_packages: &mut BTreeSet<String>,
+    call_edges: &mut BTreeSet<CallEdge>,
 ) {
     if bytes.len() < 4 || bytes[..4] != [0xCA, 0xFE, 0xBA, 0xBE] {
         return;
@@ -359,6 +382,7 @@ fn scan_class_signals(
     };
 
     for method in &class.methods {
+        collect_method_calls(caller_class, method, call_edges);
         if method
             .attributes
             .iter()
@@ -416,6 +440,56 @@ fn scan_class_signals(
             }
         }
     }
+}
+
+fn collect_method_calls(
+    caller_class: &str,
+    method: &cafebabe::MethodInfo<'_>,
+    out: &mut BTreeSet<CallEdge>,
+) {
+    if out.len() > MAX_CALL_EDGES {
+        return;
+    }
+    let Some(bytecode) = method
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.data {
+            AttributeData::Code(code) => code.bytecode.as_ref(),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    for (_, opcode) in &bytecode.opcodes {
+        let (member, dispatch) = match opcode {
+            Opcode::Invokestatic(member) => (member, "exact"),
+            Opcode::Invokespecial(member) => (member, "exact"),
+            Opcode::Invokevirtual(member) => (member, "virtual-candidate"),
+            Opcode::Invokeinterface(member, _) => (member, "interface-candidate"),
+            _ => continue,
+        };
+        let target_class = member.class_name.as_ref();
+        if same_package_family(caller_class, target_class) || is_platform_class(target_class) {
+            continue;
+        }
+        out.insert(CallEdge {
+            caller_class: caller_class.to_string(),
+            caller_method: method.name.as_ref().to_string(),
+            caller_descriptor: method.descriptor.to_string(),
+            target_class: target_class.replace('/', "."),
+            target_method: member.name_and_type.name.as_ref().to_string(),
+            target_descriptor: member.name_and_type.descriptor.as_ref().to_string(),
+            dispatch: dispatch.to_string(),
+        });
+        if out.len() > MAX_CALL_EDGES {
+            break;
+        }
+    }
+}
+
+fn same_package_family(caller: &str, target: &str) -> bool {
+    let caller = caller.replace('.', "/");
+    caller.split('/').take(3).eq(target.split('/').take(3))
 }
 
 fn is_platform_class(class_name: &str) -> bool {
@@ -531,6 +605,18 @@ pub(crate) mod testgen {
         u16v(out, name_idx);
     }
 
+    fn name_and_type(out: &mut Vec<u8>, name_idx: u16, descriptor_idx: u16) {
+        out.push(12);
+        u16v(out, name_idx);
+        u16v(out, descriptor_idx);
+    }
+
+    fn method_ref(out: &mut Vec<u8>, class_idx: u16, name_and_type_idx: u16) {
+        out.push(10);
+        u16v(out, class_idx);
+        u16v(out, name_and_type_idx);
+    }
+
     /// A class with one `@SubscribeEvent public abstract void onEvent(<event_desc>)`.
     /// `event_desc` is a JVM field descriptor, e.g.
     /// `Lnet/minecraftforge/event/server/ServerStartingEvent;`.
@@ -565,6 +651,47 @@ pub(crate) mod testgen {
         u16v(&mut b, 8); // annotation type_index
         u16v(&mut b, 0); // num_element_value_pairs
         u16v(&mut b, 0); // class attributes_count
+        b
+    }
+
+    /// `public static void run() { dep.Api.touch(); }`.
+    pub fn static_call_class() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&[0xCA, 0xFE, 0xBA, 0xBE]);
+        u16v(&mut b, 0);
+        u16v(&mut b, 52);
+        u16v(&mut b, 13); // twelve constant-pool entries
+        utf8(&mut b, "example/Caller"); // #1
+        class_entry(&mut b, 1); // #2
+        utf8(&mut b, "java/lang/Object"); // #3
+        class_entry(&mut b, 3); // #4
+        utf8(&mut b, "run"); // #5
+        utf8(&mut b, "()V"); // #6
+        utf8(&mut b, "Code"); // #7
+        utf8(&mut b, "dep/Api"); // #8
+        class_entry(&mut b, 8); // #9
+        utf8(&mut b, "touch"); // #10
+        name_and_type(&mut b, 10, 6); // #11
+        method_ref(&mut b, 9, 11); // #12
+        u16v(&mut b, 0x0021); // public, super
+        u16v(&mut b, 2);
+        u16v(&mut b, 4);
+        u16v(&mut b, 0); // interfaces
+        u16v(&mut b, 0); // fields
+        u16v(&mut b, 1); // methods
+        u16v(&mut b, 0x0009); // public static
+        u16v(&mut b, 5);
+        u16v(&mut b, 6);
+        u16v(&mut b, 1); // method attributes
+        u16v(&mut b, 7); // Code
+        b.extend_from_slice(&16u32.to_be_bytes());
+        u16v(&mut b, 0); // max_stack
+        u16v(&mut b, 0); // max_locals
+        b.extend_from_slice(&4u32.to_be_bytes());
+        b.extend_from_slice(&[0xb8, 0x00, 0x0c, 0xb1]); // invokestatic #12; return
+        u16v(&mut b, 0); // exception table
+        u16v(&mut b, 0); // code attributes
+        u16v(&mut b, 0); // class attributes
         b
     }
 }
@@ -606,6 +733,31 @@ mod tests {
         let a = analyze_entrypoint_class(&testgen::subscribe_event_class("I")).expect("analysis");
         assert!(a.registers_listeners);
         assert!(a.events.is_empty());
+    }
+
+    #[test]
+    fn exact_static_method_call_becomes_descriptor_aware_edge() {
+        let mut events = Vec::new();
+        let mut caps = BTreeSet::new();
+        let mut packages = BTreeSet::new();
+        let mut calls = BTreeSet::new();
+        scan_class_signals(
+            &testgen::static_call_class(),
+            "example.Caller",
+            true,
+            &mut events,
+            &mut caps,
+            &mut packages,
+            &mut calls,
+        );
+        let edge = calls.iter().next().expect("call edge");
+        assert_eq!(edge.caller_class, "example.Caller");
+        assert_eq!(edge.caller_method, "run");
+        assert_eq!(edge.caller_descriptor, "()V");
+        assert_eq!(edge.target_class, "dep.Api");
+        assert_eq!(edge.target_method, "touch");
+        assert_eq!(edge.target_descriptor, "()V");
+        assert_eq!(edge.dispatch, "exact");
     }
 
     #[test]

@@ -8,4 +8,5 @@ description = "Findings, severities and the evidence graph linking facts to conc
 
 [dependencies]
 serde.workspace = true
+sha2.workspace = true
 intermed-facts.workspace = true

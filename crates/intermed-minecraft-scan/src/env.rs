@@ -679,13 +679,15 @@ fn detect_runtime_environment(
             let lower = line.to_ascii_lowercase();
             if evidence.java.is_none() {
                 evidence.java = value_after_marker(line, &lower, "java version:")
+                    .or_else(|| value_after_marker(line, &lower, "java version "))
+                    .or_else(|| value_after_marker(line, &lower, "server vm "))
                     .or_else(|| value_after_quoted_marker(line, &lower, "java version"));
             }
             if evidence.minecraft.is_none() {
                 evidence.minecraft = value_after_marker(line, &lower, "minecraft version:")
-                    .or_else(|| {
-                        value_between_markers(line, &lower, "loading minecraft ", " with ")
-                    });
+                    .or_else(|| value_after_marker(line, &lower, "--fml.mcversion, "))
+                    .or_else(|| value_between_markers(line, &lower, "loading minecraft ", " with "))
+                    .or_else(|| value_between_markers(line, &lower, "transformer/minecraft@", "/"));
             }
             if evidence.loader.is_none() {
                 for (needle, loader, component) in [

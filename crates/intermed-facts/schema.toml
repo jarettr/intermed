@@ -96,6 +96,34 @@ attrs.target_package = "string"
 attrs.reference_kind = "string"
 attrs.scan_truncated = "bool"
 
+[kind.bytecode_call_edge]
+subject = "calling mod id"
+complete = true
+attrs.caller_class = "string"
+attrs.caller_method = "string"
+attrs.caller_descriptor = "string"
+attrs.target_class = "string"
+attrs.target_method = "string"
+attrs.target_descriptor = "string"
+attrs.dispatch = "string"
+attrs.archive = "string"
+
+[kind.call_slice_coverage]
+subject = "mod id"
+complete = true
+attrs.edges_retained = "int"
+attrs.max_edges = "int"
+attrs.truncated = "bool"
+attrs.reason = "string"
+
+[kind.script_discovery_coverage]
+subject = "target root"
+complete = true
+attrs.files_discovered = "int"
+attrs.complete = "bool"
+attrs.roots_present = "bool"
+attrs.reason = "string"
+
 [kind.entrypoint_detail]
 subject = "entrypoint detail"
 complete = false
@@ -130,6 +158,9 @@ complete = true
 attrs.from_loader = "string"
 attrs.to_loader = "string"
 attrs.scope = "string"
+attrs.capabilities = "string"
+attrs.coverage = "string"
+attrs.coverage_reason = "string"
 
 [kind.unparseable_archive]
 subject = "archive file name"
@@ -180,18 +211,25 @@ complete = false
 [kind.runtime_event]
 subject = "physical runtime event occurrence id"
 complete = false
+attrs.fuzzy_fingerprint = "string"
 
 [kind.throwable_node]
 subject = "runtime event occurrence id"
 complete = false
+attrs.fuzzy_fingerprint = "string"
 
 [kind.stack_frame]
 subject = "runtime event occurrence id"
 complete = false
+attrs.fuzzy_fingerprint = "string"
+attrs.owner_candidates = "string"
+attrs.ownership = "string"
+attrs.module = "string"
 
 [kind.crash_anchor]
 subject = "runtime event occurrence id"
 complete = false
+attrs.fuzzy_fingerprint = "string"
 
 [kind.scan_truncated]
 subject = "archive file name"
@@ -200,6 +238,7 @@ attrs.layer = "string"
 attrs.reason = "string"
 attrs.relevant_entry = "bool"
 attrs.coverage_gap = "string"
+attrs.coverage_scope = "string"
 
 [kind.resource_writer]
 subject = "mod id"
@@ -343,6 +382,8 @@ complete = false
 [kind.mixin_application_site]
 subject = "mixin application site"
 complete = false
+attrs.site_semantic_id = "string"
+attrs.site_occurrence_id = "string"
 
 [kind.mixin_classpath_coverage]
 subject = "mixin classpath coverage"

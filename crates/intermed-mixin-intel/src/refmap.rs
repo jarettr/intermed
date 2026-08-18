@@ -7,6 +7,104 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+const MAPPING_PARSER_VERSION: &str = "tiny-v2-r2";
+
+type SignatureTranslationKey = (String, String, String, String, String);
+type SignatureTranslation = (String, String, String);
+type SignatureTranslations = BTreeMap<SignatureTranslationKey, BTreeSet<SignatureTranslation>>;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MappingIncompatibility {
+    MinecraftVersionMismatch { mapping: String, target: String },
+    NamespaceNotDeclared { namespace: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappingGap {
+    pub edge: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "resolution", rename_all = "kebab-case")]
+pub enum MappingResolution<T> {
+    Exact {
+        value: T,
+        path: Vec<MappingEdge>,
+    },
+    Ambiguous {
+        candidates: Vec<T>,
+    },
+    Partial {
+        translated: Option<T>,
+        missing_edges: Vec<MappingGap>,
+    },
+    Incompatible {
+        reason: MappingIncompatibility,
+    },
+    Unavailable,
+}
+
+impl<T> MappingResolution<T> {
+    #[must_use]
+    pub fn exact(self) -> Option<T> {
+        match self {
+            Self::Exact { value, .. } => Some(value),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappingEdge {
+    pub from_namespace: String,
+    pub to_namespace: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MappingFileIdentity {
+    pub graph_id: String,
+    pub source: String,
+    pub sha256: String,
+    pub minecraft_version: Option<String>,
+    pub source_namespace: String,
+    pub target_namespaces: Vec<String>,
+    pub parser_version: String,
+}
+
+impl Default for MappingFileIdentity {
+    fn default() -> Self {
+        Self {
+            graph_id: "mapping:unavailable".to_string(),
+            source: String::new(),
+            sha256: String::new(),
+            minecraft_version: None,
+            source_namespace: String::new(),
+            target_namespaces: Vec::new(),
+            parser_version: MAPPING_PARSER_VERSION.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MappedMethod {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+    pub namespace: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct MappedField {
+    pub owner: String,
+    pub name: String,
+    pub descriptor: String,
+    pub namespace: String,
+}
 
 /// Parsed SpongePowered `.refmap.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,11 +195,17 @@ pub fn is_intermediary_name(name: &str) -> bool {
 /// columns by namespace *name*, not a fixed column index.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TinyMappings {
+    identity: MappingFileIdentity,
+    target_minecraft_version: Option<String>,
     namespaces: Vec<String>,
     /// Pairwise class-name graph keyed by `(from namespace, to namespace, name)`.
     class_translations: BTreeMap<(String, String, String), String>,
     /// Pairwise method-name graph keyed by `(from ns, to ns, owner, member)`.
     method_translations: BTreeMap<(String, String, String, String), String>,
+    /// Descriptor-aware graph. Values are sets so overload ambiguity cannot be
+    /// hidden by last-writer-wins insertion.
+    method_signature_translations: SignatureTranslations,
+    field_signature_translations: SignatureTranslations,
     /// `namespace -> (src_class_slash -> mapped_class_slash)`.
     class_maps: BTreeMap<String, BTreeMap<String, String>>,
     /// `namespace -> (intermediary_class_slash -> (src_member -> mapped_member))`.
@@ -127,6 +231,15 @@ impl TinyMappings {
     /// implementation trimmed every line, collapsing the nesting and mistaking a
     /// member's descriptor column for an owner — so real Tiny v2 never resolved).
     pub fn parse(text: &str) -> Option<Self> {
+        Self::parse_with_identity(text, "embedded:mappings.tiny", None)
+    }
+
+    /// Parse a Tiny mapping graph while retaining the mapping artifact identity.
+    pub fn parse_with_identity(
+        text: &str,
+        source: impl Into<String>,
+        minecraft_version: Option<String>,
+    ) -> Option<Self> {
         let mut raw = text.lines();
         let header = loop {
             let l = raw.next()?;
@@ -162,7 +275,20 @@ impl TinyMappings {
             .unwrap_or_else(|| namespaces.len().saturating_sub(1));
         let named_ns = namespaces[named_idx].clone();
 
+        let source = source.into();
+        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let minecraft_version = minecraft_version.or_else(|| infer_minecraft_version(&source));
+        let identity = MappingFileIdentity {
+            graph_id: format!("mapping:sha256:{sha256}"),
+            source,
+            sha256,
+            minecraft_version,
+            source_namespace: namespaces[0].clone(),
+            target_namespaces: namespaces.iter().skip(1).cloned().collect(),
+            parser_version: MAPPING_PARSER_VERSION.to_string(),
+        };
         let mut out = Self {
+            identity,
             named_ns,
             namespaces: namespaces.clone(),
             ..Self::default()
@@ -177,6 +303,7 @@ impl TinyMappings {
         // analyzer queries members by). `None` until the first `c` row.
         let mut class_inter: Option<String> = None;
         let mut current_class_names: Option<Vec<String>> = None;
+        let mut raw_members = Vec::<(String, String, Vec<String>, Vec<String>)>::new();
 
         for line in raw {
             if line.trim().is_empty() {
@@ -241,6 +368,14 @@ impl TinyMappings {
                     let all_member_names = (0..namespaces.len())
                         .map(|i| names.get(i).copied().unwrap_or(names[0]).to_string())
                         .collect::<Vec<_>>();
+                    if let Some(class_names) = &current_class_names {
+                        raw_members.push((
+                            tag.to_string(),
+                            cols[1].to_string(),
+                            class_names.clone(),
+                            all_member_names.clone(),
+                        ));
+                    }
                     if tag == "m"
                         && let Some(class_names) = &current_class_names
                     {
@@ -286,7 +421,241 @@ impl TinyMappings {
                 _ => {}
             }
         }
+        // Build member edges only after every class row is known, because JVM
+        // descriptors may refer to classes declared later in the Tiny file.
+        for (tag, source_descriptor, class_names, member_names) in raw_members {
+            for (from_idx, from_ns) in namespaces.iter().enumerate() {
+                let descriptor_from =
+                    out.translate_descriptor_between(&source_descriptor, &namespaces[0], from_ns);
+                for (to_idx, to_ns) in namespaces.iter().enumerate() {
+                    let descriptor_to =
+                        out.translate_descriptor_between(&source_descriptor, &namespaces[0], to_ns);
+                    let (Some(descriptor_from), Some(descriptor_to)) =
+                        (descriptor_from.clone(), descriptor_to)
+                    else {
+                        continue;
+                    };
+                    let key = (
+                        from_ns.clone(),
+                        to_ns.clone(),
+                        class_names[from_idx].clone(),
+                        member_names[from_idx].clone(),
+                        descriptor_from,
+                    );
+                    let value = (
+                        class_names[to_idx].clone(),
+                        member_names[to_idx].clone(),
+                        descriptor_to,
+                    );
+                    let target = if tag == "m" {
+                        &mut out.method_signature_translations
+                    } else {
+                        &mut out.field_signature_translations
+                    };
+                    target.entry(key).or_default().insert(value);
+                }
+            }
+        }
         Some(out)
+    }
+
+    #[must_use]
+    pub fn identity(&self) -> &MappingFileIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub fn with_target_minecraft_version(mut self, version: Option<String>) -> Self {
+        self.target_minecraft_version = version;
+        self
+    }
+
+    #[must_use]
+    pub fn target_compatible(&self) -> bool {
+        match (
+            self.identity.minecraft_version.as_deref(),
+            self.target_minecraft_version.as_deref(),
+        ) {
+            (Some(mapping), Some(target)) => mapping == target,
+            _ => true,
+        }
+    }
+
+    #[must_use]
+    pub fn target_minecraft_version(&self) -> Option<&str> {
+        self.target_minecraft_version.as_deref()
+    }
+
+    #[must_use]
+    pub fn namespace_family(
+        &self,
+        namespace: &str,
+    ) -> intermed_doctor_core::evidence::MappingNamespace {
+        use intermed_doctor_core::evidence::MappingNamespace;
+        match namespace {
+            "official" => MappingNamespace::Official,
+            "intermediary" => MappingNamespace::Intermediary,
+            "srg" | "searge" => MappingNamespace::Srg,
+            "neoform" => MappingNamespace::NeoForm,
+            "named" if self.has_namespace("intermediary") => MappingNamespace::YarnNamed,
+            "named" if self.has_namespace("official") => MappingNamespace::MojmapNamed,
+            _ => MappingNamespace::Unknown,
+        }
+    }
+
+    /// Resolve one overload-safe method symbol. Non-exact descriptor or version
+    /// compatibility is an explicit non-Exact outcome and must not prove absence.
+    pub fn resolve_method_symbol(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        from_namespace: &str,
+        to_namespace: &str,
+        target_minecraft_version: Option<&str>,
+    ) -> MappingResolution<MappedMethod> {
+        if let (Some(mapping), Some(target)) = (
+            self.identity.minecraft_version.as_deref(),
+            target_minecraft_version.or(self.target_minecraft_version.as_deref()),
+        ) && mapping != target
+        {
+            return MappingResolution::Incompatible {
+                reason: MappingIncompatibility::MinecraftVersionMismatch {
+                    mapping: mapping.to_string(),
+                    target: target.to_string(),
+                },
+            };
+        }
+        for namespace in [from_namespace, to_namespace] {
+            if !self.has_namespace(namespace) {
+                return MappingResolution::Incompatible {
+                    reason: MappingIncompatibility::NamespaceNotDeclared {
+                        namespace: namespace.to_string(),
+                    },
+                };
+            }
+        }
+        if !is_valid_method_descriptor(descriptor) {
+            return MappingResolution::Partial {
+                translated: None,
+                missing_edges: vec![MappingGap {
+                    edge: "method-descriptor".to_string(),
+                    detail: "an exact JVM method descriptor is required".to_string(),
+                }],
+            };
+        }
+        let key = (
+            from_namespace.to_string(),
+            to_namespace.to_string(),
+            owner.replace('.', "/"),
+            name.to_string(),
+            descriptor.to_string(),
+        );
+        let Some(values) = self.method_signature_translations.get(&key) else {
+            let translated = self
+                .method_translations
+                .get(&(
+                    from_namespace.to_string(),
+                    to_namespace.to_string(),
+                    owner.replace('.', "/"),
+                    name.to_string(),
+                ))
+                .map(|mapped_name| MappedMethod {
+                    owner: self
+                        .translate_class_from_to(owner, from_namespace, to_namespace)
+                        .unwrap_or_else(|| owner.replace('.', "/")),
+                    name: mapped_name.clone(),
+                    descriptor: String::new(),
+                    namespace: to_namespace.to_string(),
+                });
+            return MappingResolution::Partial {
+                translated,
+                missing_edges: vec![MappingGap {
+                    edge: "descriptor-types".to_string(),
+                    detail: "not every class type in the method descriptor has a mapping edge"
+                        .to_string(),
+                }],
+            };
+        };
+        let candidates = values
+            .iter()
+            .map(|(owner, name, descriptor)| MappedMethod {
+                owner: owner.clone(),
+                name: name.clone(),
+                descriptor: descriptor.clone(),
+                namespace: to_namespace.to_string(),
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            MappingResolution::Exact {
+                value: candidates[0].clone(),
+                path: vec![MappingEdge {
+                    from_namespace: from_namespace.to_string(),
+                    to_namespace: to_namespace.to_string(),
+                    source: self.identity.graph_id.clone(),
+                }],
+            }
+        } else {
+            MappingResolution::Ambiguous { candidates }
+        }
+    }
+
+    pub fn resolve_field_symbol(
+        &self,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        from_namespace: &str,
+        to_namespace: &str,
+    ) -> MappingResolution<MappedField> {
+        let key = (
+            from_namespace.to_string(),
+            to_namespace.to_string(),
+            owner.replace('.', "/"),
+            name.to_string(),
+            descriptor.to_string(),
+        );
+        let Some(values) = self.field_signature_translations.get(&key) else {
+            return MappingResolution::Unavailable;
+        };
+        let candidates = values
+            .iter()
+            .map(|(owner, name, descriptor)| MappedField {
+                owner: owner.clone(),
+                name: name.clone(),
+                descriptor: descriptor.clone(),
+                namespace: to_namespace.to_string(),
+            })
+            .collect::<Vec<_>>();
+        if candidates.len() == 1 {
+            MappingResolution::Exact {
+                value: candidates[0].clone(),
+                path: vec![MappingEdge {
+                    from_namespace: from_namespace.to_string(),
+                    to_namespace: to_namespace.to_string(),
+                    source: self.identity.graph_id.clone(),
+                }],
+            }
+        } else {
+            MappingResolution::Ambiguous { candidates }
+        }
+    }
+
+    fn translate_class_from_to(&self, class: &str, from: &str, to: &str) -> Option<String> {
+        self.class_translations
+            .get(&(from.to_string(), to.to_string(), class.replace('.', "/")))
+            .cloned()
+    }
+
+    fn translate_descriptor_between(
+        &self,
+        descriptor: &str,
+        from: &str,
+        to: &str,
+    ) -> Option<String> {
+        translate_jvm_descriptor(descriptor, |class| {
+            self.translate_class_from_to(class, from, to)
+        })
     }
 
     /// Resolve a method name within `class_slash` to its most human-readable
@@ -531,6 +900,69 @@ fn split_method_name_descriptor(method: &str) -> (&str, Option<&str>) {
     }
 }
 
+fn is_valid_method_descriptor(descriptor: &str) -> bool {
+    descriptor.starts_with('(')
+        && descriptor
+            .find(')')
+            .is_some_and(|close| close + 1 < descriptor.len())
+        && translate_jvm_descriptor(descriptor, |class| Some(class.to_string())).is_some()
+}
+
+/// Translate every object type in a JVM field/method descriptor. Platform and
+/// library classes outside the Minecraft namespace retain identity; an unknown
+/// Minecraft type makes the edge partial instead of guessing.
+fn translate_jvm_descriptor(
+    descriptor: &str,
+    mut translate_class: impl FnMut(&str) -> Option<String>,
+) -> Option<String> {
+    if descriptor.is_empty() {
+        return None;
+    }
+    let bytes = descriptor.as_bytes();
+    let mut out = String::with_capacity(descriptor.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'L' {
+            let rest = &descriptor[index + 1..];
+            let end = rest.find(';')?;
+            let class = &rest[..end];
+            let translated = translate_class(class).or_else(|| {
+                (!class.starts_with("net/minecraft/") && !class.starts_with("com/mojang/"))
+                    .then(|| class.to_string())
+            })?;
+            out.push('L');
+            out.push_str(&translated);
+            out.push(';');
+            index += end + 2;
+        } else {
+            let ch = byte as char;
+            if !matches!(
+                ch,
+                '(' | ')' | '[' | 'B' | 'C' | 'D' | 'F' | 'I' | 'J' | 'S' | 'Z' | 'V'
+            ) {
+                return None;
+            }
+            out.push(ch);
+            index += 1;
+        }
+    }
+    Some(out)
+}
+
+fn infer_minecraft_version(source: &str) -> Option<String> {
+    source
+        .split(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .map(|token| token.trim_matches('.'))
+        .filter(|token| token.matches('.').count() >= 1)
+        .find(|token| {
+            token
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -605,6 +1037,87 @@ mod tests {
         assert_eq!(
             map.translate_method_to("net.minecraft.server.MinecraftServer", "tick", "official"),
             Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn descriptor_aware_mapping_is_overload_safe_and_translates_types() {
+        let tiny = "tiny\t2\t0\tofficial\tintermediary\tnamed\n\
+                    c\ta\tnet/minecraft/class_1\tnet/minecraft/Foo\n\
+                    \tm\t(Lb;)Lc;\td\tmethod_1\ttick\n\
+                    \tm\t(I)Lc;\te\tmethod_2\ttick\n\
+                    c\tb\tnet/minecraft/class_2\tnet/minecraft/Arg\n\
+                    c\tc\tnet/minecraft/class_3\tnet/minecraft/Result\n";
+        let map = TinyMappings::parse(tiny).unwrap();
+        let result = map.resolve_method_symbol(
+            "net/minecraft/Foo",
+            "tick",
+            "(Lnet/minecraft/Arg;)Lnet/minecraft/Result;",
+            "named",
+            "official",
+            None,
+        );
+        let MappingResolution::Exact { value, path } = result else {
+            panic!("expected exact")
+        };
+        assert_eq!(value.owner, "a");
+        assert_eq!(value.name, "d");
+        assert_eq!(value.descriptor, "(Lb;)Lc;");
+        assert_eq!(path[0].source, map.identity().graph_id);
+    }
+
+    #[test]
+    fn missing_descriptor_edge_is_partial_not_an_absence_proof() {
+        let tiny = "tiny\t2\t0\tofficial\tnamed\n\
+                    c\ta\tnet/minecraft/Foo\n\
+                    \tm\t(Lz;)V\tb\ttick\n";
+        let map = TinyMappings::parse(tiny).unwrap();
+        assert!(matches!(
+            map.resolve_method_symbol(
+                "net/minecraft/Foo",
+                "tick",
+                "(Lnet/minecraft/Missing;)V",
+                "named",
+                "official",
+                None,
+            ),
+            MappingResolution::Partial { .. }
+        ));
+    }
+
+    #[test]
+    fn mapping_version_mismatch_is_incompatible() {
+        let tiny = "tiny\t2\t0\tofficial\tnamed\n\
+                    c\ta\tnet/minecraft/Foo\n\
+                    \tm\t()V\tb\ttick\n";
+        let map = TinyMappings::parse_with_identity(tiny, "/maps/minecraft-1.20.1.tiny", None)
+            .unwrap()
+            .with_target_minecraft_version(Some("1.21.1".to_string()));
+        assert!(!map.target_compatible());
+        assert!(matches!(
+            map.resolve_method_symbol(
+                "net/minecraft/Foo",
+                "tick",
+                "()V",
+                "named",
+                "official",
+                None
+            ),
+            MappingResolution::Incompatible { .. }
+        ));
+    }
+
+    #[test]
+    fn named_namespace_family_is_not_interchangeable() {
+        let yarn = TinyMappings::parse("tiny\t2\t0\tofficial\tintermediary\tnamed\n").unwrap();
+        let mojmap = TinyMappings::parse("tiny\t2\t0\tofficial\tnamed\n").unwrap();
+        assert_eq!(
+            yarn.namespace_family("named"),
+            intermed_doctor_core::evidence::MappingNamespace::YarnNamed
+        );
+        assert_eq!(
+            mojmap.namespace_family("named"),
+            intermed_doctor_core::evidence::MappingNamespace::MojmapNamed
         );
     }
 

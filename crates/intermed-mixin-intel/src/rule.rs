@@ -5,10 +5,11 @@
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FindingVisibility,
-    FixCandidate, Impact, ProofKind, Relation, RuntimeRefutability, Severity,
+    Category, ConclusionKind, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding,
+    FindingVisibility, FixCandidate, Impact, ProofKind, Relation, RuntimeRefutability, Severity,
 };
 use intermed_doctor_core::facts::{FactId, kind};
+use sha2::{Digest, Sha256};
 
 use crate::model::{
     EffectiveEffectKind, HandlerEffect, HandlerSideEffect, MixinOperation, Recommendation,
@@ -605,12 +606,12 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .tag("apply-failure")
             .confidence(if confirmed { 0.95 } else { 0.6 });
             builder = match *kind {
-                "mixin_apply_target_class_missing" => {
-                    builder.runtime_refutability(RuntimeRefutability::ClassPresence)
-                }
-                "mixin_apply_target_method_missing" => {
-                    builder.runtime_refutability(RuntimeRefutability::ExactMethodPresence)
-                }
+                "mixin_apply_target_class_missing" => builder
+                    .conclusion_kind(ConclusionKind::ClassAbsent)
+                    .runtime_refutability(RuntimeRefutability::ClassPresence),
+                "mixin_apply_target_method_missing" => builder
+                    .conclusion_kind(ConclusionKind::MethodAbsent)
+                    .runtime_refutability(RuntimeRefutability::ExactMethodPresence),
                 _ => builder,
             };
             out.push(builder.build());
@@ -1464,20 +1465,35 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         } else {
             Severity::Note
         };
+        let mut identity = Sha256::new();
+        identity.update(b"intermed-mixin-handler-occurrence-v1\0");
+        for value in [
+            f.subject.as_str(),
+            mixin,
+            handler,
+            f.source.locator.as_str(),
+            f.source.inner.as_deref().unwrap_or(""),
+        ] {
+            identity.update((value.len() as u64).to_be_bytes());
+            identity.update(value.as_bytes());
+        }
         out.push(
-            Finding::builder(RULE_ID, format!("mixin-handler-intel:{mixin}:{handler}"))
-                .severity(severity)
-                .category(Category::Mixin)
-                .title(format!("Mixin handler `{mixin}#{handler}`"))
-                .explanation(explanation)
-                .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.as_str())
-                .tag("mixin")
-                .tag("handler-intelligence")
-                .tag("mixin-detail")
-                .visibility(FindingVisibility::Verbose)
-                .confidence(0.88)
-                .build(),
+            Finding::builder(
+                RULE_ID,
+                format!("mixin-handler-intel:{:x}", identity.finalize()),
+            )
+            .severity(severity)
+            .category(Category::Mixin)
+            .title(format!("Mixin handler `{mixin}#{handler}`"))
+            .explanation(explanation)
+            .evidence(EvidenceEdge::subject(f.id))
+            .affects(f.subject.as_str())
+            .tag("mixin")
+            .tag("handler-intelligence")
+            .tag("mixin-detail")
+            .visibility(FindingVisibility::Verbose)
+            .confidence(0.88)
+            .build(),
         );
     }
     out
@@ -1485,6 +1501,19 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 
 fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let recs_by_site = recommendation_facts_grouped(ctx);
+    type EffectSiteKey = (String, String, String, String, String, String);
+    let mut sites_by_effect = std::collections::BTreeMap::<EffectSiteKey, Vec<_>>::new();
+    for site in ctx.store.by_kind(kind::MIXIN_APPLICATION_SITE) {
+        let key = (
+            site.attr("mod").unwrap_or("").to_string(),
+            site.attr("mixin").unwrap_or("").to_string(),
+            site.attr("handler_method").unwrap_or("").to_string(),
+            site.attr("target_class").unwrap_or("").to_string(),
+            site.attr("target_method").unwrap_or("").to_string(),
+            site.attr("site_key").unwrap_or("").to_string(),
+        );
+        sites_by_effect.entry(key).or_default().push(site);
+    }
     let mut out = Vec::new();
     for f in ctx.store.by_kind(kind::MIXIN_EFFECT) {
         let operation = parse_operation(f.attr("operation").unwrap_or("unknown"));
@@ -1560,11 +1589,53 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             explanation.push_str(&rec_text);
         }
 
-        let finding_id = if site_key.is_empty() {
-            format!("mixin-effect-summary:{target}:{method}")
+        let site_facts = sites_by_effect
+            .get(&(
+                f.subject.clone(),
+                f.attr("mixin").unwrap_or("").to_string(),
+                f.attr("handler_method").unwrap_or("").to_string(),
+                target.to_string(),
+                method.to_string(),
+                site_key.to_string(),
+            ))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut identity = Sha256::new();
+        identity.update(b"intermed-mixin-effect-occurrence-v1\0");
+        for value in [
+            f.subject.as_str(),
+            f.attr("mixin").unwrap_or(""),
+            f.attr("handler_method").unwrap_or(""),
+            target,
+            method,
+            site_key,
+            f.attr("operation").unwrap_or(""),
+            f.attr("effect_kinds").unwrap_or(""),
+        ] {
+            identity.update((value.len() as u64).to_be_bytes());
+            identity.update(value.as_bytes());
+        }
+        let mut occurrence_ids = site_facts
+            .iter()
+            .filter_map(|site| site.attr("site_occurrence_id"))
+            .collect::<Vec<_>>();
+        occurrence_ids.sort_unstable();
+        occurrence_ids.dedup();
+        if occurrence_ids.is_empty() {
+            for value in [
+                f.source.locator.as_str(),
+                f.source.inner.as_deref().unwrap_or(""),
+            ] {
+                identity.update((value.len() as u64).to_be_bytes());
+                identity.update(value.as_bytes());
+            }
         } else {
-            format!("mixin-effect-summary:{site_key}")
-        };
+            for occurrence_id in occurrence_ids {
+                identity.update((occurrence_id.len() as u64).to_be_bytes());
+                identity.update(occurrence_id.as_bytes());
+            }
+        }
+        let finding_id = format!("mixin-effect-summary:{:x}", identity.finalize());
 
         let mut builder = Finding::builder(RULE_ID, finding_id)
             .severity(severity)
@@ -1577,6 +1648,10 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .tag("mixin-effect-summary")
             .tag("mixin-detail")
             .confidence(0.82);
+
+        for site in site_facts {
+            builder = builder.evidence(EvidenceEdge::new(site.id, Relation::Supports, 1.0));
+        }
 
         for rec in &recs {
             let (text, confidence) = recommendation_as_fix(rec);

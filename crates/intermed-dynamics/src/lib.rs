@@ -202,6 +202,7 @@ impl Collector for ScriptDynamicsCollector {
             kind::RUNTIME_REMOVED_ITEM,
             kind::RUNTIME_REMOVED_TAG,
             kind::RUNTIME_REMOVED_LOOT_TABLE,
+            kind::SCRIPT_DISCOVERY_COVERAGE,
         ])
         .regions([
             intermed_doctor_core::TargetRegion::Logs,
@@ -377,9 +378,6 @@ impl Collector for StaticScriptCollector {
     }
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let result = script_scan::emit(ctx.store, ctx.target);
-        if result.files_discovered == 0 && result.gaps.is_empty() {
-            return CollectorOutcome::skipped("no KubeJS/CraftTweaker scripts found");
-        }
         let mut emitted = result.emitted;
         for reason in &result.gaps {
             ctx.store
@@ -393,6 +391,23 @@ impl Collector for StaticScriptCollector {
                 .emit();
             emitted += 1;
         }
+        ctx.store
+            .fact(self.id(), kind::SCRIPT_DISCOVERY_COVERAGE)
+            .subject(ctx.target.path.display().to_string())
+            .attr("files_discovered", result.files_discovered as i64)
+            .attr("complete", result.gaps.is_empty())
+            .attr("roots_present", true)
+            .attr(
+                "reason",
+                if result.gaps.is_empty() {
+                    "bounded discovery complete"
+                } else {
+                    "one or more script roots were truncated or unreadable"
+                },
+            )
+            .source(SourceRef::file(ctx.target.path.display().to_string()))
+            .emit();
+        emitted += 1;
         let summary = format!(
             "{} script file(s) discovered, {} coverage gap(s)",
             result.files_discovered,

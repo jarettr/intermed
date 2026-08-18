@@ -280,6 +280,10 @@ fn emit(
             .attr("layer", "data-semantics")
             .attr("reason", gap.detail.clone())
             .attr("coverage_gap", gap.code.clone())
+            .attr(
+                "coverage_scope",
+                gap.scope.as_deref().unwrap_or("vanilla-resources"),
+            )
             .attr("relevant_entry", true)
             .confidence(1.0)
             .emit();

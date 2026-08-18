@@ -727,6 +727,7 @@ fn build_finding(
         b = b
             .impact(contract.impact)
             .proof_kind(contract.proof_kind)
+            .conclusion_kind(contract.conclusion_kind.unwrap_or_default())
             .evidence_origin(match contract.proof_kind {
                 intermed_doctor_core::evidence::ProofKind::Observation => {
                     EvidenceOrigin::StaticExact

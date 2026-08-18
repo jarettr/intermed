@@ -162,18 +162,21 @@ impl DiagnosticEngine {
             &self.settings,
         );
         crate::assessment::assess_findings(&store, &capabilities, &mut findings, incremental);
-        apply_runtime_contradictions(&store, &mut findings);
+        let mut evidence_graph = crate::coherence::build_evidence_graph(&store);
+        crate::coherence::reconcile_findings(&store, &mut evidence_graph, &mut findings);
+        crate::coherence::stabilize_finding_identities(&store, &evidence_graph, &mut findings);
 
         // Now that findings (and their evidence edges) are computed, compact the
         // store so the persisted/exported snapshot stays bounded. Compaction is
         // *evidence-aware*: every fact cited by a finding's evidence edge is
         // preserved regardless of the retention predicate, so provenance never
         // degrades to a bare `fact #N` with no kind/subject/source in the report.
-        let cited_facts: std::collections::BTreeSet<_> = findings
+        let mut cited_facts: std::collections::BTreeSet<_> = findings
             .iter()
             .flat_map(|f| f.evidence.iter())
             .map(|e| e.fact)
             .collect();
+        cited_facts.extend(evidence_graph.cited_facts());
         let generated_fact_stats = store.emitted_stats();
         let snapshot_facts_dropped =
             store.compact_preserving(&self.settings.facts.retention, &cited_facts);
@@ -230,138 +233,36 @@ impl DiagnosticEngine {
 /// intentionally remain local; this pass prevents a local hard assertion from
 /// surviving when another layer supplies direct counter-evidence or lowers a
 /// prerequisite's certainty.
+#[cfg(test)]
 fn apply_runtime_contradictions(store: &FactStore, findings: &mut [Finding]) {
-    use intermed_evidence::{
-        AssessmentDisposition, CertaintyTier, ConclusionAdjustment, RuntimeRefutability, Severity,
-    };
-    use intermed_facts::kind;
-
-    // Runtime execution is stronger than a static "may be unused" heuristic.
-    // If both endpoints occur in one event's owned frame chain, remove the
-    // contradiction by making the heuristic explain-only and explicit.
-    let mut event_mods =
-        std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
-    for frame in store.by_kind(kind::STACK_FRAME) {
-        if let Some(mod_id) = frame.attr("mod_id").filter(|id| !id.is_empty()) {
-            event_mods
-                .entry(frame.subject.as_str())
-                .or_default()
-                .insert(mod_id);
-        }
-    }
-    for finding in findings.iter_mut().filter(|finding| {
-        finding
+    use intermed_evidence::{ConclusionKind, RuntimeRefutability};
+    // Compatibility for in-process v1/v2 rules: convert the old typed
+    // refutability declaration into the canonical conclusion kind once.
+    for finding in findings
+        .iter_mut()
+        .filter(|f| f.conclusion_kind == ConclusionKind::Generic)
+    {
+        finding.conclusion_kind = if finding
             .runtime_refutability
             .contains(&RuntimeRefutability::DependencyUse)
-    }) {
-        let [from, to, ..] = finding.affected_components.as_slice() else {
-            continue;
-        };
-        if event_mods
-            .values()
-            .any(|mods| mods.contains(from.as_str()) && mods.contains(to.as_str()))
         {
-            let prior = finding.severity;
-            finding.severity = Severity::Info;
-            finding.visibility = intermed_evidence::FindingVisibility::ExplainOnly;
-            finding.confidence = 0.1;
-            finding.explanation.push_str(
-                " Runtime stack evidence shows a direct execution path involving both mods, so \
-                 the static unused-dependency hypothesis is contradicted.",
-            );
-            finding
-                .machine_tags
-                .push("runtime-contradicted".to_string());
-            finding.assessment.disposition = AssessmentDisposition::Downgraded;
-            finding.assessment.certainty = CertaintyTier::Confirmed;
-            finding.assessment.adjustments.push(ConclusionAdjustment {
-                code: "runtime-dependency-use-refutation".to_string(),
-                detail:
-                    "runtime frames directly contradict the static unused-dependency hypothesis"
-                        .to_string(),
-                from_severity: Some(prior),
-                to_severity: Some(Severity::Info),
-            });
-        }
-    }
-
-    // A class observed in a runtime frame cannot simultaneously be absent. Keep
-    // the static result only as an explainable namespace/input inconsistency.
-    let runtime_classes = store
-        .by_kind(kind::STACK_FRAME)
-        .filter_map(|frame| frame.attr("class"))
-        .collect::<std::collections::BTreeSet<_>>();
-    for finding in findings.iter_mut().filter(|finding| {
-        finding
-            .runtime_refutability
-            .contains(&RuntimeRefutability::ClassPresence)
-    }) {
-        let contradicted = finding.evidence.iter().any(|edge| {
-            store
-                .get(edge.fact)
-                .and_then(|fact| fact.attr("target"))
-                .is_some_and(|target| runtime_classes.contains(target))
-        });
-        if contradicted {
-            let prior = finding.severity;
-            finding.severity = Severity::Note;
-            finding.confidence = 0.2;
-            finding.explanation.push_str(
-                " The target class appears in observed runtime frames; the static absence claim \
-                 is therefore invalid for this input/namespace combination.",
-            );
-            finding
-                .machine_tags
-                .push("runtime-contradicted".to_string());
-            finding.assessment.disposition = AssessmentDisposition::Downgraded;
-            finding.assessment.adjustments.push(ConclusionAdjustment {
-                code: "runtime-class-presence-refutation".to_string(),
-                detail: "the allegedly absent class was observed at runtime".to_string(),
-                from_severity: Some(prior),
-                to_severity: Some(Severity::Note),
-            });
-        }
-    }
-
-    let runtime_methods = store
-        .by_kind(kind::STACK_FRAME)
-        .filter_map(|frame| Some((frame.attr("class")?, frame.attr("method")?)))
-        .collect::<std::collections::BTreeSet<_>>();
-    for finding in findings.iter_mut().filter(|finding| {
-        finding
+            ConclusionKind::DependencyUnused
+        } else if finding
             .runtime_refutability
             .contains(&RuntimeRefutability::ExactMethodPresence)
-    }) {
-        let contradicted = finding.evidence.iter().any(|edge| {
-            store.get(edge.fact).is_some_and(|fact| {
-                let Some(target) = fact.attr("target") else {
-                    return false;
-                };
-                let member = fact.attr("member").unwrap_or("");
-                let method = member.split(['(', ':']).next().unwrap_or(member);
-                !method.is_empty() && runtime_methods.contains(&(target, method))
-            })
-        });
-        if contradicted {
-            let prior = finding.severity;
-            finding.severity = Severity::Note;
-            finding.confidence = 0.2;
-            finding.explanation.push_str(
-                " The exact target method appears in observed runtime frames; the static absence \
-                 claim is therefore invalid for this input/namespace combination.",
-            );
-            finding
-                .machine_tags
-                .push("runtime-contradicted".to_string());
-            finding.assessment.disposition = AssessmentDisposition::Downgraded;
-            finding.assessment.adjustments.push(ConclusionAdjustment {
-                code: "runtime-method-presence-refutation".to_string(),
-                detail: "the allegedly absent method was observed at runtime".to_string(),
-                from_severity: Some(prior),
-                to_severity: Some(Severity::Note),
-            });
-        }
+        {
+            ConclusionKind::MethodAbsent
+        } else if finding
+            .runtime_refutability
+            .contains(&RuntimeRefutability::ClassPresence)
+        {
+            ConclusionKind::ClassAbsent
+        } else {
+            ConclusionKind::Generic
+        };
     }
+    let mut graph = crate::coherence::build_evidence_graph(store);
+    crate::coherence::reconcile_findings(store, &mut graph, findings);
 }
 
 /// Fluent registration of collectors and rules.

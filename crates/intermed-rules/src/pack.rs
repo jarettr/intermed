@@ -146,14 +146,16 @@ pub fn default_core_pack_v2() -> RulePack {
     pack
 }
 
-/// Canonical 0.1.6 core pack with a typed trust contract on every rule.
+/// Canonical core pack with a typed trust contract on every rule.
 #[must_use]
 pub fn default_core_pack_v3() -> RulePack {
-    use intermed_doctor_core::evidence::{CoverageRequirement as C, Impact, ProofKind};
+    use intermed_doctor_core::evidence::{
+        ConclusionKind, CoverageRequirement as C, Impact, ProofKind,
+    };
 
     let mut pack = default_core_pack_v2();
     pack.schema = RULE_PACK_SCHEMA_V3.to_string();
-    pack.version = "0.1.6".to_string();
+    pack.version = "0.1.7".to_string();
     for rule in &mut pack.rules {
         let hard = matches!(rule.finding.severity.as_str(), "error" | "fatal");
         let coverage_requirements = match rule.id.as_str() {
@@ -194,6 +196,11 @@ pub fn default_core_pack_v3() -> RulePack {
             } else {
                 ProofKind::Observation
             },
+            conclusion_kind: Some(match rule.id.as_str() {
+                "loader-mismatch" => ConclusionKind::LoaderMismatch,
+                id if id.starts_with("log-") => ConclusionKind::RuntimeIncident,
+                _ => ConclusionKind::Generic,
+            }),
             coverage_requirements,
             on_missing_prerequisite: MissingPrerequisiteBehavior::Abstain,
         });

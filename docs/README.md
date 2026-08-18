@@ -1,6 +1,6 @@
 # Documentation
 
-InterMed is at `0.1.6-alpha`. Read the [project status](PROJECT_STATUS.md) for
+InterMed is at `0.1.7-alpha`. Read the [project status](PROJECT_STATUS.md) for
 the validated scope and limits, and the [roadmap](ROADMAP.md) for what comes next.
 
 The documentation has three layers. Start at the top and go deeper only when you

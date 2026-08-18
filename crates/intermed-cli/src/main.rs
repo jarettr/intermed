@@ -1035,6 +1035,10 @@ fn print_finding_explanation(run: &DiagnosticRun, finding: &Finding, color: bool
 
     println!("{sev} {}", finding.title);
     println!("id: {}", finding.id);
+    println!("semantic id: {}", finding.semantic_id);
+    if let Some(occurrence) = &finding.occurrence_id {
+        println!("occurrence id: {occurrence}");
+    }
     println!("rule: {}", finding.rule_id);
     if !finding.explanation.is_empty() {
         println!();
@@ -1081,6 +1085,23 @@ fn print_finding_explanation(run: &DiagnosticRun, finding: &Finding, color: bool
                 "- {} {:?} weight={:.2}: <missing fact>",
                 edge.fact, edge.relation, edge.weight
             );
+        }
+    }
+    if !finding.evidence_path.is_empty() {
+        println!();
+        println!("Cross-layer evidence path:");
+        for link in &finding.evidence_path {
+            println!(
+                "- {:?} --{:?}/{:?}--> {:?} (fact {})",
+                link.from, link.relation, link.strength, link.to, link.source_fact
+            );
+        }
+    }
+    if !finding.recommendation_ids.is_empty() {
+        println!();
+        println!("Shared recommendations:");
+        for id in &finding.recommendation_ids {
+            println!("- {id}");
         }
     }
 }
@@ -3153,6 +3174,9 @@ mod explain_tests {
             analysis_configuration: Default::default(),
             mixin_coverage: Default::default(),
             target_capabilities: Default::default(),
+            evidence_graph: Default::default(),
+            incidents: Vec::new(),
+            recommendations: Vec::new(),
             rules: Vec::new(),
             operational_errors: vec![OperationalError {
                 stage: "rule".into(),

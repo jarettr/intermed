@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use intermed_evidence::{
-    AssessmentDisposition, CertaintyTier, EvidenceSummaryItem, Finding, FindingVisibility,
-    FixCandidate, Severity,
+    ArtifactId, AssessmentDisposition, CertaintyTier, DescriptorKind, EntityRef,
+    EvidenceSummaryItem, Finding, FindingVisibility, FixCandidate, ModInstanceId, Recommendation,
+    RecommendationAction, RecommendationId, RecommendationSafety, Severity,
 };
 use intermed_facts::{Fact, FactStore, kind};
 
@@ -279,6 +280,12 @@ pub struct DoctorReport {
     pub mixin_coverage: MixinCoveragePassport,
     #[serde(default)]
     pub target_capabilities: TargetCapabilities,
+    #[serde(default)]
+    pub evidence_graph: intermed_evidence::EvidenceGraph,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incidents: Vec<intermed_evidence::Incident>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendations: Vec<intermed_evidence::Recommendation>,
     pub rules: Vec<RuleStat>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operational_errors: Vec<OperationalError>,
@@ -286,7 +293,6 @@ pub struct DoctorReport {
     /// Wall-clock phase timings and jar-cache counters (present in `--json` output).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile: Option<DiagnosticProfile>,
-    // evidence_graph: serialized per-finding via `findings[].evidence` in v1.
     // attachments: reserved for Phase 7+ (spark/JFR payloads).
 }
 
@@ -325,6 +331,66 @@ fn environment_from_facts(store: &FactStore) -> Environment {
             .and_then(parse_side)
             .or_else(|| env.instance_type.map(InstanceType::to_side));
     }
+    // Refine unknown/heuristic target identity with stronger evidence emitted by
+    // later collectors. Runtime logs describe the analyzed run, never the host.
+    let mut best_loader: Option<(u8, Loader, Option<String>)> = None;
+    let mut best_minecraft: Option<(u8, String)> = None;
+    let mut loader_conflict = false;
+    let mut minecraft_conflict = false;
+    for fact in store.by_kind(kind::ENVIRONMENT) {
+        let source = fact
+            .attr("loader_source")
+            .or_else(|| fact.attr("evidence_source"));
+        let priority = environment_source_priority(source);
+        // Filesystem loader inference is a fallback below artifact consensus,
+        // not a target declaration that participates in refinement.
+        if source != Some("filesystem-heuristic")
+            && let Some(loader) = fact.attr("loader").and_then(Loader::parse)
+            && best_loader
+                .as_ref()
+                .is_none_or(|(best, _, _)| priority > *best)
+        {
+            best_loader = Some((priority, loader, source.map(str::to_string)));
+            loader_conflict = false;
+        } else if source != Some("filesystem-heuristic")
+            && let (Some(loader), Some((best, current, _))) = (
+                fact.attr("loader").and_then(Loader::parse),
+                best_loader.as_ref(),
+            )
+            && priority == *best
+            && loader != *current
+        {
+            loader_conflict = true;
+        }
+        if let Some(version) = fact.attr("mc_version") {
+            let mc_source = fact.attr("mc_version_source").or(source);
+            let priority = environment_source_priority(mc_source);
+            if best_minecraft
+                .as_ref()
+                .is_none_or(|(best, _)| priority > *best)
+            {
+                best_minecraft = Some((priority, version.to_string()));
+                minecraft_conflict = false;
+            } else if best_minecraft
+                .as_ref()
+                .is_some_and(|(best, current)| priority == *best && current != version)
+            {
+                minecraft_conflict = true;
+            }
+        }
+    }
+    if loader_conflict {
+        env.loader = None;
+        env.loader_source = Some("conflicting-evidence".to_string());
+    } else if let Some((_, loader, source)) = best_loader {
+        env.loader = Some(loader);
+        env.loader_source = source;
+    }
+    if minecraft_conflict {
+        env.minecraft_version = None;
+    } else if let Some((_, minecraft)) = best_minecraft {
+        env.minecraft_version = Some(minecraft);
+    }
     if let Some(f) = store.by_kind(kind::JAVA_RUNTIME).next() {
         env.java_version = f.attr("version").map(str::to_string);
     }
@@ -332,22 +398,33 @@ fn environment_from_facts(store: &FactStore) -> Environment {
     // Minecraft version of its own. The scanned mods do, though: every `mod` fact
     // records its loader, and the `minecraft` dependency ranges pin the game
     // version. Infer both so the report does not show "?" for facts it can derive.
-    if env.loader.is_none() {
+    if env.loader.is_none() && !loader_conflict {
         env.loader = infer_loader_from_mods(store);
         if env.loader.is_some() {
             env.loader_source = Some("artifact-consensus".to_string());
         }
     }
-    if env.loader.is_none() {
+    if env.loader.is_none() && !loader_conflict {
         env.loader = filesystem_loader;
         if env.loader.is_some() {
             env.loader_source = Some("filesystem-heuristic".to_string());
         }
     }
-    if env.minecraft_version.is_none() {
+    if env.minecraft_version.is_none() && !minecraft_conflict {
         env.minecraft_version = infer_minecraft_version(store);
     }
     env
+}
+
+fn environment_source_priority(source: Option<&str>) -> u8 {
+    match source.unwrap_or("") {
+        "pack-manifest" | "modrinth-manifest" | "curseforge-manifest" => 100,
+        "launcher-manifest" | "instance-metadata" => 90,
+        "runtime-log" => 80,
+        "artifact-consensus" => 50,
+        "filesystem-heuristic" => 10,
+        _ => 40,
+    }
 }
 
 fn analysis_environment_from_facts(store: &FactStore) -> AnalysisEnvironment {
@@ -569,7 +646,7 @@ fn parse_layout_kind(value: &str) -> Option<LayoutKind> {
 /// keep the higher-severity copy as the base, union the evidence edges and tags,
 /// and record every contributing rule id in `rule_sources`. If two rules want to
 /// say *semantically different* things they must use *different* ids.
-fn merge_findings_by_id(findings: &mut Vec<Finding>) {
+fn merge_findings_by_id(findings: &mut Vec<Finding>, errors: &mut Vec<OperationalError>) {
     let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
     let mut keep = vec![true; findings.len()];
     for i in 0..findings.len() {
@@ -579,6 +656,74 @@ fn merge_findings_by_id(findings: &mut Vec<Finding>) {
                 by_id.insert(id, i);
             }
             Some(base) => {
+                if !same_semantic_payload(&findings[base], &findings[i]) {
+                    let original = id;
+                    let mut digest = Sha256::new();
+                    digest.update(b"intermed-finding-collision-v1\0");
+                    digest.update(findings[i].semantic_id.as_bytes());
+                    digest.update([0]);
+                    digest.update(
+                        findings[i]
+                            .occurrence_id
+                            .as_deref()
+                            .unwrap_or("")
+                            .as_bytes(),
+                    );
+                    digest.update([0]);
+                    digest.update(format!("{:?}", findings[i].conclusion_kind).as_bytes());
+                    digest.update([0]);
+                    digest.update(format!("{:?}", findings[i].category).as_bytes());
+                    for component in &findings[i].affected_components {
+                        digest.update([0]);
+                        digest.update(component.as_bytes());
+                    }
+                    digest.update([0]);
+                    digest.update(findings[i].title.as_bytes());
+                    let suffix = format!("{:x}", digest.finalize());
+                    let mut collision_id = format!("{original}:collision:{}", &suffix[..24]);
+                    let mut salt = 0u32;
+                    loop {
+                        match by_id.get(&collision_id).copied() {
+                            None => {
+                                findings[i].id = collision_id.clone();
+                                by_id.insert(collision_id, i);
+                                errors.push(OperationalError {
+                                    stage: "report-generation".to_string(),
+                                    component: "finding-identity".to_string(),
+                                    message: format!(
+                                        "finding id `{original}` was assigned to different semantic payloads; the report was not silently merged"
+                                    ),
+                                });
+                                break;
+                            }
+                            Some(existing)
+                                if same_semantic_payload(&findings[existing], &findings[i]) =>
+                            {
+                                findings[i].id = collision_id.clone();
+                                let (winner, loser) =
+                                    if findings[i].severity > findings[existing].severity {
+                                        by_id.insert(collision_id, i);
+                                        keep[existing] = false;
+                                        (i, existing)
+                                    } else {
+                                        keep[i] = false;
+                                        (existing, i)
+                                    };
+                                merge_into(findings, winner, loser);
+                                break;
+                            }
+                            Some(_) => {
+                                // A cryptographic-prefix collision is extremely
+                                // unlikely, but report generation still must be
+                                // total and deterministic rather than panicking.
+                                salt = salt.saturating_add(1);
+                                collision_id =
+                                    format!("{original}:collision:{}:{salt}", &suffix[..24]);
+                            }
+                        }
+                    }
+                    continue;
+                }
                 // Decide which copy is the base (higher severity wins; ties keep
                 // the earlier one for stable ordering).
                 let (winner, loser) = if findings[i].severity > findings[base].severity {
@@ -595,6 +740,108 @@ fn merge_findings_by_id(findings: &mut Vec<Finding>) {
     }
     let mut iter = keep.into_iter();
     findings.retain(|_| iter.next().unwrap_or(true));
+}
+
+fn same_semantic_payload(left: &Finding, right: &Finding) -> bool {
+    let canonical_identity_matches =
+        left.semantic_id == right.semantic_id && left.occurrence_id == right.occurrence_id;
+    let legacy_contract_matches = left.id == right.id
+        && left.title == right.title
+        && left.conclusion_kind == right.conclusion_kind
+        && left.category == right.category
+        && left.affected_components == right.affected_components;
+    // A legacy occurrence ID is still a valid shared producer contract when
+    // both producers make the same typed assertion about the same entities.
+    // Evidence and rule provenance are deliberately unioned by `merge_into`.
+    (canonical_identity_matches || legacy_contract_matches)
+        && left.conclusion_kind == right.conclusion_kind
+        && left.category == right.category
+        && left.affected_components == right.affected_components
+}
+
+fn synthesize_recommendations(findings: &mut [Finding]) -> Vec<Recommendation> {
+    let mut recommendations = BTreeMap::<String, Recommendation>::new();
+    for finding in findings.iter_mut() {
+        let target_name = finding
+            .affected_components
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "analysis-input".to_string());
+        let target = EntityRef::Mod(ModInstanceId {
+            artifact: ArtifactId::unresolved(&format!("recommendation-target:{target_name}")),
+            declared_id: target_name,
+            descriptor_kind: DescriptorKind::Unknown,
+            ordinal: 0,
+        });
+        for fix in &finding.fix_candidates {
+            let action = infer_recommendation_action(&fix.description);
+            let mut digest = Sha256::new();
+            digest.update(b"intermed-recommendation-v1\0");
+            digest.update(format!("{action:?}").as_bytes());
+            digest.update([0]);
+            digest.update(serde_json::to_vec(&target).unwrap_or_default());
+            digest.update([0]);
+            digest.update(fix.description.as_bytes());
+            if let Some(command) = &fix.command {
+                digest.update([0]);
+                digest.update(command.as_bytes());
+            }
+            let id = format!("recommendation:{:x}", digest.finalize());
+            let recommendation =
+                recommendations
+                    .entry(id.clone())
+                    .or_insert_with(|| Recommendation {
+                        id: RecommendationId::new(id.clone()),
+                        action,
+                        target: target.clone(),
+                        rationale: fix.description.clone(),
+                        safety: if fix.command.is_some() {
+                            RecommendationSafety::ReviewRequired
+                        } else {
+                            RecommendationSafety::ReadOnly
+                        },
+                        evidence: finding.evidence.iter().map(|edge| edge.fact).collect(),
+                        affected_findings: Vec::new(),
+                    });
+            if !recommendation.affected_findings.contains(&finding.id) {
+                recommendation.affected_findings.push(finding.id.clone());
+            }
+            for edge in &finding.evidence {
+                if !recommendation.evidence.contains(&edge.fact) {
+                    recommendation.evidence.push(edge.fact);
+                }
+            }
+            let recommendation_id = RecommendationId::new(id);
+            if !finding.recommendation_ids.contains(&recommendation_id) {
+                finding.recommendation_ids.push(recommendation_id);
+            }
+        }
+    }
+    recommendations.into_values().collect()
+}
+
+fn infer_recommendation_action(text: &str) -> RecommendationAction {
+    let text = text.to_ascii_lowercase();
+    if text.contains("install") {
+        RecommendationAction::Install
+    } else if text.contains("update") || text.contains("upgrade") {
+        RecommendationAction::Update
+    } else if text.contains("remove") {
+        RecommendationAction::Remove
+    } else if text.contains("replace") {
+        RecommendationAction::Replace
+    } else if text.contains("configure") || text.contains("enable") || text.contains("disable") {
+        RecommendationAction::Configure
+    } else if text.contains("provide")
+        || text.contains("supply")
+        || text.contains("--minecraft-jar")
+    {
+        RecommendationAction::ProvideInput
+    } else if text.contains("verify") || text.contains("check") {
+        RecommendationAction::Verify
+    } else {
+        RecommendationAction::Inspect
+    }
 }
 
 /// Fold `loser`'s provenance into `winner` (evidence, tags, rule sources, fixes).
@@ -867,9 +1114,17 @@ fn cluster_resource_conflicts(findings: &mut Vec<Finding>, store: &FactStore) {
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
             .collect::<String>();
+        let mut pair_identity = Sha256::new();
+        pair_identity.update(b"intermed-resource-writer-pair-v1\0");
+        pair_identity.update((writers.len() as u64).to_be_bytes());
+        pair_identity.update(writers.as_bytes());
+        let pair_identity = format!("{:x}", pair_identity.finalize());
         let mut builder = Finding::builder(
             "resource-semantics",
-            format!("recipe-output-override-cluster:{id_pair}"),
+            format!(
+                "recipe-output-override-cluster:{id_pair}:{}",
+                &pair_identity[..16]
+            ),
         )
         .severity(severity)
         .category(intermed_evidence::Category::Resource)
@@ -978,8 +1233,9 @@ pub fn assemble_with_settings_and_capabilities(
     settings: &crate::settings::DiagnosisSettings,
     target_capabilities: TargetCapabilities,
 ) -> DoctorReport {
-    // 1. Collapse findings that share an id into one (unique-id contract).
-    merge_findings_by_id(&mut findings);
+    // 1. Enforce the unique-id contract. Semantically different payloads may
+    // never be silently merged under one occurrence id.
+    merge_findings_by_id(&mut findings, &mut operational_errors);
     // 2. Fold cross-layer duplicates (Layer-E collision ↔ Layer-M semantic diff
     //    on the same path) into the more meaningful finding.
     crate::suppression::apply_semantic_override_suppression(&mut findings);
@@ -1001,7 +1257,7 @@ pub fn assemble_with_settings_and_capabilities(
     //    report can collapse them.
     apply_visibility_policy(&mut findings);
     for finding in &mut findings {
-        let channel = if finding.channel == "incident" {
+        let channel = if finding.channel == intermed_evidence::FindingChannel::Incident {
             "incident-diagnosis"
         } else {
             "pack-health-static-review"
@@ -1024,11 +1280,19 @@ pub fn assemble_with_settings_and_capabilities(
         "finding ids must be unique within a report after merge"
     );
 
-    // Stable ordering: worst severity first, then by id.
-    findings.sort_by(|a, b| b.severity.cmp(&a.severity).then_with(|| a.id.cmp(&b.id)));
+    // Stable product hierarchy: incident diagnosis first, then compatibility,
+    // pack health, developer lint, and informational context. Severity orders
+    // records within each channel.
+    findings.sort_by(|a, b| {
+        finding_channel_rank(a.channel)
+            .cmp(&finding_channel_rank(b.channel))
+            .then_with(|| b.severity.cmp(&a.severity))
+            .then_with(|| a.id.cmp(&b.id))
+    });
 
     let mut summary = Summary::tally(&findings);
 
+    let recommendations = synthesize_recommendations(&mut findings);
     let mut seen_fixes = std::collections::BTreeSet::new();
     let mut fix_plan = Vec::new();
     for finding in findings
@@ -1131,6 +1395,11 @@ pub fn assemble_with_settings_and_capabilities(
     };
     let mixin_coverage = mixin_coverage_passport(store, &collector_reports, settings);
 
+    let mut evidence_graph = crate::coherence::build_evidence_graph(store);
+    crate::coherence::complete_evidence_graph(store, &mut evidence_graph, &findings);
+    evidence_graph.normalize();
+    let incidents = crate::coherence::synthesize_incidents(store, &evidence_graph);
+
     DoctorReport {
         schema: REPORT_SCHEMA.to_string(),
         tool_version: tool_version.to_string(),
@@ -1149,10 +1418,23 @@ pub fn assemble_with_settings_and_capabilities(
         analysis_configuration,
         mixin_coverage,
         target_capabilities,
+        evidence_graph,
+        incidents,
+        recommendations,
         rules: rule_stats,
         operational_errors,
         deferred_layers,
         profile,
+    }
+}
+
+fn finding_channel_rank(channel: intermed_evidence::FindingChannel) -> u8 {
+    match channel {
+        intermed_evidence::FindingChannel::Incident => 0,
+        intermed_evidence::FindingChannel::Compatibility => 1,
+        intermed_evidence::FindingChannel::PackHealth => 2,
+        intermed_evidence::FindingChannel::DeveloperLint => 3,
+        intermed_evidence::FindingChannel::Informational => 4,
     }
 }
 
@@ -1241,6 +1523,24 @@ mod tests {
         assert_eq!(
             environment.loader_source.as_deref(),
             Some("artifact-consensus")
+        );
+    }
+
+    #[test]
+    fn equally_authoritative_loader_conflict_remains_unknown() {
+        let mut store = FactStore::new();
+        for loader in ["fabric", "neoforge"] {
+            store
+                .fact("log", kind::ENVIRONMENT)
+                .attr("loader", loader)
+                .attr("loader_source", "runtime-log")
+                .emit();
+        }
+        let environment = environment_from_facts(&store);
+        assert_eq!(environment.loader, None);
+        assert_eq!(
+            environment.loader_source.as_deref(),
+            Some("conflicting-evidence")
         );
     }
 
@@ -1352,13 +1652,60 @@ mod tests {
             finding("rule-a", "foo", Severity::Warn),
             finding("rule-b", "foo", Severity::Error),
         ];
-        merge_findings_by_id(&mut findings);
+        merge_findings_by_id(&mut findings, &mut Vec::new());
         // Same id from different rules → one finding (unique-id contract), with
         // the higher severity and both rules recorded as sources.
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Error);
         assert_eq!(findings[0].rule_id, "rule-b");
         assert!(findings[0].rule_sources.contains(&"rule-a".to_string()));
+    }
+
+    #[test]
+    fn semantic_id_collision_is_an_operational_error_not_a_silent_merge() {
+        let mut findings = vec![
+            Finding::builder("rule-a", "shared")
+                .severity(Severity::Error)
+                .semantic_id("semantic:a")
+                .conclusion_kind(intermed_evidence::ConclusionKind::MissingDependency)
+                .build(),
+            Finding::builder("rule-b", "shared")
+                .severity(Severity::Error)
+                .semantic_id("semantic:b")
+                .conclusion_kind(intermed_evidence::ConclusionKind::LoaderMismatch)
+                .build(),
+        ];
+        let mut errors = Vec::new();
+        merge_findings_by_id(&mut findings, &mut errors);
+        assert_eq!(findings.len(), 2);
+        assert_ne!(findings[0].id, findings[1].id);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].component, "finding-identity");
+    }
+
+    #[test]
+    fn repeated_copy_of_a_colliding_payload_merges_under_derived_id() {
+        let distinct = Finding::builder("rule-a", "shared")
+            .severity(Severity::Error)
+            .semantic_id("semantic:a")
+            .conclusion_kind(intermed_evidence::ConclusionKind::MissingDependency)
+            .build();
+        let colliding = |rule: &str| {
+            Finding::builder(rule, "shared")
+                .severity(Severity::Warn)
+                .semantic_id("semantic:b")
+                .conclusion_kind(intermed_evidence::ConclusionKind::LoaderMismatch)
+                .build()
+        };
+        let mut findings = vec![distinct, colliding("rule-b"), colliding("rule-c")];
+        let mut errors = Vec::new();
+        merge_findings_by_id(&mut findings, &mut errors);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(errors.len(), 1);
+        assert!(findings.iter().any(|finding| {
+            finding.semantic_id == "semantic:b"
+                && finding.rule_sources.contains(&"rule-c".to_string())
+        }));
     }
 
     #[test]
@@ -1426,7 +1773,7 @@ mod tests {
             finding("rule-a", "foo", Severity::Warn),
             finding("rule-a", "foo", Severity::Error),
         ];
-        merge_findings_by_id(&mut findings);
+        merge_findings_by_id(&mut findings, &mut Vec::new());
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Error);
         // Same rule on both copies → no spurious self-reference in sources.

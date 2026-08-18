@@ -17,7 +17,9 @@
 //! and folds the byte one's evidence into it (recording the contributing rule in
 //! `rule_sources`) rather than dropping it.
 
-use intermed_evidence::{AssessmentDisposition, ConclusionAdjustment, Finding, Severity};
+use intermed_evidence::{
+    AssessmentDisposition, ConclusionAdjustment, Finding, RuntimeMutationCoverage, Severity,
+};
 use intermed_facts::{FactStore, kind};
 use intermed_resource_identity::ResourceKey;
 
@@ -130,14 +132,62 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
     for f in store.by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE) {
         scripted_loot.insert(f.subject.clone());
     }
-    if scripted_recipes.is_empty() && scripted_loot.is_empty() {
-        return 0;
-    }
+    let mutator_present = !scripted_recipes.is_empty()
+        || !scripted_loot.is_empty()
+        || store
+            .by_kind(kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+            .next()
+            .is_some();
+    let coverage_partial = store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
+        matches!(
+            fact.attr("layer"),
+            Some("script" | "resource" | "resource-dynamics" | "data-semantics")
+        )
+    }) || store
+        .by_kind(kind::SCRIPT_DISCOVERY_COVERAGE)
+        .any(|fact| fact.attr_bool("complete") == Some(false));
+    let script_coverage_available = store
+        .by_kind(kind::SCRIPT_DISCOVERY_COVERAGE)
+        .next()
+        .is_some();
 
     let mut downgraded = 0;
     for f in findings.iter_mut() {
-        let path = f.affected_components.first().map(String::as_str);
-        let scripted = match (f.family.as_str(), path) {
+        if f.category == intermed_evidence::Category::Resource {
+            f.runtime_mutation_coverage = if coverage_partial {
+                RuntimeMutationCoverage::CoveragePartial
+            } else if mutator_present {
+                RuntimeMutationCoverage::MutatorPresent
+            } else if script_coverage_available {
+                RuntimeMutationCoverage::NoMutatorEvidence
+            } else {
+                RuntimeMutationCoverage::Unavailable
+            };
+            if matches!(
+                f.runtime_mutation_coverage,
+                RuntimeMutationCoverage::MutatorPresent | RuntimeMutationCoverage::CoveragePartial
+            ) && f.conclusion_kind == intermed_evidence::ConclusionKind::StaticResourceState
+            {
+                let prior = f.severity;
+                if f.severity > Severity::Warn {
+                    f.severity = Severity::Warn;
+                }
+                if prior != f.severity {
+                    f.assessment.disposition = AssessmentDisposition::Downgraded;
+                    f.assessment.adjustments.push(ConclusionAdjustment {
+                        code: "resource-finality-unproven".to_string(),
+                        detail: "runtime mutators or partial script coverage prevent treating the static resource state as final".to_string(),
+                        original_disposition: Some(AssessmentDisposition::Asserted),
+                        final_disposition: Some(AssessmentDisposition::Downgraded),
+                        from_severity: Some(prior),
+                        to_severity: Some(f.severity),
+                        contradicting_evidence: Vec::new(),
+                    });
+                }
+            }
+        }
+        let path = f.affected_components.first().cloned();
+        let scripted = match (f.family.as_str(), path.as_deref()) {
             (
                 "recipe-output-override"
                 | "recipe-type-override"
@@ -149,18 +199,33 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
             _ => false,
         };
         if scripted {
+            f.runtime_mutation_coverage = RuntimeMutationCoverage::ExactTargetModified;
             let prior = f.severity;
             if f.severity > Severity::Note {
                 f.severity = Severity::Note;
             }
             f.assessment.disposition = AssessmentDisposition::Downgraded;
             if prior != f.severity {
+                let contradicting_evidence = store
+                    .by_kind(kind::RUNTIME_REMOVED_RECIPE)
+                    .chain(store.by_kind(kind::RUNTIME_SCRIPT_MODIFIES_RECIPE))
+                    .chain(store.by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE))
+                    .filter(|fact| {
+                        path.as_deref().is_some_and(|path| {
+                            resource_matches_script_subject(path, &fact.subject)
+                        })
+                    })
+                    .map(|fact| fact.id)
+                    .collect();
                 f.assessment.adjustments.push(ConclusionAdjustment {
                     code: "runtime-resource-mutator-observed".to_string(),
                     detail: "runtime script evidence can replace the static resource before use"
                         .to_string(),
+                    original_disposition: Some(AssessmentDisposition::Asserted),
+                    final_disposition: Some(AssessmentDisposition::Downgraded),
                     from_severity: Some(prior),
                     to_severity: Some(f.severity),
+                    contradicting_evidence,
                 });
             }
             f.confidence = (f.confidence * 0.7).min(0.7);
@@ -193,6 +258,14 @@ fn recipe_is_scripted(path: &str, scripted: &std::collections::BTreeSet<String>)
     key.namespace
         .as_deref()
         .is_some_and(|ns| scripted.contains(ns))
+}
+
+fn resource_matches_script_subject(path: &str, subject: &str) -> bool {
+    let key = ResourceKey::from_path(path);
+    key.object_id
+        .as_ref()
+        .is_some_and(|id| id.to_string() == subject)
+        || key.namespace.as_deref() == Some(subject)
 }
 
 #[cfg(test)]

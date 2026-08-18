@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use intermed_doctor_core::evidence::{CoverageRequirement, Impact, ProofKind};
+use intermed_doctor_core::evidence::{ConclusionKind, CoverageRequirement, Impact, ProofKind};
 
 /// Unsigned legacy rule-pack schema.
 pub const RULE_PACK_SCHEMA: &str = "intermed-rule-pack-v1";
@@ -114,6 +114,10 @@ pub struct RuleSpec {
 pub struct RuleAssessmentContract {
     pub impact: Impact,
     pub proof_kind: ProofKind,
+    /// Machine-readable semantic family used by certainty and reconciliation
+    /// policy. Presentation ids must never be interpreted as policy tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conclusion_kind: Option<ConclusionKind>,
     #[serde(default)]
     pub coverage_requirements: Vec<CoverageRequirement>,
     #[serde(default)]

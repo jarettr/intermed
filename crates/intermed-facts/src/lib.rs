@@ -63,6 +63,9 @@ pub mod kind {
     /// A class symbol referenced by a mod's ordinary bytecode constant pool.
     /// This is a bounded structural usage edge, not proof that the call executes.
     pub const BYTECODE_REFERENCE: &str = "bytecode_reference";
+    pub const BYTECODE_CALL_EDGE: &str = "bytecode_call_edge";
+    pub const CALL_SLICE_COVERAGE: &str = "call_slice_coverage";
+    pub const SCRIPT_DISCOVERY_COVERAGE: &str = "script_discovery_coverage";
     pub const MOD_RELATIONSHIP: &str = "mod_relationship";
     pub const MOD_CAPABILITY: &str = "mod_capability";
     pub const NESTED_JAR: &str = "nested_jar";
@@ -314,6 +317,9 @@ pub mod kind {
             ENTRYPOINT_DETAIL,
             PACKAGE_OWNER,
             BYTECODE_REFERENCE,
+            BYTECODE_CALL_EDGE,
+            CALL_SLICE_COVERAGE,
+            SCRIPT_DISCOVERY_COVERAGE,
             MOD_RELATIONSHIP,
             MOD_CAPABILITY,
             NESTED_JAR,

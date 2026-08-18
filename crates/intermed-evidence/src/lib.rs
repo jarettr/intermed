@@ -11,6 +11,21 @@ use serde::{Deserialize, Serialize};
 
 use intermed_facts::FactId;
 
+pub mod graph;
+pub mod identity;
+pub mod incident;
+
+pub use graph::{
+    ArtifactNode, BridgeCapability, CompatibilityBridge, EvidenceGraph, EvidenceLink,
+    EvidenceRelation, EvidenceStrength, ModInstanceNode,
+};
+pub use identity::{
+    ArtifactId, ClassSymbol, DependencyEdgeId, DescriptorKind, EntityRef, MappingGraphId,
+    MappingNamespace, MethodDescriptor, MethodSymbol, MixinSiteId, ModInstanceId, RecommendationId,
+    ResourceKey, RuntimeOccurrenceId, ThrowableId,
+};
+pub use incident::{CausalNode, CausalTransition, Contributor, Incident};
+
 /// How serious a finding is. Ordered: `Info` < `Note` < `Warn` < `Error` < `Fatal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -176,6 +191,78 @@ pub enum Impact {
     Informational,
 }
 
+/// Product surface on which a conclusion belongs. This is semantic report
+/// policy, not a presentation tag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FindingChannel {
+    Incident,
+    Compatibility,
+    #[default]
+    PackHealth,
+    DeveloperLint,
+    Informational,
+}
+
+/// Semantic condition proposed by a rule. Cross-layer reconciliation dispatches
+/// on this type rather than parsing presentation ids or tags.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConclusionKind {
+    MissingDependency,
+    WrongVersion,
+    LoaderMismatch,
+    ClassAbsent,
+    MethodAbsent,
+    DependencyUnused,
+    StaticResourceState,
+    RuntimeIncident,
+    #[default]
+    Generic,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeMutationCoverage {
+    NoMutatorEvidence,
+    MutatorPresent,
+    ExactTargetModified,
+    CoveragePartial,
+    #[default]
+    Unavailable,
+}
+
+impl FindingChannel {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Incident => "incident",
+            Self::Compatibility => "compatibility",
+            Self::PackHealth => "pack-health",
+            Self::DeveloperLint => "developer-lint",
+            Self::Informational => "informational",
+        }
+    }
+}
+
+impl From<&str> for FindingChannel {
+    fn from(value: &str) -> Self {
+        match value {
+            "incident" | "incident-diagnosis" => Self::Incident,
+            "compatibility" => Self::Compatibility,
+            "developer-lint" => Self::DeveloperLint,
+            "informational" | "context" => Self::Informational,
+            _ => Self::PackHealth,
+        }
+    }
+}
+
+impl From<String> for FindingChannel {
+    fn from(value: String) -> Self {
+        Self::from(value.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrerequisiteResult {
     pub requirement: CoverageRequirement,
@@ -200,10 +287,16 @@ pub struct PrerequisiteFailure {
 pub struct ConclusionAdjustment {
     pub code: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_disposition: Option<AssessmentDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_disposition: Option<AssessmentDisposition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_severity: Option<Severity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to_severity: Option<Severity>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contradicting_evidence: Vec<FactId>,
 }
 
 /// Final trust contract produced by the assessment engine.
@@ -422,6 +515,40 @@ pub struct FixCandidate {
     pub confidence: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecommendationAction {
+    Install,
+    Update,
+    Remove,
+    Replace,
+    Configure,
+    ProvideInput,
+    Inspect,
+    Verify,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecommendationSafety {
+    ReadOnly,
+    Reversible,
+    ReviewRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Recommendation {
+    pub id: RecommendationId,
+    pub action: RecommendationAction,
+    pub target: EntityRef,
+    pub rationale: String,
+    pub safety: RecommendationSafety,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<FactId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affected_findings: Vec<String>,
+}
+
 impl FixCandidate {
     pub fn advice(description: impl Into<String>) -> Self {
         Self {
@@ -454,7 +581,9 @@ pub struct Finding {
     pub family: String,
     /// Product surface such as `incident`, `pack-health`, or `context`.
     #[serde(default)]
-    pub channel: String,
+    pub channel: FindingChannel,
+    #[serde(default)]
+    pub conclusion_kind: ConclusionKind,
     /// Id of the rule that produced it.
     pub rule_id: String,
     pub severity: Severity,
@@ -463,6 +592,9 @@ pub struct Finding {
     /// Human explanation in plain language.
     pub explanation: String,
     pub evidence: Vec<EvidenceEdge>,
+    /// Typed, traversable path through the cross-layer evidence graph.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_path: Vec<EvidenceLink>,
     /// Structured, inline summary of the cited evidence. Populated centrally at
     /// report-assembly time from the evidence facts, so consumers don't have to
     /// resolve fact ids against a dump. Empty until then.
@@ -472,6 +604,11 @@ pub struct Finding {
     /// Mods / plugins / paths this finding concerns.
     pub affected_components: Vec<String>,
     pub fix_candidates: Vec<FixCandidate>,
+    /// Stable, deduplicated recommendation objects are stored at report level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recommendation_ids: Vec<RecommendationId>,
+    #[serde(default)]
+    pub runtime_mutation_coverage: RuntimeMutationCoverage,
     /// Stable tags for machine consumers / CI filters (e.g. `["dependency", "missing"]`).
     pub machine_tags: Vec<String>,
     /// How prominently this finding is surfaced (default report vs explain-only).
@@ -515,17 +652,21 @@ impl Finding {
                 semantic_id: String::new(),
                 occurrence_id: None,
                 family: String::new(),
-                channel: String::new(),
+                channel: FindingChannel::default(),
+                conclusion_kind: ConclusionKind::default(),
                 rule_id: rule_id.to_string(),
                 severity: Severity::Warn,
                 category: Category::Environment,
                 title: String::new(),
                 explanation: String::new(),
                 evidence: Vec::new(),
+                evidence_path: Vec::new(),
                 evidence_summary: Vec::new(),
                 confidence: 0.9,
                 affected_components: Vec::new(),
                 fix_candidates: Vec::new(),
+                recommendation_ids: Vec::new(),
+                runtime_mutation_coverage: RuntimeMutationCoverage::Unavailable,
                 machine_tags: Vec::new(),
                 visibility: FindingVisibility::Default,
                 rule_sources: Vec::new(),
@@ -599,8 +740,12 @@ impl FindingBuilder {
         self.finding.family = family.into();
         self
     }
-    pub fn channel(mut self, channel: impl Into<String>) -> Self {
+    pub fn channel(mut self, channel: impl Into<FindingChannel>) -> Self {
         self.finding.channel = channel.into();
+        self
+    }
+    pub fn conclusion_kind(mut self, kind: ConclusionKind) -> Self {
+        self.finding.conclusion_kind = kind;
         self
     }
     pub fn semantic_id(mut self, semantic_id: impl Into<String>) -> Self {
@@ -630,20 +775,22 @@ impl FindingBuilder {
         if finding.family.is_empty() {
             finding.family = finding.rule_id.clone();
         }
-        if finding.channel.is_empty() {
+        if finding.channel == FindingChannel::PackHealth {
             finding.channel = match finding.category {
-                Category::Runtime | Category::Log => "incident",
-                Category::Environment
-                | Category::Metadata
-                | Category::Dependency
-                | Category::Loader
+                Category::Runtime | Category::Log => FindingChannel::Incident,
+                Category::Dependency | Category::Loader | Category::Environment => {
+                    FindingChannel::Compatibility
+                }
+                Category::Mixin if finding.visibility != FindingVisibility::Default => {
+                    FindingChannel::DeveloperLint
+                }
+                Category::Metadata
                 | Category::Resource
                 | Category::Mixin
                 | Category::Security
                 | Category::Performance
-                | Category::Packaging => "pack-health",
-            }
-            .to_string();
+                | Category::Packaging => FindingChannel::PackHealth,
+            };
         }
         finding
     }

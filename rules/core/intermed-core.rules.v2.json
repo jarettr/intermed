@@ -1,7 +1,7 @@
 {
   "schema": "intermed-rule-pack-v2",
   "id": "intermed-core",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "intermed",
   "rules": [
     {

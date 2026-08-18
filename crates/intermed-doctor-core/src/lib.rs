@@ -18,6 +18,7 @@
 
 pub mod assessment;
 pub mod bounded_zip;
+pub mod coherence;
 pub mod collector;
 pub mod engine;
 pub mod fabric_json;

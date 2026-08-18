@@ -1,5 +1,7 @@
 INFO Resource can be merged safely: data/minecraft/tags/items/test.json
 id: resource-conflict:safe-crdt-merge:data/minecraft/tags/items/test.json
+semantic id: finding:generic:a6ac736674d890763f9e007d
+occurrence id: finding-occurrence:6630d1a8cbf0e344a7b32f26e990f1979d3eea9902516fa7f5511ba5ad2d904b
 rule: resource-conflict
 
 2 writer(s) touch this path: alpha, beta. all writers append values without replace — a deterministic, order-independent set union
@@ -17,3 +19,11 @@ Evidence:
 - f# ConflictsWith weight=0.80: resource_writer subject=beta
   attrs: {"archive":"beta.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":29}
   source: beta.jar!data/minecraft/tags/items/test.json extractor=vfs-scanner
+
+Cross-layer evidence path:
+- Mod(ModInstanceId { artifact: ArtifactId("sha256:99c97e7dd9ca243c95fbdec7a0f98b5846e9a8555d61f7e0333521c52172cae4"), declared_id: "beta", descriptor_kind: Fabric, ordinal: 0 }) --Ships/Exact--> Resource(ResourceKey("data/minecraft/tags/items/test.json")) (fact f#)
+- Mod(ModInstanceId { artifact: ArtifactId("sha256:e84b29a6b2269016df1236d95729d347211846f607fe3c6017dd0a563e5e0d86"), declared_id: "alpha", descriptor_kind: Fabric, ordinal: 0 }) --Ships/Exact--> Resource(ResourceKey("data/minecraft/tags/items/test.json")) (fact f#)
+- Resource(ResourceKey("data/minecraft/tags/items/test.json")) --Corroborates/Exact--> Resource(ResourceKey("data/minecraft/tags/items/test.json")) (fact f#)
+
+Shared recommendations:
+- recommendation:2c4b29797e0262b021b5d3a99edc40993afbe67057bb21809b7497bd7d61e5fa

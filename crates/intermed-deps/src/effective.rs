@@ -22,10 +22,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, Finding, FindingVisibility, FixCandidate,
-    ProofKind, RuntimeRefutability, Severity,
+    Category, ConclusionKind, CoverageRequirement, EvidenceEdge, Finding, FindingVisibility,
+    FixCandidate, ProofKind, RuntimeRefutability, Severity,
 };
 use intermed_doctor_core::facts::{FactId, FactStore, kind};
+use sha2::{Digest, Sha256};
 
 use crate::graph::is_platform_dep;
 use crate::semver::VersionDialect;
@@ -375,7 +376,12 @@ fn range_shape_findings(
             RangeShape::UnboundedAbove if dep.mandatory => out.push(
                 Finding::builder(
                     rule_id,
-                    format!("dependency-version-range-too-wide:{}->{}", dep.from, dep.to),
+                    format!(
+                        "dependency-version-range-too-wide:{}->{}:{}",
+                        dep.from,
+                        dep.to,
+                        range_identity(&dep.range, dep.version_dialect)
+                    ),
                 )
                 .severity(Severity::Note)
                 .confidence(0.5)
@@ -402,8 +408,10 @@ fn range_shape_findings(
                     Finding::builder(
                         rule_id,
                         format!(
-                            "dependency-version-range-too-narrow:{}->{}",
-                            dep.from, dep.to
+                            "dependency-version-range-too-narrow:{}->{}:{}",
+                            dep.from,
+                            dep.to,
+                            range_identity(&dep.range, dep.version_dialect)
                         ),
                     )
                     .severity(Severity::Note)
@@ -430,6 +438,15 @@ fn range_shape_findings(
         }
     }
     out
+}
+
+fn range_identity(range: &str, dialect: VersionDialect) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"intermed-dependency-range-v1\0");
+    digest.update(format!("{dialect:?}").as_bytes());
+    digest.update([0]);
+    digest.update(range.as_bytes());
+    format!("{:x}", digest.finalize())[..16].to_string()
 }
 
 /// `dependency-declared-but-unused` — deliberately explain-only and low-confidence.
@@ -521,6 +538,7 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
                 format!("dependency-declared-but-unused:{}->{}", dep.from, dep.to),
             )
             .coverage_requirement(CoverageRequirement::CompletePack)
+            .conclusion_kind(ConclusionKind::DependencyUnused)
             .proof_kind(ProofKind::Heuristic)
             .runtime_refutability(RuntimeRefutability::DependencyUse)
             .severity(Severity::Note)
@@ -687,10 +705,9 @@ mod tests {
         mod_fact(&mut store, "create", "0.5.1");
         declared(&mut store, "addon", "create", ">=0.5.0");
         let f = run(&store);
-        assert!(
-            f.iter()
-                .any(|x| x.id == "dependency-version-range-too-wide:addon->create")
-        );
+        assert!(f.iter().any(|x| {
+            x.id.starts_with("dependency-version-range-too-wide:addon->create:")
+        }));
     }
 
     #[test]
@@ -700,10 +717,9 @@ mod tests {
         mod_fact(&mut store, "create", "0.5.1");
         declared(&mut store, "addon", "create", "0.5.1");
         let f = run(&store);
-        assert!(
-            f.iter()
-                .any(|x| x.id == "dependency-version-range-too-narrow:addon->create")
-        );
+        assert!(f.iter().any(|x| {
+            x.id.starts_with("dependency-version-range-too-narrow:addon->create:")
+        }));
     }
 
     #[test]

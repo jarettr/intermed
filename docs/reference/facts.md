@@ -6,7 +6,8 @@ explains why a finding says what it says, and what `--explain` is showing you.
 ## The pipeline
 
 ```
-files on disk → collectors → facts → rules → findings → report
+files on disk → collectors → facts → rules → candidate findings
+              → canonical evidence graph → reconciliation → report
 ```
 
 - **Collectors** read the target — a jar's metadata, its mixins, its resources, a
@@ -14,11 +15,24 @@ files on disk → collectors → facts → rules → findings → report
 - **Rules** read facts and emit **findings**. A rule never reads a file; it only
   reasons over facts. This is why every finding can be traced back to facts, and
   every fact back to a file.
-- The **report** is the findings plus the context (environment, counts, which
-  collectors ran).
+- The **evidence graph** assigns shared identities to artifacts, contained mod
+  instances, classes, descriptor-qualified methods, resources, mixin sites, and
+  runtime occurrences. Its typed links let runtime and static evidence refer to
+  the same entity.
+- **Reconciliation** applies corroborating and contradicting evidence before a
+  candidate conclusion reaches the report. It records every adjustment instead
+  of silently rewriting severity.
+- The **report** is the reconciled findings plus incidents, shared
+  recommendations, the evidence graph, and run context.
 
-The fact graph is the single source of truth. Two findings about the same jar
-cite the same facts; a diff between runs is a diff over stable finding ids.
+Artifact identity is content based (`sha256:<hex>`); paths are locators, not
+identity. A mod instance is the containing artifact plus declared id, descriptor
+kind, and ordinal. Method identity includes owner, namespace/mapping graph, name,
+and descriptor so overloaded methods cannot be conflated.
+
+Findings separate a presentation `id`, a stable `semantic_id`, and a physical
+`occurrence_id`. Runtime incidents similarly retain strict and fuzzy semantic
+fingerprints while keeping every physical log occurrence distinct.
 
 ## A fact
 

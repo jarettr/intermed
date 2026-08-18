@@ -146,8 +146,11 @@ pub fn assess_findings(
                 code: "fatal-requires-terminal-runtime".to_string(),
                 detail: "Fatal is reserved for conclusions backed by terminal runtime evidence"
                     .to_string(),
+                original_disposition: Some(AssessmentDisposition::Asserted),
+                final_disposition: Some(AssessmentDisposition::Downgraded),
                 from_severity: Some(Severity::Fatal),
                 to_severity: Some(Severity::Error),
+                contradicting_evidence: Vec::new(),
             });
         }
 
@@ -171,8 +174,11 @@ pub fn assess_findings(
                 assessment.adjustments.push(ConclusionAdjustment {
                     code: "hard-error-gated".to_string(),
                     detail: "one or more declared prerequisites were not met".to_string(),
+                    original_disposition: Some(AssessmentDisposition::Asserted),
+                    final_disposition: Some(assessment.disposition),
                     from_severity: Some(proposed),
                     to_severity: Some(Severity::Warn),
+                    contradicting_evidence: Vec::new(),
                 });
             }
             if !finding
@@ -288,9 +294,18 @@ fn evaluate_requirement(
             )
         }
         CoverageRequirement::KnownBridgeSemantics => {
-            let ambiguous_bridge = store
-                .by_kind(kind::COMPATIBILITY_BRIDGE)
-                .any(|bridge| bridge.attr("scope") == Some("mod-runtime"));
+            let ambiguous_bridge = store.by_kind(kind::COMPATIBILITY_BRIDGE).any(|bridge| {
+                let capabilities = bridge.attr("capabilities").unwrap_or("");
+                let affects_runtime_loading = bridge.attr("scope") == Some("mod-runtime")
+                    || capabilities.split(',').any(|capability| {
+                        matches!(capability.trim(), "metadata" | "classloading" | "runtime")
+                    });
+                affects_runtime_loading
+                    && (bridge.attr("coverage") != Some("complete")
+                        || !capabilities
+                            .split(',')
+                            .any(|capability| capability.trim() == "runtime"))
+            });
             (
                 capability_complete && !ambiguous_bridge,
                 if ambiguous_bridge {

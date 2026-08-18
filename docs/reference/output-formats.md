@@ -31,6 +31,9 @@ Top-level keys:
 | `target_capabilities` | Coverage of the manifest, artifacts, classpaths, mappings, logs, configs, scripts, datapacks, and runtime profile. |
 | `summary` | Counts: `fatal`, `error`, `warn`, `note`, `info`, `total`, and `worst`. |
 | `findings` | The flat list (see below). Not grouped — group them as you like. |
+| `evidence_graph` | Canonical artifacts, mod instances, classes, methods, resources and runtime events plus typed links between them. |
+| `incidents` | Runtime occurrences grouped by semantic failure without merging their physical provenance. |
+| `recommendations` | Deduplicated actions referenced by one or more findings. |
 | `fix_plan` | Suggested fixes, aggregated across findings. |
 | `fact_stats` | A histogram of fact kinds the run produced. |
 | `collectors` | Which analysis collectors ran, their layer, status, and fact count. |
@@ -50,6 +53,8 @@ Each finding:
 | `category` | The analysis area (dependency, resource, mixin, security, …). |
 | `title`, `explanation` | The human text. |
 | `evidence` | Edges to the facts behind the finding (fact id, relation, weight). |
+| `evidence_path` | Typed cross-layer links connecting the conclusion to canonical entities. |
+| `recommendation_ids` | References to shared recommendation objects. |
 | `evidence_summary` | A flattened, inline view of the key evidence. |
 | `confidence` | 0–1, how certain the finding is. |
 | `affected_components` | The mods / paths the finding is about. |
@@ -76,7 +81,8 @@ Fatal conclusions are permitted only when their declared contract is satisfied.
   requires a new schema identifier.
 
 Rule packs follow the same explicit policy. `intermed-rule-pack-v3` requires an
-assessment contract for Error/Fatal rules. Legacy v1/v2 packs still load, but
+assessment contract, including a typed `conclusion_kind`, for Error/Fatal rules.
+Legacy v1/v2 packs still load, but
 their hard findings are capped at Warn and carry the
 `legacy-rule-pack-has-no-proof-contract` blocker.
 

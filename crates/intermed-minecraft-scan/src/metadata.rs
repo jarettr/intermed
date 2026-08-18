@@ -27,7 +27,8 @@ use crate::forge_annotation;
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan/parse logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r19");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r21");
+const MAX_PACK_CALL_EDGES: usize = 20_000;
 
 pub struct MetadataCollector;
 
@@ -98,6 +99,7 @@ impl Collector for MetadataCollector {
             })
             .collect();
 
+        let mut call_edges_remaining = MAX_PACK_CALL_EDGES;
         for (jar, name, outcome) in scanned {
             match outcome {
                 CachedJarOutcome::Parsed {
@@ -114,6 +116,7 @@ impl Collector for MetadataCollector {
                             &name,
                             &identity_certainty,
                             &descriptor_candidates,
+                            &mut call_edges_remaining,
                         );
                     }
                     // Surface per-entry caps that fired while scanning this jar
@@ -203,6 +206,7 @@ fn emit_artifact(
     file: &str,
     identity_certainty: &str,
     descriptor_candidates: &[String],
+    call_edges_remaining: &mut usize,
 ) -> usize {
     let mut emitted = 0;
     let predicate = if m.is_plugin { kind::PLUGIN } else { kind::MOD };
@@ -252,12 +256,28 @@ fn emit_artifact(
     if let Some((from_loader, to_loader, scope)) =
         compatibility_bridge(&m.id, file, m.name.as_deref(), &m.provides, m.loader)
     {
+        let (capabilities, coverage, coverage_reason) = match scope {
+            "mod-runtime" => (
+                "metadata,classloading",
+                "partial",
+                "bridge detected; runtime compatibility is version- and artifact-dependent",
+            ),
+            "api-surface" => (
+                "api-surface",
+                "complete",
+                "API compatibility only; this is not a runtime loader bridge",
+            ),
+            _ => ("", "partial", "bridge capability is unknown"),
+        };
         ctx.store
             .fact("metadata-scanner", kind::COMPATIBILITY_BRIDGE)
             .subject(m.id.clone())
             .attr("from_loader", from_loader)
             .attr("to_loader", to_loader)
             .attr("scope", scope)
+            .attr("capabilities", capabilities)
+            .attr("coverage", coverage)
+            .attr("coverage_reason", coverage_reason)
             .source(SourceRef::inside(file, m.manifest_name))
             .confidence(0.95)
             .emit();
@@ -293,6 +313,48 @@ fn emit_artifact(
                     .emit();
                 emitted += 1;
             }
+            let retained_edges = m.bytecode.call_edges.len().min(*call_edges_remaining);
+            for edge in m.bytecode.call_edges.iter().take(retained_edges) {
+                ctx.store
+                    .fact("metadata-scanner", kind::BYTECODE_CALL_EDGE)
+                    .subject(m.id.clone())
+                    .attr("caller_class", edge.caller_class.clone())
+                    .attr("caller_method", edge.caller_method.clone())
+                    .attr("caller_descriptor", edge.caller_descriptor.clone())
+                    .attr("target_class", edge.target_class.clone())
+                    .attr("target_method", edge.target_method.clone())
+                    .attr("target_descriptor", edge.target_descriptor.clone())
+                    .attr("dispatch", edge.dispatch.clone())
+                    .attr("archive", file)
+                    .source(SourceRef::file(file))
+                    .confidence(if edge.dispatch == "exact" { 1.0 } else { 0.8 })
+                    .emit();
+                emitted += 1;
+            }
+            *call_edges_remaining = call_edges_remaining.saturating_sub(retained_edges);
+            let pack_budget_truncated = retained_edges < m.bytecode.call_edges.len();
+            ctx.store
+                .fact("metadata-scanner", kind::CALL_SLICE_COVERAGE)
+                .subject(m.id.clone())
+                .attr("edges_retained", retained_edges as i64)
+                .attr("max_edges", MAX_PACK_CALL_EDGES as i64)
+                .attr(
+                    "truncated",
+                    m.bytecode.call_edges_truncated || pack_budget_truncated,
+                )
+                .attr(
+                    "reason",
+                    if pack_budget_truncated {
+                        "pack-wide bounded call-edge budget exhausted"
+                    } else if m.bytecode.call_edges_truncated {
+                        "artifact bounded call-edge budget exhausted"
+                    } else {
+                        "complete within bounded scanned classes"
+                    },
+                )
+                .source(SourceRef::file(file))
+                .emit();
+            emitted += 1;
         }
     }
 
@@ -1069,6 +1131,8 @@ pub(crate) struct BytecodeSignals {
     /// Bounded ordinary class references from the jar constant pools.
     pub(crate) referenced_packages: Vec<String>,
     pub(crate) references_truncated: bool,
+    pub(crate) call_edges: Vec<crate::entrypoint_analysis::CallEdge>,
+    pub(crate) call_edges_truncated: bool,
 }
 
 /// Data-pack content a jar ships, used as real evidence for [`infer_capabilities`]
@@ -1467,6 +1531,15 @@ fn parse_jar(
         let (discovered, gaps) = forge_annotation::discover_mods_from_jar(&mut archive);
         artifacts = discovered;
         truncations.extend(gaps);
+        // Bootstrap bridges such as Sinytra Connector are loader services whose
+        // actual mod descriptor is nested. Identify the outer artifact from its
+        // manifest plus exact service-provider entries; do not guess from its
+        // filename.
+        if artifacts.is_empty()
+            && let Some(bridge) = discover_bootstrap_bridge(&mut archive, expected_loader)
+        {
+            artifacts.push(bridge);
+        }
     } else if artifacts
         .iter()
         .any(|a| matches!(a.loader, Loader::Forge | Loader::NeoForge) && a.entrypoints.is_empty())
@@ -1547,6 +1620,72 @@ fn parse_jar(
         truncations,
         identity_certainty: parsed_archive.identity_certainty,
         descriptor_candidates: parsed_archive.descriptor_candidates,
+    })
+}
+
+fn discover_bootstrap_bridge<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    expected_loader: Option<Loader>,
+) -> Option<Artifact> {
+    let manifest = read_entry(archive, "META-INF/MANIFEST.MF")?;
+    let title = manifest_attribute(&manifest, "Specification-Title")
+        .or_else(|| manifest_attribute(&manifest, "Implementation-Title"))?;
+    if !title.trim().eq_ignore_ascii_case("connector") {
+        return None;
+    }
+    let has_transformer = archive
+        .by_name("META-INF/services/cpw.mods.modlauncher.api.ITransformationService")
+        .is_ok();
+    let has_candidate_locator = archive
+        .by_name("META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator")
+        .is_ok();
+    if !has_transformer || !has_candidate_locator {
+        return None;
+    }
+    let loader = match expected_loader {
+        Some(Loader::Forge) => Loader::Forge,
+        Some(Loader::NeoForge) => Loader::NeoForge,
+        _ => Loader::NeoForge, // the exact NeoForge SPI above establishes this family
+    };
+    Some(Artifact {
+        id: "connector".to_string(),
+        version: manifest_attribute(&manifest, "Implementation-Version")
+            .unwrap_or("unknown")
+            .to_string(),
+        loader,
+        side: Some("both"),
+        deps: Vec::new(),
+        provides: vec!["fabric-loader".to_string()],
+        is_plugin: false,
+        manifest_name: "META-INF/MANIFEST.MF",
+        api_version: None,
+        load_order: None,
+        bundled: Vec::new(),
+        entrypoints: Vec::new(),
+        access_widener_files: Vec::new(),
+        access_transforms: Vec::new(),
+        coremods: Vec::new(),
+        mixin_configs: Vec::new(),
+        name: Some(title.to_string()),
+        description: Some(
+            "Loader bootstrap bridge identified from manifest and service-provider entries"
+                .to_string(),
+        ),
+        authors: Vec::new(),
+        license: None,
+        icon: None,
+        update_json: None,
+        data_signals: DataSignals::default(),
+        bytecode: BytecodeSignals::default(),
+        secondary: None,
+        package_roots: Vec::new(),
+    })
+}
+
+fn manifest_attribute<'a>(manifest: &'a str, key: &str) -> Option<&'a str> {
+    manifest.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim().eq_ignore_ascii_case(key).then(|| value.trim())
     })
 }
 
@@ -1731,6 +1870,8 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
         artifact.bytecode.capabilities = intel.capabilities.clone();
         artifact.bytecode.referenced_packages = intel.referenced_packages.clone();
         artifact.bytecode.references_truncated = intel.references_truncated;
+        artifact.bytecode.call_edges = intel.call_edges.clone();
+        artifact.bytecode.call_edges_truncated = intel.call_edges_truncated;
     }
     intel
         .coverage_gaps
@@ -2701,7 +2842,10 @@ fn capability_token(token: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod compatibility_bridge_tests {
-    use super::{Loader, compatibility_bridge};
+    use std::io::{Cursor, Write};
+
+    use super::{Loader, compatibility_bridge, discover_bootstrap_bridge};
+    use zip::write::SimpleFileOptions;
 
     #[test]
     fn recognizes_connector_and_forgified_fabric_api_identities() {
@@ -2735,6 +2879,43 @@ mod compatibility_bridge_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn recognizes_descriptorless_connector_from_manifest_and_loader_services() {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            let options = SimpleFileOptions::default();
+            writer.start_file("META-INF/MANIFEST.MF", options).unwrap();
+            writer
+                .write_all(
+                    b"Manifest-Version: 1.0\nSpecification-Title: connector\nImplementation-Version: 2.0.0\n",
+                )
+                .unwrap();
+            writer
+                .start_file(
+                    "META-INF/services/cpw.mods.modlauncher.api.ITransformationService",
+                    options,
+                )
+                .unwrap();
+            writer.write_all(b"org.sinytra.Service\n").unwrap();
+            writer
+                .start_file(
+                    "META-INF/services/net.neoforged.neoforgespi.locating.IModFileCandidateLocator",
+                    options,
+                )
+                .unwrap();
+            writer.write_all(b"org.sinytra.Locator\n").unwrap();
+            writer.finish().unwrap();
+        }
+        cursor.set_position(0);
+        let mut archive = zip::ZipArchive::new(cursor).unwrap();
+        let bridge = discover_bootstrap_bridge(&mut archive, Some(Loader::NeoForge))
+            .expect("bootstrap bridge");
+        assert_eq!(bridge.id, "connector");
+        assert_eq!(bridge.version, "2.0.0");
+        assert_eq!(bridge.loader, Loader::NeoForge);
     }
 }
 

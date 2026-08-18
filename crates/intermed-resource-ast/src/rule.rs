@@ -7,8 +7,8 @@
 //! signal without adding false positives.
 
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FixCandidate, Impact,
-    ProofKind, Severity,
+    Category, ConclusionKind, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding,
+    FixCandidate, Impact, ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{Fact, kind};
 use intermed_doctor_core::{Rule, RuleCtx};
@@ -138,6 +138,7 @@ fn internal_dangling_finding(facts: &[&Fact]) -> Option<Finding> {
     }
     let (sample, count) = dangling_sample(facts);
     let mut b = Finding::builder("resource-semantics", "dangling-reference-internal")
+        .conclusion_kind(ConclusionKind::StaticResourceState)
         .severity(Severity::Warn)
         .category(Category::Resource)
         .title(format!(
@@ -183,6 +184,7 @@ fn cross_dangling_finding(facts: &[&Fact]) -> Option<Finding> {
         format!(" (owned by {})", owners.join(", "))
     };
     let mut b = Finding::builder("resource-semantics", "dangling-reference")
+        .conclusion_kind(ConclusionKind::StaticResourceState)
         .severity(Severity::Note)
         .category(Category::Resource)
         .title(format!(
@@ -373,6 +375,7 @@ fn per_path_override_finding(f: &Fact) -> Option<Finding> {
     };
     Some(
         Finding::builder("resource-semantics", format!("{diff_kind}:{path}"))
+            .conclusion_kind(ConclusionKind::StaticResourceState)
             .family(diff_kind)
             .coverage_requirement(CoverageRequirement::RelevantResources)
             .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
@@ -433,6 +436,7 @@ fn lang_conflict_finding(diffs: &[&Fact]) -> Option<Finding> {
     };
 
     let mut builder = Finding::builder("resource-semantics", "lang-key-conflict")
+        .conclusion_kind(ConclusionKind::StaticResourceState)
         .severity(Severity::Note)
         .category(Category::Resource)
         .title(format!(

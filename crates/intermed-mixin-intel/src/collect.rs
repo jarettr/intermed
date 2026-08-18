@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use intermed_doctor_core::CollectCtx;
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::settings::MixinSettings;
+use sha2::{Digest, Sha256};
 
 use crate::model::{MixinOperation, MixinScan};
 use crate::scan::extractor_id;
@@ -128,7 +129,11 @@ pub fn emit_scan_with_settings(
         emitted += 1;
     }
 
+    let mut emitted_configs = std::collections::BTreeSet::new();
     for c in &scan.configs {
+        if !emitted_configs.insert((c.archive.as_str(), c.path.as_str(), c.mod_id.as_str())) {
+            continue;
+        }
         ctx.store
             .fact(extractor, kind::MIXIN_CONFIG)
             .subject(c.mod_id.clone())
@@ -720,6 +725,11 @@ pub fn emit_scan_with_settings(
         ctx.store
             .fact(extractor, kind::MIXIN_APPLICATION_SITE)
             .subject(site.site_id.clone())
+            .attr("site_semantic_id", site.site_id.clone())
+            .attr(
+                "site_occurrence_id",
+                mixin_site_occurrence_id(&site.site_id, &site.archive, &site.config_path),
+            )
             .attr("mod", site.mod_id.clone())
             .attr("mixin", site.mixin_class.clone())
             .attr("config", site.config_path.clone())
@@ -955,4 +965,20 @@ fn format_components(components: &[crate::model::ComplexityComponent]) -> String
         .map(|c| format!("{}={}({})", c.label, c.points, c.measure))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+fn mixin_site_occurrence_id(semantic_id: &str, archive: &str, config: &str) -> String {
+    let mut digest = Sha256::new();
+    for (tag, value) in [
+        ("semantic", semantic_id),
+        ("archive", archive),
+        ("config", config),
+    ] {
+        digest.update((tag.len() as u32).to_be_bytes());
+        digest.update(tag.as_bytes());
+        let normalized = value.replace('\\', "/");
+        digest.update((normalized.len() as u64).to_be_bytes());
+        digest.update(normalized.as_bytes());
+    }
+    format!("mixin-site:{:x}", digest.finalize())
 }

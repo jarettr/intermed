@@ -13,8 +13,8 @@ use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::evidence::{
-    Category, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding, FindingVisibility,
-    FixCandidate, Impact, ProofKind, Severity,
+    Category, ConclusionKind, CoverageRequirement, EvidenceEdge, EvidenceOrigin, Finding,
+    FindingVisibility, FixCandidate, Impact, ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{FactId, SourceRef, kind};
 use intermed_doctor_core::{
@@ -341,13 +341,26 @@ fn emit_forensic_environment(
         r#"(?im)(?:Java Version|Java version|Java):\s*[\"']?([0-9][0-9A-Za-z._+-]*)"#,
         1,
     )
+    .or_else(|| capture(r#"(?im)\bjava version\s+[\"']?([0-9][0-9A-Za-z._+-]*)"#, 1))
+    .or_else(|| {
+        capture(
+            r#"(?im)JVM identified as .*?\b([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:[+._-][0-9A-Za-z]+)*)"#,
+            1,
+        )
+    })
     .or_else(|| capture(r#"(?im)^java version\s+[\"']([^\"']+)"#, 1));
     let minecraft = capture(
         r"(?im)Loading Minecraft\s+([0-9][0-9A-Za-z._+-]*)\s+with\s+(?:NeoForge|Forge|Fabric Loader|Quilt Loader)",
         1,
     )
-    .or_else(|| capture(r"(?im)Minecraft Version:\s*([^\s]+)", 1));
+    .or_else(|| capture(r"(?im)Minecraft Version:\s*([^\s]+)", 1))
+    .or_else(|| capture(r"(?im)--fml\.mcVersion,\s*([^,\]\s]+)", 1))
+    .or_else(|| capture(r"(?im)TRANSFORMER/minecraft@([^/\s]+?)/", 1));
     let loader_candidates = [
+        (
+            "neoforge",
+            r"(?im)--fml\.neoForgeVersion,\s*([0-9][0-9A-Za-z._+-]*)",
+        ),
         (
             "neoforge",
             r"(?im)(?:with\s+NeoForge|NeoForge(?: Version)?[: ]+)\s*([0-9][0-9A-Za-z._+-]*)?",
@@ -469,6 +482,7 @@ fn emit_runtime_events(
             .subject(event.occurrence_id.clone())
             .attr("occurrence_id", event.occurrence_id.clone())
             .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+            .attr("fuzzy_fingerprint", event.fuzzy_fingerprint.clone())
             .attr("timestamp", event.timestamp.clone().unwrap_or_default())
             .attr("thread", event.thread.clone().unwrap_or_default())
             .attr("level", level)
@@ -499,6 +513,7 @@ fn emit_runtime_events(
                 .fact(extractor, kind::CRASH_ANCHOR)
                 .subject(event.occurrence_id.clone())
                 .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                .attr("fuzzy_fingerprint", event.fuzzy_fingerprint.clone())
                 .attr("normalized_fragment", i64::from(event.source_fragment))
                 .attr("anchor_type", event.terminality.as_str())
                 .attr("terminality", event.terminality.as_str())
@@ -520,6 +535,7 @@ fn emit_runtime_events(
                 .fact(extractor, kind::THROWABLE_NODE)
                 .subject(event.occurrence_id.clone())
                 .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                .attr("fuzzy_fingerprint", event.fuzzy_fingerprint.clone())
                 .attr("normalized_fragment", i64::from(event.source_fragment))
                 .attr("index", node_index as i64)
                 .attr("type", throwable.throwable_type.clone())
@@ -535,25 +551,44 @@ fn emit_runtime_events(
                 .emit();
             emitted += 1;
             for (frame_index, frame) in throwable.frames.iter().enumerate() {
-                let owner = owners
-                    .iter()
-                    .filter(|(package, _)| class_under_package(&frame.class, package))
-                    .max_by_key(|(package, _)| package.len())
-                    .map(|(_, owner)| owner.as_str())
-                    .unwrap_or("");
+                let mut owner_candidates = most_specific_frame_owners(&frame.class, &owners);
+                if owner_candidates.is_empty()
+                    && let Some(module) = frame.module.as_deref()
+                    && owners.iter().any(|(_, owner)| owner == module)
+                {
+                    owner_candidates.push(module.to_string());
+                }
+                let owner = if owner_candidates.len() == 1 {
+                    owner_candidates[0].as_str()
+                } else {
+                    ""
+                };
                 ctx.store
                     .fact(extractor, kind::STACK_FRAME)
                     .subject(event.occurrence_id.clone())
                     .attr("semantic_fingerprint", event.semantic_fingerprint.clone())
+                    .attr("fuzzy_fingerprint", event.fuzzy_fingerprint.clone())
                     .attr("normalized_fragment", i64::from(event.source_fragment))
                     .attr("throwable_index", node_index as i64)
                     .attr("frame_index", frame_index as i64)
                     .attr("class", frame.class.clone())
                     .attr("method", frame.method.clone())
+                    .attr("module", frame.module.clone().unwrap_or_default())
                     .attr("source", frame.source.clone().unwrap_or_default())
                     .attr("source_line", frame.line.map(i64::from).unwrap_or(-1))
                     .attr("classification", frame.classification.as_str())
                     .attr("mod_id", owner)
+                    .attr("owner_candidates", owner_candidates.join(","))
+                    .attr(
+                        "ownership",
+                        if owner_candidates.is_empty() {
+                            "unresolved"
+                        } else if owner_candidates.len() == 1 {
+                            "exclusive"
+                        } else {
+                            "ambiguous"
+                        },
+                    )
                     .source(SourceRef::at_line(locator.to_string(), line))
                     .confidence(if owner.is_empty() { 0.8 } else { 0.98 })
                     .emit();
@@ -610,6 +645,25 @@ fn emit_runtime_events(
         }
     }
     emitted
+}
+
+fn most_specific_frame_owners(class: &str, owners: &[(String, String)]) -> Vec<String> {
+    let max_len = owners
+        .iter()
+        .filter(|(package, _)| class_under_package(class, package))
+        .map(|(package, _)| package.len())
+        .max();
+    let Some(max_len) = max_len else {
+        return Vec::new();
+    };
+    let mut candidates = owners
+        .iter()
+        .filter(|(package, _)| package.len() == max_len && class_under_package(class, package))
+        .map(|(_, owner)| owner.clone())
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 /// Parse stack traces in one log file and emit a `log_mentions_mod` fact for each
@@ -923,13 +977,42 @@ fn collect_log_candidates(
 }
 
 fn is_log_candidate(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("log" | "txt")
-    )
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("log") => true,
+        Some("txt") => recognizable_log_text(path),
+        _ => false,
+    }
+}
+
+fn recognizable_log_text(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if name.starts_with("crash-") || name.starts_with("crash_") || name.contains("launcher-log") {
+        return true;
+    }
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut sample = String::new();
+    file.take(32 * 1024).read_to_string(&mut sample).is_ok()
+        && (sample.contains("Exception")
+            || sample.contains("Caused by:")
+            || sample.lines().take(100).any(|line| {
+                line.starts_with('[')
+                    && [
+                        "/TRACE]", "/DEBUG]", "/INFO]", "/WARN]", "/ERROR]", "/FATAL]",
+                    ]
+                    .iter()
+                    .any(|level| line.contains(level))
+            }))
 }
 
 /// Direct instance files need stronger evidence than an extension: launchers put
@@ -948,15 +1031,25 @@ fn is_direct_log_candidate(path: &Path) -> bool {
 }
 
 fn log_priority(path: &Path) -> u8 {
-    match path
+    let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("")
-    {
-        "latest.log" => 4,
-        "debug.log" => 3,
-        name if name.starts_with("crash-") || name.starts_with("crash_") => 2,
-        _ => 1,
+        .unwrap_or("");
+    let in_crash_reports = path
+        .components()
+        .any(|component| component.as_os_str() == "crash-reports");
+    if in_crash_reports || name.starts_with("crash-") || name.starts_with("crash_") {
+        7
+    } else if name.starts_with("hs_err_pid") {
+        6
+    } else if name == "latest.log" {
+        5
+    } else if name.to_ascii_lowercase().contains("launcher") {
+        4
+    } else if name == "debug.log" {
+        3
+    } else {
+        1
     }
 }
 
@@ -1102,7 +1195,10 @@ fn incident_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let mut out = Vec::new();
     for anchor in ctx.store.by_kind(kind::CRASH_ANCHOR) {
         let event_id = anchor.subject.as_str();
-        let semantic = anchor.attr("semantic_fingerprint").unwrap_or(event_id);
+        let semantic = anchor
+            .attr("fuzzy_fingerprint")
+            .or_else(|| anchor.attr("semantic_fingerprint"))
+            .unwrap_or(event_id);
         let event = ctx
             .store
             .by_kind(kind::RUNTIME_EVENT)
@@ -1165,6 +1261,7 @@ fn incident_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .semantic_id(format!("incident-semantic:{semantic}"))
             .occurrence_id(event_id)
             .family("runtime-incident")
+            .conclusion_kind(ConclusionKind::RuntimeIncident)
             .channel("incident")
             .coverage_requirement(CoverageRequirement::RuntimeEvidence)
             .coverage_requirement(CoverageRequirement::TerminalRuntime)
@@ -1517,14 +1614,17 @@ mod tests {
         let log = dir.join("latest.log");
         std::fs::write(
             &log,
-            "Java Version: 21.0.7\nLoading Minecraft 1.21.1 with NeoForge 21.1.248\n",
+            "ModLauncher running: args [--fml.neoForgeVersion, 21.1.248, --fml.mcVersion, 1.21.1]\nJVM identified as Microsoft OpenJDK 64-Bit Server VM 21.0.7+6-LTS\n",
         )
         .unwrap();
         let report = DiagnosticEngine::builder()
             .collector(LogCollector)
             .build()
             .diagnose(&Target::with_kind(log, TargetKind::LogFile));
-        assert_eq!(report.environment.java_version.as_deref(), Some("21.0.7"));
+        assert_eq!(
+            report.environment.java_version.as_deref(),
+            Some("21.0.7+6-LTS")
+        );
         assert_eq!(
             report.environment.minecraft_version.as_deref(),
             Some("1.21.1")
@@ -1947,6 +2047,19 @@ mod tests {
                 .iter()
                 .any(|f| f.id.starts_with("crash-blame-ambiguous:")),
             "ambiguous ownership should surface a weak lead"
+        );
+    }
+
+    #[test]
+    fn runtime_frame_owner_resolution_never_picks_an_arbitrary_shared_owner() {
+        let owners = vec![
+            ("com.shared".to_string(), "mod-b".to_string()),
+            ("com.shared".to_string(), "mod-a".to_string()),
+            ("com".to_string(), "broad-owner".to_string()),
+        ];
+        assert_eq!(
+            most_specific_frame_owners("com.shared.Library", &owners),
+            vec!["mod-a".to_string(), "mod-b".to_string()]
         );
     }
 

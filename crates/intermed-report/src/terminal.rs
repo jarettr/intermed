@@ -124,6 +124,36 @@ pub fn render_terminal_with_facts(report: &DoctorReport, color: bool, facts: &[F
         out.push('\n');
     }
 
+    if let Some(incident) = report.incidents.first() {
+        let _ = writeln!(out, "{}", p.paint("1;31", "PRIMARY INCIDENT"));
+        if let Some(cause) = &incident.primary_cause {
+            let _ = writeln!(
+                out,
+                "  {}{}",
+                p.bold(&cause.throwable_type),
+                cause
+                    .message
+                    .as_deref()
+                    .map(|message| format!(": {message}"))
+                    .unwrap_or_default(),
+            );
+        }
+        if let Some(transition) = &incident.caller_transition {
+            let _ = writeln!(out, "  Caller transition: {}", transition.rationale);
+        }
+        let _ = writeln!(
+            out,
+            "  {} physical occurrence(s) · evidence path {} edge(s) · semantic {}",
+            incident.occurrences.len(),
+            incident.evidence_path.len(),
+            incident
+                .fuzzy_fingerprint
+                .get(..16)
+                .unwrap_or(&incident.fuzzy_fingerprint),
+        );
+        out.push('\n');
+    }
+
     // Findings. "Normal state" findings (safe merges, pack.mcmeta overrides) are
     // collapsed to a one-line summary; the rest are grouped by family so a pack
     // with many similar findings prints one stanza per family, not per finding.

@@ -1,40 +1,53 @@
 # Project status
 
-InterMed 0.1.6-alpha is an alpha static analyzer. Its CLI, schemas, rules, and
+InterMed 0.1.7-alpha is an alpha static analyzer. Its CLI, schemas, rules, and
 reports are usable, but compatibility is not yet promised across every Minecraft
 or loader release and machine-facing formats may change before 1.0.
 
 ## What has been validated
 
-A fresh 0.1.6 trust-contract pass on 2026-08-17 covered five materialized
-Modrinth packs: 1,166 mod archives and 3.01 GiB of JAR content across Minecraft 1.19.2,
-1.20.1, and 1.21.1 with Fabric, Forge, and NeoForge. Every run used its original
-`.mrpack` as authoritative environment evidence. BMC4 additionally used
-`--mixin-level full`, a Minecraft 1.20.1 client jar, and Tiny mappings. All runs
-used `--jobs 4`, completed without an operational error, and used the canonical
-`intermed-doctor-report-v2` schema. The optional embedded DuckDB backend was not
-enabled for this gate. Timings below are warm-cache validation timings; fact and
-finding counts are independent of that cache state.
+A fresh 0.1.7 coherent-evidence pass on 2026-08-18 covered five materially
+different real targets across Forge and NeoForge 1.20.1/1.21.1. Pixelmon and
+Cobblemon exercise pack identity and compatibility bridges; Better MC Forge
+BMC4 exercises a large full-Mixin corpus; Cave Horror exercises KubeJS discovery
+and resource-mutator completeness; Spaceholecraft combines 397 canonical
+artifacts with a real terminal runtime incident. BMC4 and Spaceholecraft were
+supplied Minecraft client jars and Tiny mappings. Their client jars were
+official-obfuscated while the available Tiny files described intermediary to
+Yarn named symbols, so absence verification correctly remained unavailable
+instead of comparing incompatible namespaces.
 
-The optional DuckDB build was validated separately with its full crate suite,
-CLI persistence E2E tests, and Clippy. A Pixelmon DuckDB smoke run persisted 834
-retained facts and 209 findings to a 3.3 MiB database; its semantic findings,
-severities, and assessments matched the default columnar report exactly.
+Every report used `intermed-doctor-report-v2`, had unique finding IDs, and
+completed with zero operational errors. Runs used `--jobs 2`; DuckDB support was
+not enabled or compiled as part of this gate. The final Pixelmon audit used full
+metadata and resource depth and was repeated with and without the cache: finding
+IDs, semantic IDs, assessments, fact counts, and graph cardinalities were
+identical. Timings include cold or partially warm cache work and are therefore
+measurements of these invocations, not cross-machine benchmarks.
 
-| Pack | Target | Archives | Generated / retained / snapshot-dropped facts | Findings (Error / Warn) | Confirmed problems / abstentions | Time | Peak RSS |
+| Pack | Target evidence | Canonical artifacts | Generated / retained / snapshot-dropped facts | Findings (Error / Warn) | Abstentions | Time | Peak RSS |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Prominence II | Fabric 1.20.1 | 436 | 1,194,571 / 52,151 / 1,142,420 | 10,755 (1 / 378) | 1 / 63 | 14.4 s | 3,132 MiB |
-| Create+ | Forge 1.19.2 | 286 | 407,069 / 22,945 / 384,124 | 5,402 (3 / 309) | 3 / 34 | 3.7 s | 1,645 MiB |
-| FOM | NeoForge 1.21.1 | 101 | 163,372 / 12,665 / 150,707 | 3,501 (0 / 268) | 0 / 193 | 5.8 s | 1,271 MiB |
-| Pixelmon | NeoForge 1.21.1 | 13 | 150,939 / 834 / 150,105 | 209 (0 / 14) | 0 / 26 | 2.8 s | 640 MiB |
-| Better MC Forge BMC4, full Mixin | Forge 1.20.1 | 330 | 808,508 / 29,902 / 778,606 | 7,798 (2 / 475) | 2 / 83 | 8.6 s | 2,533 MiB |
+| Pixelmon, full metadata/resources | authoritative NeoForge 1.21.1 manifest | 15 | 158,842 / 10,378 / 148,464 | 35 (0 / 11) | 26 | 36.9 s | 346 MiB |
+| Cobblemon | authoritative NeoForge 1.21.1 manifest + Connector evidence | 137 | 61,994 / 11,708 / 50,286 | 116 (0 / 19) | 84 | 48.1 s | 356 MiB |
+| Spaceholecraft | NeoForge 1.21.1 runtime log | 397 | 676,661 / 90,285 / 586,376 | 11,839 (191 / 556) | 68 | 246.7 s | 2,705 MiB |
+| Better MC Forge BMC4 | authoritative Forge 1.20.1 manifest, full Mixin | 536 | 412,100 / 46,458 / 365,642 | 9,112 (2 / 498) | 53 | 211.0 s | 2,250 MiB |
+| Cave Horror | authoritative Forge 1.20.1 manifest + KubeJS | 181 | 189,203 / 23,497 / 165,706 | 3,336 (1 / 147) | 3 | 76.3 s | 1,206 MiB |
 
-All five reports had zero Error/Fatal findings that violated the typed assessment
-contract: every retained hard conclusion was asserted, confirmed, blocker-free,
-and backed by its declared coverage prerequisites. Abstentions are visible
-findings whose prerequisites were not met; they are not silently discarded
-errors. A cached and uncached Pixelmon run also produced the same 209 semantic
-finding records, including severity and assessment disposition.
+Spaceholecraft's primary terminal incident resolves to the deepest
+`IllegalStateException` (`GL error off-thread`, GLFW 65539), not its outer
+`ReportedException`. The evidence path records
+`createdieselgenerators.EntityFilterItem.appendHoverText` calling
+`create.AllKeys.isKeyDown`; target Java is taken from the log as
+`21.0.7+6-LTS`, not from the analyzer host. Cave Horror's KubeJS tree is reported
+as a runtime mutator, so affected static resource conclusions carry mutator
+coverage rather than claiming final runtime state.
+
+All retained Error/Fatal findings in these reports satisfy the typed assessment
+contract: each is asserted, confirmed, blocker-free, and backed by its declared
+coverage prerequisites. Abstentions remain visible structured conclusions; they
+are not silently discarded errors. Evidence paths are bounded to 256 links per
+finding while the normalized evidence graph retains the complete relationship
+set within its declared graph budgets.
 
 “Snapshot-dropped” means facts removed only after every registered rule finished;
 it is not collection-time truncation. Tiny-limit regression fixtures verify that

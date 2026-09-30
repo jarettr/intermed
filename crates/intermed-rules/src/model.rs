@@ -45,7 +45,7 @@ pub enum RuleKind {
 pub struct RulePack {
     pub schema: String,
     pub id: String,
-    /// Semver string for marketplace updates (v2 packs; defaults for v1).
+    /// Semver string for marketplace updates (v2/v3 packs).
     #[serde(default)]
     pub version: String,
     /// Publisher id matching a registry entry.
@@ -58,8 +58,8 @@ pub struct RulePack {
     pub signature: Option<crate::signing::RulePackSignature>,
 }
 
-/// One declarative rule. v1 rules use `input_kinds` / `where_all`; v2 join and
-/// aggregate rules use [`FactSource`] arms and expression strings.
+/// One declarative rule. Legacy v2 single-fact rules use `input_kinds` /
+/// `where_all`; join and aggregate rules use [`FactSource`] arms and expressions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuleSpec {
     pub id: String,

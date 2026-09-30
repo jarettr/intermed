@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use intermed_evidence::{CoverageGap, CoverageRequirement, CoverageState, ProofKind};
-use intermed_facts::{Fact, FactStore, kind};
+use intermed_facts::{FactStore, kind};
 use serde::{Deserialize, Serialize};
 
 use crate::collector::{CollectorOutcome, CollectorStatus};
@@ -21,6 +21,9 @@ pub enum TargetRegion {
     Mappings,
     Logs,
     Configs,
+    ScriptSources,
+    RuntimeMutationLogs,
+    /// Compatibility aggregate retained for older scope consumers.
     Scripts,
     ResourceBlobs,
     Datapacks,
@@ -44,6 +47,9 @@ pub struct InputRequirement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectorScope {
     pub produces: BTreeSet<String>,
+    /// Facts from earlier collectors that this collector may read for
+    /// cross-layer enrichment. The engine supplies only this declared subset.
+    pub consumes: BTreeSet<String>,
     pub target_regions: BTreeSet<TargetRegion>,
     pub prerequisites: Vec<InputRequirement>,
     pub completeness_model: CompletenessModel,
@@ -53,6 +59,7 @@ impl CollectorScope {
     pub fn new(completeness_model: CompletenessModel) -> Self {
         Self {
             produces: BTreeSet::new(),
+            consumes: BTreeSet::new(),
             target_regions: BTreeSet::new(),
             prerequisites: Vec::new(),
             completeness_model,
@@ -64,8 +71,23 @@ impl CollectorScope {
         self
     }
 
+    pub fn consumes(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.consumes.extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
     pub fn regions(mut self, regions: impl IntoIterator<Item = TargetRegion>) -> Self {
         self.target_regions.extend(regions);
+        self
+    }
+
+    /// Declare a target region that must be produced by an earlier collector.
+    /// The checked engine builder validates the dependency order.
+    pub fn requires(mut self, id: impl Into<String>, region: TargetRegion) -> Self {
+        self.prerequisites.push(InputRequirement {
+            id: id.into(),
+            region,
+        });
         self
     }
 }
@@ -73,7 +95,19 @@ impl CollectorScope {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RuleRequirements {
     pub input_layers: BTreeSet<Layer>,
+    /// Predicates without which the rule's core conclusion cannot run.
     pub required_fact_kinds: BTreeSet<String>,
+    /// Predicates that enrich explanations or enable additional low-severity
+    /// conclusions, but whose absence must not disable the core rule.
+    pub optional_fact_kinds: BTreeSet<String>,
+    /// Counter-evidence predicates that can invalidate/downgrade a conclusion.
+    /// They are semantically distinct from enrichment even though both are
+    /// optional at engine-construction time.
+    pub refutation_fact_kinds: BTreeSet<String>,
+    /// Predicates used only to add context or low-confidence navigation. They
+    /// cannot make a hard conclusion valid and their absence is not a coverage
+    /// failure.
+    pub context_fact_kinds: BTreeSet<String>,
     pub required_regions: BTreeSet<TargetRegion>,
     pub minimum_coverage: BTreeSet<CoverageRequirement>,
     pub permitted_proof_kinds: BTreeSet<ProofKind>,
@@ -84,6 +118,35 @@ impl RuleRequirements {
         self.required_fact_kinds
             .extend(kinds.into_iter().map(Into::into));
         self
+    }
+
+    pub fn optional_facts(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.optional_fact_kinds
+            .extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn refutation_facts(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.refutation_fact_kinds
+            .extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn context_facts(mut self, kinds: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.context_fact_kinds
+            .extend(kinds.into_iter().map(Into::into));
+        self
+    }
+
+    /// Every predicate the rule is allowed to read, independent of its role.
+    pub fn declared_fact_kinds(&self) -> BTreeSet<String> {
+        self.required_fact_kinds
+            .iter()
+            .chain(&self.optional_fact_kinds)
+            .chain(&self.refutation_fact_kinds)
+            .chain(&self.context_fact_kinds)
+            .cloned()
+            .collect()
     }
 
     pub fn layers(mut self, layers: impl IntoIterator<Item = Layer>) -> Self {
@@ -125,6 +188,10 @@ pub struct TargetCapabilities {
     pub mappings: CoverageState,
     pub logs: CoverageState,
     pub configs: CoverageState,
+    #[serde(default)]
+    pub script_sources: CoverageState,
+    #[serde(default)]
+    pub runtime_mutation_logs: CoverageState,
     pub scripts: CoverageState,
     pub runtime_mutators: CoverageState,
     pub resource_blobs: CoverageState,
@@ -150,20 +217,31 @@ impl TargetCapabilities {
         scopes: &[(&'static str, CollectorScope)],
         settings: &DiagnosisSettings,
     ) -> Self {
-        let env_facts = store.by_kind(kind::ENVIRONMENT).collect::<Vec<_>>();
-        let (best_loader, loader_conflict) =
-            strongest_environment_fact(&env_facts, "loader", &["loader_source", "evidence_source"]);
-        let (best_minecraft, minecraft_conflict) = strongest_environment_fact(
-            &env_facts,
+        let best_loader = crate::environment::resolve_environment_field(
+            store,
+            "loader",
+            &["loader_source", "evidence_source"],
+        );
+        let best_minecraft = crate::environment::resolve_environment_field(
+            store,
             "mc_version",
             &["mc_version_source", "loader_source", "evidence_source"],
         );
-        let manifest_source = best_loader
-            .and_then(|fact| fact.attr("loader_source"))
-            .or_else(|| best_minecraft.and_then(|fact| fact.attr("mc_version_source")));
+        // The report may derive a conservative cross-artifact consensus when
+        // no target-owned environment fact exists. Capabilities must describe
+        // that same value as inferred/partial rather than contradicting the
+        // report with `unknown`.
+        let inferred_loader = crate::report::infer_loader_from_mods(store);
+        let inferred_minecraft = crate::report::infer_minecraft_version(store);
+        let manifest_source = best_loader.source.or(best_minecraft.source);
+        let manifest_provenance =
+            crate::environment::EnvironmentEvidenceSource::parse(manifest_source);
         let authoritative_manifest = if settings.pack_manifest.is_some()
-            || matches!(manifest_source, Some("explicit-pack-manifest"))
-        {
+            || matches!(
+                manifest_provenance,
+                crate::environment::EnvironmentEvidenceSource::ExplicitPackManifest
+                    | crate::environment::EnvironmentEvidenceSource::PackManifest
+            ) {
             CoverageState::Complete
         } else {
             unavailable(
@@ -194,44 +272,38 @@ impl TargetCapabilities {
                 "no materialized mod artifact directory is available",
             )
         };
-        let loader_identity = match best_loader.and_then(|fact| fact.attr("loader")) {
-            Some(_) if loader_conflict => partial(
+        let loader_identity = match best_loader.value {
+            _ if best_loader.is_conflicted() => partial(
                 "loader-identity-conflict",
                 "equally authoritative environment sources disagree on the target loader",
             ),
-            Some(_)
-                if matches!(
-                    manifest_source,
-                    Some("explicit-pack-manifest" | "instance-manifest" | "runtime-log")
-                ) =>
-            {
-                CoverageState::Complete
-            }
+            Some(_) if best_loader.is_authoritative() => CoverageState::Complete,
             Some(_) => partial(
                 "loader-identity-inferred",
                 "loader identity is inferred rather than authoritative",
+            ),
+            None if inferred_loader.is_some() => partial(
+                "loader-identity-inferred",
+                "loader identity is inferred from active artifact descriptors rather than authoritative target metadata",
             ),
             None => unavailable(
                 "loader-identity-unknown",
                 "the target loader could not be established",
             ),
         };
-        let minecraft_identity = match best_minecraft.and_then(|fact| fact.attr("mc_version")) {
-            Some(_) if minecraft_conflict => partial(
+        let minecraft_identity = match best_minecraft.value {
+            _ if best_minecraft.is_conflicted() => partial(
                 "minecraft-identity-conflict",
                 "equally authoritative environment sources disagree on the Minecraft version",
             ),
-            Some(_)
-                if matches!(
-                    best_minecraft.and_then(|fact| fact.attr("mc_version_source")),
-                    Some("explicit-pack-manifest" | "instance-manifest" | "runtime-log")
-                ) =>
-            {
-                CoverageState::Complete
-            }
+            Some(_) if best_minecraft.is_authoritative() => CoverageState::Complete,
             Some(_) => partial(
                 "minecraft-identity-inferred",
                 "Minecraft version is inferred rather than authoritative",
+            ),
+            None if inferred_minecraft.is_some() => partial(
+                "minecraft-identity-inferred",
+                "Minecraft version is inferred from cross-artifact metadata consensus rather than authoritative target metadata",
             ),
             None => unavailable(
                 "minecraft-identity-unknown",
@@ -291,13 +363,25 @@ impl TargetCapabilities {
             "loader implementation classes were not independently indexed",
         );
         let bridge_semantics = materialized_artifacts.clone();
-        let scripts = coverage_for_region_or_collector(
+        let script_sources = coverage_for_region_or_collector(
             outcomes,
             scopes,
-            TargetRegion::Scripts,
+            TargetRegion::ScriptSources,
             "static-script-scanner",
-            true,
-            "scripts",
+            "script sources",
+        );
+        let runtime_mutation_logs = coverage_for_region_or_collector(
+            outcomes,
+            scopes,
+            TargetRegion::RuntimeMutationLogs,
+            "script-dynamics",
+            "runtime mutation logs",
+        );
+        let scripts = combine_coverage(
+            &script_sources,
+            &runtime_mutation_logs,
+            "script-evidence-incomplete",
+            "static script sources and runtime mutation logs were not both completely inspected",
         );
         let runtime_mutators = combine_coverage(
             &scripts,
@@ -324,6 +408,8 @@ impl TargetCapabilities {
                 "logs",
             ),
             configs: target_region_presence(target, "config", "configs-unavailable"),
+            script_sources,
+            runtime_mutation_logs,
             scripts,
             runtime_mutators,
             resource_blobs: coverage_for_region_or_layer(
@@ -423,7 +509,7 @@ fn combine_coverage(
     if left.is_complete() && right.is_complete() {
         CoverageState::Complete
     } else if matches!(left, CoverageState::Unavailable { .. })
-        || matches!(right, CoverageState::Unavailable { .. })
+        && matches!(right, CoverageState::Unavailable { .. })
     {
         unavailable(code, detail)
     } else {
@@ -449,11 +535,10 @@ fn coverage_for_region_or_collector(
     scopes: &[(&'static str, CollectorScope)],
     region: TargetRegion,
     fallback_collector: &str,
-    skipped_is_complete: bool,
     label: &str,
 ) -> CoverageState {
     if scopes.is_empty() {
-        return collector_coverage(outcomes, fallback_collector, skipped_is_complete, label);
+        return collector_coverage(outcomes, fallback_collector, label);
     }
     region_coverage(outcomes, scopes, region, label)
 }
@@ -479,27 +564,42 @@ fn region_coverage(
             "no registered collector declares this target region",
         );
     }
-    let gaps = matching
+    let failed = matching
         .iter()
-        .filter(|(_, _, outcome)| {
-            matches!(
-                outcome.status,
-                CollectorStatus::Incomplete | CollectorStatus::Failed
-            )
-        })
+        .filter(|(_, _, outcome)| outcome.status == CollectorStatus::Failed)
         .map(|(id, _, outcome)| format!("{id}: {}", outcome.message))
         .collect::<Vec<_>>();
-    if !gaps.is_empty() {
-        return partial(&format!("{label}-collector-incomplete"), &gaps.join("; "));
+    if !failed.is_empty() {
+        return unavailable(&format!("{label}-collector-failed"), &failed.join("; "));
     }
-    if matching
+    let incomplete = matching
         .iter()
-        .any(|(_, _, outcome)| outcome.status == CollectorStatus::Active)
-        || (region == TargetRegion::Scripts
-            && matching
-                .iter()
-                .any(|(_, _, outcome)| outcome.status == CollectorStatus::Skipped))
-    {
+        .filter(|(_, _, outcome)| outcome.status == CollectorStatus::Incomplete)
+        .map(|(id, _, outcome)| (*id, outcome.message.as_str()))
+        .collect::<Vec<_>>();
+    if !incomplete.is_empty() {
+        let all_or_nothing = incomplete.iter().any(|(id, _)| {
+            scopes.iter().any(|(scope_id, scope)| {
+                scope_id == id && scope.completeness_model == CompletenessModel::AllOrNothing
+            })
+        });
+        let detail = incomplete
+            .iter()
+            .map(|(id, message)| format!("{id}: {message}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return if all_or_nothing {
+            unavailable(&format!("{label}-collector-incomplete"), &detail)
+        } else {
+            partial(&format!("{label}-collector-incomplete"), &detail)
+        };
+    }
+    if matching.iter().any(|(_, _, outcome)| {
+        matches!(
+            outcome.status,
+            CollectorStatus::Active | CollectorStatus::CompleteEmpty
+        )
+    }) {
         CoverageState::Complete
     } else {
         unavailable(
@@ -550,10 +650,12 @@ fn layer_coverage(
                 .join("; "),
         );
     }
-    if matching
-        .iter()
-        .any(|(_, _, outcome)| outcome.status == CollectorStatus::Active)
-    {
+    if matching.iter().any(|(_, _, outcome)| {
+        matches!(
+            outcome.status,
+            CollectorStatus::Active | CollectorStatus::CompleteEmpty
+        )
+    }) {
         CoverageState::Complete
     } else {
         unavailable(
@@ -566,7 +668,6 @@ fn layer_coverage(
 fn collector_coverage(
     outcomes: &[(&'static str, Layer, CollectorOutcome)],
     collector_id: &str,
-    skipped_is_complete: bool,
     scope: &str,
 ) -> CoverageState {
     let Some((_, _, outcome)) = outcomes.iter().find(|(id, _, _)| *id == collector_id) else {
@@ -577,65 +678,17 @@ fn collector_coverage(
     };
     match outcome.status {
         CollectorStatus::Active => CoverageState::Complete,
-        CollectorStatus::Skipped if skipped_is_complete => CoverageState::Complete,
+        CollectorStatus::CompleteEmpty => CoverageState::Complete,
         CollectorStatus::Incomplete => {
             partial(&format!("{scope}-collector-incomplete"), &outcome.message)
         }
         CollectorStatus::Failed => {
             unavailable(&format!("{scope}-collector-failed"), &outcome.message)
         }
-        CollectorStatus::Disabled | CollectorStatus::Deferred | CollectorStatus::Skipped => {
+        CollectorStatus::Disabled | CollectorStatus::Deferred | CollectorStatus::NotApplicable => {
             unavailable(&format!("{scope}-collector-unavailable"), &outcome.message)
         }
     }
-}
-
-fn environment_evidence_priority(source: Option<&str>) -> u8 {
-    match source.unwrap_or("") {
-        "explicit-pack-manifest"
-        | "pack-manifest"
-        | "modrinth-manifest"
-        | "curseforge-manifest" => 100,
-        "instance-manifest" | "launcher-manifest" | "instance-metadata" => 90,
-        "runtime-log" => 80,
-        "artifact-consensus" => 50,
-        "filesystem-heuristic" => 10,
-        _ => 40,
-    }
-}
-
-fn strongest_environment_fact<'a>(
-    facts: &[&'a Fact],
-    value_attr: &str,
-    source_attrs: &[&str],
-) -> (Option<&'a Fact>, bool) {
-    let best_priority = facts
-        .iter()
-        .filter(|fact| fact.attr(value_attr).is_some())
-        .map(|fact| environment_evidence_priority(environment_fact_source(fact, source_attrs)))
-        .max();
-    let Some(best_priority) = best_priority else {
-        return (None, false);
-    };
-    let mut candidates = facts
-        .iter()
-        .copied()
-        .filter(|fact| {
-            fact.attr(value_attr).is_some()
-                && environment_evidence_priority(environment_fact_source(fact, source_attrs))
-                    == best_priority
-        })
-        .collect::<Vec<_>>();
-    candidates.sort_by_key(|fact| fact.id);
-    let values = candidates
-        .iter()
-        .filter_map(|fact| fact.attr(value_attr))
-        .collect::<BTreeSet<_>>();
-    (candidates.first().copied(), values.len() > 1)
-}
-
-fn environment_fact_source<'a>(fact: &'a Fact, attrs: &[&str]) -> Option<&'a str> {
-    attrs.iter().find_map(|attr| fact.attr(attr))
 }
 
 fn target_region_presence(target: &Target, name: &str, code: &str) -> CoverageState {
@@ -672,7 +725,11 @@ mod tests {
 
     #[test]
     fn skipped_log_collector_is_unavailable_not_complete() {
-        let outcomes = vec![("log", Layer::Log, CollectorOutcome::skipped("no log input"))];
+        let outcomes = vec![(
+            "log",
+            Layer::Log,
+            CollectorOutcome::not_applicable("no log input"),
+        )];
         let scopes = vec![("log", scope(TargetRegion::Logs))];
         assert!(matches!(
             region_coverage(&outcomes, &scopes, TargetRegion::Logs, "logs"),
@@ -685,7 +742,7 @@ mod tests {
         let outcomes = vec![(
             "scripts",
             Layer::Resource,
-            CollectorOutcome::skipped("no script roots"),
+            CollectorOutcome::complete_empty(0, "no script roots"),
         )];
         let scopes = vec![("scripts", scope(TargetRegion::Scripts))];
         assert_eq!(
@@ -715,10 +772,109 @@ mod tests {
     }
 
     #[test]
+    fn all_or_nothing_incomplete_region_is_unavailable() {
+        let outcomes = vec![(
+            "atomic",
+            Layer::Metadata,
+            CollectorOutcome::incomplete(1, "could not finish"),
+        )];
+        let scopes = vec![(
+            "atomic",
+            CollectorScope::new(CompletenessModel::AllOrNothing).regions([TargetRegion::Metadata]),
+        )];
+        assert!(matches!(
+            region_coverage(&outcomes, &scopes, TargetRegion::Metadata, "metadata"),
+            CoverageState::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn failed_region_is_unavailable_not_partial() {
+        let outcomes = vec![(
+            "bounded",
+            Layer::Log,
+            CollectorOutcome::failed("read failed"),
+        )];
+        let scopes = vec![("bounded", scope(TargetRegion::Logs))];
+        assert!(matches!(
+            region_coverage(&outcomes, &scopes, TargetRegion::Logs, "logs"),
+            CoverageState::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn aggregate_coverage_is_partial_when_one_surface_was_inspected() {
+        let complete = CoverageState::Complete;
+        let missing = unavailable("runtime-log-unavailable", "no runtime mutation log");
+        assert!(matches!(
+            combine_coverage(
+                &complete,
+                &missing,
+                "scripts-partial",
+                "one surface missing"
+            ),
+            CoverageState::Partial { .. }
+        ));
+
+        assert!(matches!(
+            combine_coverage(&missing, &missing, "scripts-unavailable", "both missing"),
+            CoverageState::Unavailable { .. }
+        ));
+    }
+
+    #[test]
     fn runtime_environment_outranks_filesystem_inference_for_capability_gating() {
         assert!(
-            environment_evidence_priority(Some("runtime-log"))
-                > environment_evidence_priority(Some("filesystem-heuristic"))
+            crate::environment::source_priority(Some("runtime-log"))
+                > crate::environment::source_priority(Some("filesystem-heuristic"))
         );
+    }
+
+    #[test]
+    fn artifact_consensus_is_partial_identity_not_unknown() {
+        let mut store = FactStore::new();
+        store
+            .fact("test", kind::MOD)
+            .subject("example")
+            .attr("loader", "fabric")
+            .attr("file", "example-1.21.1.jar")
+            .attr("identity_certainty", "confirmed")
+            .emit();
+        store
+            .fact("test", kind::DEPENDENCY)
+            .subject("example")
+            .attr("dep", "minecraft")
+            .attr("range", ">=1.21.1")
+            .attr("identity_certainty", "confirmed")
+            .emit();
+        store
+            .fact("test", kind::MOD)
+            .subject("example-two")
+            .attr("loader", "fabric")
+            .attr("file", "example-two-1.21.1.jar")
+            .attr("identity_certainty", "confirmed")
+            .emit();
+        store
+            .fact("test", kind::DEPENDENCY)
+            .subject("example-two")
+            .attr("dep", "minecraft")
+            .attr("range", ">=1.21.1")
+            .attr("identity_certainty", "confirmed")
+            .emit();
+
+        let capabilities = TargetCapabilities::derive(
+            &Target::with_kind(".", crate::TargetKind::ModsDir),
+            &store,
+            &[],
+            &DiagnosisSettings::default(),
+        );
+        assert!(matches!(
+            capabilities.loader_identity,
+            CoverageState::Partial { .. }
+        ));
+        assert!(matches!(
+            capabilities.minecraft_identity,
+            CoverageState::Partial { .. }
+        ));
     }
 }

@@ -20,6 +20,7 @@ intermed-minecraft-scan.workspace = true
 noak = { workspace = true, optional = true }
 rayon.workspace = true
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 zip.workspace = true
 

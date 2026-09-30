@@ -79,7 +79,7 @@ pub fn stabilize_finding_identities(
                 if let Some(fact) = store.get(edge.fact) {
                     semantic_evidence.insert((
                         fact.kind.clone(),
-                        fact.subject.clone(),
+                        fact.subject.to_string(),
                         String::new(),
                         String::new(),
                     ));
@@ -101,7 +101,7 @@ pub fn stabilize_finding_identities(
                         if let Some(value) = fact.attr(key) {
                             semantic_evidence.insert((
                                 fact.kind.clone(),
-                                fact.subject.clone(),
+                                fact.subject.to_string(),
                                 key.to_string(),
                                 value.to_string(),
                             ));

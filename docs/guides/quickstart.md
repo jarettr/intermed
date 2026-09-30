@@ -63,7 +63,7 @@ intermed doctor ./server --mixin-level standard --performance --json
 # vfs — resource/data overrides
 intermed vfs scan ./mods                      # who writes which file
 intermed vfs explain ./mods --path data/foo/recipes/bar.json --ast
-intermed vfs overlay ./mods --out ./overlay   # write the merged result to disk
+intermed vfs overlay ./mods --out ./overlay   # materialize proven-safe merges
 
 # deps — the dependency graph
 intermed deps why kubejs ./mods               # why is kubejs depended upon

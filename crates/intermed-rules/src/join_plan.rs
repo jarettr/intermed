@@ -50,7 +50,7 @@ type KeyResolver = Box<dyn Fn(&Fact) -> Option<String>>;
 /// Matches [`resolve_term`] with a one-alias binding and `vars: None` exactly.
 fn compile_key_resolver(alias: &str, term: &str) -> KeyResolver {
     if term == "subject" {
-        return Box::new(|f| Some(f.subject.clone()));
+        return Box::new(|f| Some(f.subject.to_string()));
     }
     if let Some(attr) = term.strip_prefix("attr:") {
         let attr = attr.to_string();
@@ -66,9 +66,9 @@ fn compile_key_resolver(alias: &str, term: &str) -> KeyResolver {
             if let Some(attr) = rest.strip_prefix("attr:") {
                 term_value(f, attr)
             } else if rest == "subject" {
-                Some(f.subject.clone())
+                Some(f.subject.to_string())
             } else if rest == "kind" {
-                Some(f.kind.clone())
+                Some(f.kind.to_string())
             } else {
                 term_value(f, &rest)
             }

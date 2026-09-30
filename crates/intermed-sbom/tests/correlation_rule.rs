@@ -19,10 +19,15 @@ fn dummy_target() -> Target {
 /// Emit an SBOM fact (carrying the trust score) and a high-risk security fact
 /// for the same archive, mirroring what the two collectors produce.
 fn store_with(archive: &str, mod_id: &str, trust: i64, capability: &str) -> FactStore {
+    let artifact_id = format!(
+        "sha256:{}",
+        if archive.starts_with('s') { "b" } else { "a" }.repeat(64)
+    );
     let mut store = FactStore::new();
     store
         .fact("sbom-generator", kind::SBOM)
-        .subject(archive)
+        .subject(artifact_id.clone())
+        .attr("archive", archive)
         .attr("trust_score", trust)
         .attr("source_class", "unidentified")
         .emit();
@@ -30,6 +35,7 @@ fn store_with(archive: &str, mod_id: &str, trust: i64, capability: &str) -> Fact
         .fact("security-scanner", capability)
         .subject(mod_id)
         .attr("archive", archive)
+        .attr("artifact_id", artifact_id)
         .emit();
     store
 }
@@ -43,7 +49,7 @@ fn low_trust_plus_dangerous_capability_correlates() {
         .unwrap();
 
     assert_eq!(findings.len(), 1);
-    assert_eq!(findings[0].id, "low-trust-capability:mystery.jar");
+    assert!(findings[0].id.starts_with("low-trust-capability:sha256:"));
     assert_eq!(
         findings[0].severity,
         intermed_doctor_core::evidence::Severity::Warn
@@ -83,12 +89,19 @@ fn low_trust_without_dangerous_capability_is_not_correlated() {
 }
 
 #[test]
-fn multiple_capabilities_are_merged_into_one_finding() {
+fn only_shared_high_risk_capabilities_are_correlated() {
     let mut store = store_with("mystery.jar", "mystery", 20, kind::USES_PROCESS_SPAWN);
+    let artifact_id = store
+        .by_kind(kind::SBOM)
+        .next()
+        .unwrap()
+        .subject
+        .to_string();
     store
         .fact("security-scanner", kind::USES_UNSAFE)
         .subject("mystery")
         .attr("archive", "mystery.jar")
+        .attr("artifact_id", artifact_id)
         .emit();
     let target = dummy_target();
     let findings = correlation_rule()
@@ -97,7 +110,7 @@ fn multiple_capabilities_are_merged_into_one_finding() {
 
     assert_eq!(findings.len(), 1, "one finding per archive");
     assert!(findings[0].explanation.contains("process spawn"));
-    assert!(findings[0].explanation.contains("sun.misc.Unsafe"));
+    assert!(!findings[0].explanation.contains("sun.misc.Unsafe"));
 }
 
 #[test]
@@ -105,7 +118,8 @@ fn parser_failure_does_not_amplify_security_signal() {
     let mut store = FactStore::new();
     store
         .fact("sbom-generator", kind::SBOM)
-        .subject("broken-metadata.jar")
+        .subject(format!("sha256:{}", "c".repeat(64)))
+        .attr("archive", "broken-metadata.jar")
         .attr("trust_score", 20i64)
         .attr("identity_status", "parse-failed")
         .attr("trust_base", 20i64)
@@ -114,6 +128,7 @@ fn parser_failure_does_not_amplify_security_signal() {
         .fact("security-scanner", kind::USES_PROCESS_SPAWN)
         .subject("mod")
         .attr("archive", "broken-metadata.jar")
+        .attr("artifact_id", format!("sha256:{}", "c".repeat(64)))
         .emit();
     let target = dummy_target();
     let findings = correlation_rule()
@@ -129,5 +144,64 @@ fn parser_failure_does_not_amplify_security_signal() {
             .machine_tags
             .iter()
             .any(|tag| tag == "identity-analysis-incomplete")
+    );
+}
+
+#[test]
+fn same_basename_from_another_root_does_not_cross_correlate() {
+    let low_id = format!("sha256:{}", "d".repeat(64));
+    let risky_id = format!("sha256:{}", "e".repeat(64));
+    let mut store = FactStore::new();
+    store
+        .fact("sbom-generator", kind::SBOM)
+        .subject(low_id)
+        .attr("archive", "same.jar")
+        .attr("source_locator", "/instance/mods/same.jar")
+        .attr("trust_score", 20i64)
+        .emit();
+    store
+        .fact("security-scanner", kind::USES_PROCESS_SPAWN)
+        .subject("plugin")
+        .attr("artifact_id", risky_id)
+        .attr("archive", "same.jar")
+        .attr("source_locator", "/instance/plugins/same.jar")
+        .emit();
+
+    let target = dummy_target();
+    let findings = correlation_rule()
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(findings.is_empty());
+}
+
+#[test]
+fn typed_provenance_policy_outranks_display_score() {
+    let artifact_id = format!("sha256:{}", "f".repeat(64));
+    let mut store = FactStore::new();
+    store
+        .fact("sbom-generator", kind::SBOM)
+        .subject(artifact_id.clone())
+        .attr("archive", "opaque.jar")
+        .attr("trust_score", 100i64)
+        .attr("identity_status", "no-recognizable-manifest")
+        .attr("identity_completeness", "unresolved")
+        .attr("distribution_provenance", "unknown")
+        .attr("exact_materialization", "unpinned")
+        .attr("provenance_correlation_eligible", true)
+        .emit();
+    store
+        .fact("security-scanner", kind::USES_PROCESS_SPAWN)
+        .subject("opaque")
+        .attr("artifact_id", artifact_id)
+        .attr("archive", "opaque.jar")
+        .emit();
+
+    let target = dummy_target();
+    assert_eq!(
+        correlation_rule()
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap()
+            .len(),
+        1
     );
 }

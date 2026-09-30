@@ -404,7 +404,9 @@ mod tests {
     fn sample_class(mod_id: &str, mixin: &str, target: &str) -> MixinClassRecord {
         MixinClassRecord {
             archive: format!("{mod_id}.jar"),
+            artifact_id: "sha256:test".into(),
             mod_id: mod_id.into(),
+            identity_certainty: "confirmed".into(),
             config: "mixins.json".into(),
             class_name: mixin.into(),
             class_path: format!("{mixin}.class"),
@@ -487,6 +489,7 @@ mod tests {
             meta: Default::default(),
             at_ordinal: None,
             at_target_member: String::new(),
+            at_constraints: Default::default(),
         });
         let graph = MixinInteractionGraph::build(&[a], &[], &[], &[]);
         let export = graph.export();

@@ -259,6 +259,11 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         );
     }
     let perf_thresholds = performance_thresholds_from_config(&cfg, &args.performance);
+    if performance {
+        perf_thresholds
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid performance thresholds: {error}"))?;
+    }
     let changed_since = if let Some(ref since) = args.cache.changed_since {
         Some(
             parse_changed_since(since)
@@ -297,7 +302,7 @@ fn run_doctor_inner(args: Box<DoctorArgs>, config_path: Option<&Path>) -> Anyhow
         settings,
         jar_cache,
         resolved_rules.pack,
-    );
+    )?;
     let mut run = engine.diagnose_with_facts(&target);
     populate_analyzer_fingerprint(&mut run.report, &cfg, &args, &target, rule_pack_sha256);
     detail!(
@@ -439,16 +444,28 @@ pub(crate) fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &Doctor
     }
     if let Some(level) = args.tuning.metadata_level {
         cfg.metadata.level = match level {
-            intermed_cli::command::MetadataLevelArg::Basic => "basic".to_string(),
-            intermed_cli::command::MetadataLevelArg::Enriched => "enriched".to_string(),
-            intermed_cli::command::MetadataLevelArg::Full => "full".to_string(),
+            intermed_cli::command::MetadataLevelArg::Basic => {
+                intermed_config::MetadataLevelConfig::Basic
+            }
+            intermed_cli::command::MetadataLevelArg::Enriched => {
+                intermed_config::MetadataLevelConfig::Enriched
+            }
+            intermed_cli::command::MetadataLevelArg::Full => {
+                intermed_config::MetadataLevelConfig::Full
+            }
         };
     }
     if let Some(level) = args.tuning.resource_level {
         cfg.resource.level = match level {
-            intermed_cli::command::ResourceLevelArg::Basic => "basic".to_string(),
-            intermed_cli::command::ResourceLevelArg::Semantic => "semantic".to_string(),
-            intermed_cli::command::ResourceLevelArg::Full => "full".to_string(),
+            intermed_cli::command::ResourceLevelArg::Basic => {
+                intermed_config::ResourceLevelConfig::Basic
+            }
+            intermed_cli::command::ResourceLevelArg::Semantic => {
+                intermed_config::ResourceLevelConfig::Semantic
+            }
+            intermed_cli::command::ResourceLevelArg::Full => {
+                intermed_config::ResourceLevelConfig::Full
+            }
         };
     }
     if let Some(jobs) = args.jobs {
@@ -457,15 +474,17 @@ pub(crate) fn apply_doctor_cli_overrides(cfg: &mut IntermedConfig, args: &Doctor
     if let Some(level) = args.mixin.level {
         cfg.mixin.enabled = true;
         cfg.mixin.level = match level {
-            intermed_cli::command::MixinLevelArg::Basic => "basic".to_string(),
-            intermed_cli::command::MixinLevelArg::Standard => "standard".to_string(),
-            intermed_cli::command::MixinLevelArg::Full => "full".to_string(),
+            intermed_cli::command::MixinLevelArg::Basic => intermed_config::MixinLevelConfig::Basic,
+            intermed_cli::command::MixinLevelArg::Standard => {
+                intermed_config::MixinLevelConfig::Standard
+            }
+            intermed_cli::command::MixinLevelArg::Full => intermed_config::MixinLevelConfig::Full,
         };
     }
     if args.mixin_risk {
         cfg.mixin.enabled = true;
         if args.mixin.level.is_none() {
-            cfg.mixin.level = "standard".to_string();
+            cfg.mixin.level = intermed_config::MixinLevelConfig::Standard;
         }
     }
     if args.mixin.no_mixin_handler_effects {
@@ -624,9 +643,11 @@ fn remove_imperative_fallback_duplicates(
     plan: &RuleBackendPlan,
 ) {
     pack.rules.retain(|rule| {
-        !((!plan.declarative_sbom_provenance
-            && matches!(rule.id.as_str(), "unknown-source" | "unsigned-jar"))
-            || (!plan.declarative_sbom_correlation && rule.id == "sbom-security-correlation"))
+        let imperative_provenance_duplicate = !plan.declarative_sbom_provenance
+            && matches!(rule.id.as_str(), "unknown-source" | "unsigned-jar");
+        let imperative_correlation_duplicate =
+            !plan.declarative_sbom_correlation && rule.id == "sbom-security-correlation";
+        !(imperative_provenance_duplicate || imperative_correlation_duplicate)
     });
 }
 
@@ -677,7 +698,7 @@ fn build_engine(
     settings: DiagnosisSettings,
     jar_cache: Option<JarCache>,
     mut pack: intermed_rules::RulePack,
-) -> DiagnosticEngine {
+) -> AnyhowResult<DiagnosticEngine> {
     let mut builder = DiagnosticEngine::builder()
         .tool_version(env!("CARGO_PKG_VERSION"))
         .jar_cache(jar_cache)
@@ -748,7 +769,9 @@ fn build_engine(
         builder = builder.rule(intermed_mixin_intel::rule()); // Layer F — Phase 4
     }
 
-    builder.build()
+    builder
+        .build_checked()
+        .context("invalid collector/rule registration graph")
 }
 
 pub(crate) enum ExplainResolution<'a> {

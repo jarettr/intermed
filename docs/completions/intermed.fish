@@ -48,7 +48,7 @@ complete -c intermed -n "__fish_intermed_needs_command" -f -a "help" -d 'Print t
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l mods-dir -d 'Override the mods directory (otherwise auto-detected)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l pack-manifest -d 'Authoritative original pack manifest or archive. Use this when analyzing a materialized instance whose `modrinth.index.json`/`manifest.json` was not retained by the launcher or extraction pipeline' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l logic -d 'Rule backend. The in-process columnar query engine is the default and only in-process engine; `souffle`/`duckdb` are optional external backends over the same IR (require their tool / build feature)' -r -f -a "columnar\t'In-process columnar query engine (`intermed-columnar`): the default and only in-process engine — optimizing logical/physical planner with hash join/aggregate. Pure Rust, always available'
-souffle\t'Soufflé Datalog backend (requires the `souffle` binary). Same IR, external engine'
+souffle\t'Experimental Soufflé parity backend (requires the `souffle` binary). Not a production-supported execution surface'
 duckdb\t'In-process DuckDB SQL rule backend (requires `--features duckdb`). Same IR'"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l jobs -l threads -d 'Cap the worker thread count for parallel jar/log scanning. Unset or `0` uses all available cores; lower it on weak machines or shared CI runners' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l json -d 'Emit the full report as canonical `intermed-doctor-report-v2` JSON' -r -F
@@ -78,7 +78,7 @@ complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l resource-le
 semantic\t''
 full\t''"
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l security-min-note-signals -d 'Note-level security signals required before emitting a grouped finding (default: 2)' -r
-complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l sbom-well-identified-trust -d 'SBOM trust score (0..=100) for well-identified jars (default: 60)' -r
+complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l sbom-well-identified-trust -d 'Legacy threshold for SBOM facts without typed provenance axes (default: 60)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l log-parallel-line-threshold -d 'Log line count above which scanning uses parallel workers (default: 4096)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l security-corroborated-confidence -d 'Confidence for reflection-corroborated security facts (default: 0.4)' -r
 complete -c intermed -n "__fish_intermed_using_subcommand doctor" -l minecraft-jar -d 'Minecraft client/server jar to index. Powers two layers: mixin apply-failure verification against vanilla classes (Layer F), and a vanilla resource index (Layer M) so `minecraft:` references resolve and tags expand against real vanilla data instead of being assumed present' -r -F
@@ -300,11 +300,11 @@ complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_s
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from report" -s h -l help -d 'Print help'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l manifest -d 'Dataset manifest (`intermed-eval-manifest-v1`) listing report/run pairs' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l report -d 'A Doctor report JSON (`intermed-doctor-report-v1` or canonical v2); use with `--run`' -r -F
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l run -d 'A single lab run JSON (`intermed-lab-run-v1`); use with `--report`' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l run -d 'A single lab run JSON (`intermed-lab-run-v2`; v1 is migration-readable); use with `--report`' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l min-severity -d 'Minimum prediction severity that counts as "flagged"' -r -f -a "note\t''
 warn\t''
 error\t''"
-complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l out -d 'Output accuracy report path (`intermed-rule-accuracy-v3`)' -r -F
+complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l out -d 'Output accuracy report path (`intermed-rule-accuracy-v4`)' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l config -d 'Config file (`intermed-config-v1` TOML). Overrides discovery; see docs/reference/configuration.md' -r -F
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l dump-config -d 'Print the fully merged config (defaults, files, environment, and doctor CLI overrides) as TOML and exit. A subcommand is optional'
 complete -c intermed -n "__fish_intermed_using_subcommand lab; and __fish_seen_subcommand_from eval" -l quiet -d 'Suppress informational progress messages on stderr (errors still print)'

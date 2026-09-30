@@ -10,6 +10,8 @@ use intermed_doctor_core::evidence::{
 use intermed_doctor_core::facts::{FactId, kind};
 
 use crate::graph::{is_platform_dep, platform_loader_family};
+use crate::model::{ConstraintApplicability, ProviderResolution, ResolvedDependencyModel};
+use crate::relation::DependencyRelation;
 use crate::semver::{VersionDialect, version_in_range_with_dialect};
 
 fn canonical_artifact_token(value: &str) -> String {
@@ -49,6 +51,7 @@ fn plausible_artifact_for<'a>(
 /// A dependency `provides` declaration (e.g. a Jar-in-Jar bundled library, or a
 /// mod that advertises an alias id), carrying the declared version when known so
 /// the resolver can range-check it instead of treating any provider as a match.
+#[cfg(test)]
 struct ProviderEntry {
     version: Option<String>,
     version_ambiguous: bool,
@@ -58,6 +61,10 @@ struct ProviderEntry {
     /// Minecraft both nested jars and aliases are globally visible, so scope does
     /// not change satisfaction — only the wording/confidence of provider notes.
     scope: String,
+    /// Whether both the provider identity and its activation are established.
+    /// Plausible nested/opaque artifacts prevent a definite absence assertion
+    /// but cannot satisfy a dependency as hard truth.
+    confirmed: bool,
 }
 
 /// Outcome of checking the set of providers for a dependency id against a range.
@@ -73,6 +80,7 @@ enum ProviderStatus {
     Absent,
 }
 
+#[cfg(test)]
 fn provider_status(
     providers: Option<&Vec<ProviderEntry>>,
     range: &str,
@@ -84,6 +92,10 @@ fn provider_status(
     let mut unknown: Option<&ProviderEntry> = None;
     let mut out_of_range: Option<&ProviderEntry> = None;
     for p in providers {
+        if !p.confirmed {
+            unknown.get_or_insert(p);
+            continue;
+        }
         if p.version_ambiguous && !dialect.orders_raw_extended_versions() {
             unknown.get_or_insert(p);
             continue;
@@ -161,75 +173,46 @@ fn range_status(
 /// requirement — they must never become "missing dependency" findings. The
 /// dedicated ordering rule consults the installed set for real cycles.
 fn is_ordering_relation(relation: &str) -> bool {
-    matches!(
-        relation,
-        "loadbefore" | "loadafter" | "load_before" | "load_after"
-    )
+    DependencyRelation::parse(relation).is_ordering()
 }
 
 /// Evaluate direct missing / version / Minecraft constraints without PubGrub.
 pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     let store = ctx.store;
+    let model = ResolvedDependencyModel::from_store(store);
 
     // All installed versions per id (a duplicated id keeps every version, so a
     // version check stays correct instead of silently picking one copy).
     let mut installed: HashMap<String, Vec<String>> = HashMap::new();
-    for f in store
-        .by_kind(kind::MOD)
-        .chain(store.by_kind(kind::PLUGIN))
-        .filter(|fact| {
-            fact.attr("identity_certainty")
-                .is_none_or(|certainty| certainty == "confirmed")
-        })
-    {
+    for package in model.confirmed_packages() {
         installed
-            .entry(f.subject.clone())
+            .entry(package.id.clone())
             .or_default()
-            .push(f.attr("version").unwrap_or("0").to_string());
+            .push(package.version.clone().unwrap_or_else(|| "0".to_string()));
     }
     let ambiguous_versions: HashSet<String> = store
         .by_kind(kind::MOD_METADATA)
         .filter(|fact| fact.attr_bool("version_ambiguous").unwrap_or(false))
-        .map(|fact| fact.subject.clone())
+        .map(|fact| fact.subject.to_string())
         .collect();
-    let loader_by_mod: HashMap<String, String> = store
-        .by_kind(kind::MOD)
-        .chain(store.by_kind(kind::PLUGIN))
-        .filter_map(|fact| {
-            fact.attr("loader")
-                .map(|loader| (fact.subject.clone(), loader.to_string()))
+    let loader_by_mod: HashMap<String, String> = model
+        .confirmed_packages()
+        .filter_map(|package| {
+            package
+                .loader
+                .clone()
+                .map(|loader| (package.id.clone(), loader))
         })
         .collect();
     let installed_versions = |id: &str| installed.get(id).map(Vec::as_slice).unwrap_or(&[]);
     let is_duplicated = |id: &str| installed.get(id).is_some_and(|v| v.len() > 1);
-    // Providers are version-aware: a bundled/aliased `provides` only satisfies a
-    // requirement when its declared version is inside the requested range.
-    let mut provided: HashMap<String, Vec<ProviderEntry>> = HashMap::new();
-    for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
-        if let Some(p) = f.attr("provides") {
-            let version = f
-                .attr("version")
-                .map(str::to_string)
-                .or_else(|| installed.get(&f.subject).and_then(|v| v.first()).cloned());
-            provided
-                .entry(p.to_string())
-                .or_default()
-                .push(ProviderEntry {
-                    version,
-                    version_ambiguous: ambiguous_versions.contains(&f.subject),
-                    fact: f.id,
-                    scope: f.attr("scope").unwrap_or("global").to_string(),
-                });
-        }
-    }
-
     // Physical archives whose loader identity could not be confirmed are not
     // installed providers, but they are important counter-evidence to a claim of
     // definite absence. Keep them as a separate plausible state.
     let mut plausible_artifacts: Vec<(String, FactId)> = store
         .by_kind(kind::CHECKSUM)
         .filter(|fact| fact.attr("input_kind") != Some("runtime-log"))
-        .map(|fact| (fact.subject.clone(), fact.id))
+        .map(|fact| (fact.subject.to_string(), fact.id))
         .collect();
     plausible_artifacts.extend(
         store
@@ -241,14 +224,15 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             .filter_map(|fact| fact.attr("file").map(|file| (file.to_string(), fact.id))),
     );
 
-    let env = store.by_kind(kind::ENVIRONMENT).next();
-    let mc_version = env.and_then(|f| f.attr("mc_version").map(str::to_string));
-    let env_loader = env.and_then(|f| f.attr("loader").map(str::to_string));
-    let env_loader_version = env.and_then(|f| f.attr("loader_version").map(str::to_string));
-    let java_version = store
-        .by_kind(kind::JAVA_RUNTIME)
-        .next()
-        .and_then(|f| f.attr("version").map(str::to_string));
+    let mc_version = model.environment.minecraft_version.clone();
+    let env_loader = model.environment.loader.clone();
+    let env_loader_version = model.environment.loader_version.clone();
+    let java_version = model.environment.java_version.clone();
+    let applicability_by_fact = model
+        .constraints
+        .iter()
+        .map(|constraint| (constraint.fact_id, constraint.applicability))
+        .collect::<HashMap<_, _>>();
 
     let mut out = Vec::new();
     for dep in store.by_kind(kind::DEPENDENCY) {
@@ -257,6 +241,18 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         let range = dep.attr("range").unwrap_or("*");
         let mandatory = dep.attr_bool("mandatory").unwrap_or(true);
         let relation = dep.attr("relation").unwrap_or("depends");
+        let relation_kind = DependencyRelation::parse(relation);
+
+        // Feature/condition activation is target configuration, not an always-on
+        // package constraint. Until an authoritative enabled-feature model says
+        // otherwise, retain it as context and never turn it into a hard result.
+        if dep.attr("feature").is_some()
+            || dep.attr("condition").is_some()
+            || dep.attr("side").is_some()
+                && applicability_by_fact.get(&dep.id) != Some(&ConstraintApplicability::Active)
+        {
+            continue;
+        }
 
         if let Some(certainty) = dep
             .attr("identity_certainty")
@@ -282,6 +278,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                         "dependency-identity-undecidable"
                     })
                     .severity(Severity::Note)
+                    .proof_kind(ProofKind::DeterministicDerivation)
                     .confidence(0.35)
                     .category(Category::Dependency)
                     .title(if cross_loader {
@@ -333,23 +330,17 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             continue;
         }
 
-        if relation == "breaks" {
+        if matches!(relation_kind, DependencyRelation::Breaks) {
             if is_platform_dep(dep_id) {
                 continue;
             }
-            let versions = installed_versions(dep_id);
-            let installed_desc = versions.join(", ");
-            match range_status(
-                versions,
-                range,
-                ambiguous_versions.contains(dep_id),
-                dialect,
-            ) {
+            let installed_desc = model.confirmed_versions(dep_id).join(", ");
+            match model.provider_resolution(dep_id, range, dialect) {
                 // Absent / out of the break range: compatible, stay silent.
-                RangeStatus::Absent | RangeStatus::OutOfRange => {}
+                ProviderResolution::Absent | ProviderResolution::Unsatisfied { .. } => {}
                 // An installed version really falls inside the declared break
                 // range: a genuine, actionable incompatibility.
-                RangeStatus::InRange => out.push(
+                ProviderResolution::Satisfied { .. } => out.push(
                     Finding::builder(rule_id, format!("incompatible-mod:{modid}->{dep_id}"))
                         .family("incompatible-mod")
                         .coverage_requirement(CoverageRequirement::LocalArtifact)
@@ -374,7 +365,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                         .build(),
                 ),
                 // Range/version unparseable — never a hard "remove one" ERROR.
-                RangeStatus::Undecidable => out.push(
+                ProviderResolution::Unknown { evidence } => out.push(
                     Finding::builder(
                         rule_id,
                         format!("declared-incompatible-undecidable:{modid}->{dep_id}"),
@@ -389,6 +380,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                          incompatibility cannot be confirmed."
                     ))
                     .evidence(EvidenceEdge::subject(dep.id))
+                    .evidence(EvidenceEdge::supports(evidence))
                     .affects(modid)
                     .affects(dep_id)
                     .fix(FixCandidate::advice(format!(
@@ -403,25 +395,76 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             continue;
         }
 
-        // NeoForge `type = "discouraged"`: compatible load, but the author warns
-        // when the named mod is present *within the discouraged range*.
-        if relation == "discouraged" {
+        // Fabric `conflicts` is negative but soft: a matching installed provider
+        // produces a warning, while an unresolved provider remains explain-only.
+        if matches!(relation_kind, DependencyRelation::Conflicts) {
             if is_platform_dep(dep_id) {
                 continue;
             }
-            let versions = installed_versions(dep_id);
-            let installed_desc = versions.join(", ");
-            let (severity, confidence, undecidable) = match range_status(
-                versions,
-                range,
-                ambiguous_versions.contains(dep_id),
-                dialect,
-            ) {
+            match model.provider_resolution(dep_id, range, dialect) {
+                ProviderResolution::Satisfied { evidence } => out.push(
+                    Finding::builder(rule_id, format!("conflicting-mod:{modid}->{dep_id}"))
+                        .family("conflicting-mod")
+                        .severity(Severity::Warn)
+                        .confidence(0.9)
+                        .category(Category::Dependency)
+                        .title(format!("Soft conflict with installed mod: {dep_id}"))
+                        .explanation(format!(
+                            "{modid} declares a soft conflict with {dep_id} {range}. Fabric can \
+                             continue loading, but the mod author expects degraded or incorrect behaviour."
+                        ))
+                        .evidence(EvidenceEdge::subject(dep.id))
+                        .evidence(EvidenceEdge::supports(evidence))
+                        .affects(modid)
+                        .affects(dep_id)
+                        .tag("dependency")
+                        .tag("conflicts")
+                        .build(),
+                ),
+                ProviderResolution::Unknown { evidence } => out.push(
+                    Finding::builder(
+                        rule_id,
+                        format!("conflicting-mod-undecidable:{modid}->{dep_id}"),
+                    )
+                    .severity(Severity::Note)
+                    .confidence(0.4)
+                    .category(Category::Dependency)
+                    .title(format!("Cannot verify declared conflict with {dep_id}"))
+                    .explanation(format!(
+                        "{modid} declares a soft conflict with {dep_id} {range}, but provider \
+                         identity or version evidence is incomplete."
+                    ))
+                    .evidence(EvidenceEdge::subject(dep.id))
+                    .evidence(EvidenceEdge::supports(evidence))
+                    .affects(modid)
+                    .affects(dep_id)
+                    .tag("dependency")
+                    .tag("conflicts")
+                    .tag("undecidable")
+                    .build(),
+                ),
+                ProviderResolution::Unsatisfied { .. } | ProviderResolution::Absent => {}
+            }
+            continue;
+        }
+
+        // NeoForge `type = "discouraged"`: compatible load, but the author warns
+        // when the named mod is present *within the discouraged range*.
+        if matches!(relation_kind, DependencyRelation::Discouraged) {
+            if is_platform_dep(dep_id) {
+                continue;
+            }
+            let installed_desc = model.confirmed_versions(dep_id).join(", ");
+            let (severity, confidence, undecidable, evidence) = match model
+                .provider_resolution(dep_id, range, dialect)
+            {
                 // Not installed or outside the discouraged range: stay silent.
-                RangeStatus::Absent | RangeStatus::OutOfRange => continue,
-                RangeStatus::InRange => (Severity::Warn, 0.9, false),
+                ProviderResolution::Absent | ProviderResolution::Unsatisfied { .. } => continue,
+                ProviderResolution::Satisfied { evidence } => {
+                    (Severity::Warn, 0.9, false, evidence)
+                }
                 // Installed but range unparseable: low-confidence note.
-                RangeStatus::Undecidable => (Severity::Note, 0.4, true),
+                ProviderResolution::Unknown { evidence } => (Severity::Note, 0.4, true, evidence),
             };
             out.push(
                 Finding::builder(rule_id, format!("discouraged-dependency:{modid}->{dep_id}"))
@@ -441,6 +484,7 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
                         )
                     })
                     .evidence(EvidenceEdge::subject(dep.id))
+                    .evidence(EvidenceEdge::supports(evidence))
                     .affects(modid)
                     .affects(dep_id)
                     .fix(FixCandidate::advice(format!(
@@ -538,8 +582,53 @@ pub fn pairwise_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
             continue;
         }
 
-        let provider = provider_status(provided.get(dep_id), range, dialect);
+        let provider = match model.provider_resolution(dep_id, range, dialect) {
+            ProviderResolution::Satisfied { .. } => ProviderStatus::Satisfied,
+            ProviderResolution::Unknown { evidence } => {
+                ProviderStatus::Unknown(evidence, "provider-universe".to_string())
+            }
+            ProviderResolution::Unsatisfied { evidence } => {
+                ProviderStatus::Unsatisfied(evidence, "provider-universe".to_string())
+            }
+            ProviderResolution::Absent => ProviderStatus::Absent,
+        };
         let versions = installed_versions(dep_id);
+        if matches!(
+            range_status(
+                versions,
+                range,
+                ambiguous_versions.contains(dep_id),
+                dialect,
+            ),
+            RangeStatus::OutOfRange
+        ) && let ProviderStatus::Unknown(provider_fact, scope) = &provider
+        {
+            if mandatory {
+                out.push(
+                    Finding::builder(
+                        rule_id,
+                        format!("provided-version-unknown:{modid}->{dep_id}"),
+                    )
+                    .severity(Severity::Warn)
+                    .confidence(0.5)
+                    .category(Category::Dependency)
+                    .title(format!("Cannot confirm a compatible provider for {dep_id}"))
+                    .explanation(format!(
+                        "{modid} requires {dep_id} {range}. Known installed versions are outside \
+                         that range, but an unresolved {scope} provider may satisfy it, so a hard \
+                         version incompatibility cannot be asserted."
+                    ))
+                    .evidence(EvidenceEdge::subject(dep.id))
+                    .evidence(EvidenceEdge::supports(*provider_fact))
+                    .affects(modid)
+                    .affects(dep_id)
+                    .tag("dependency")
+                    .tag("provider-unresolved")
+                    .build(),
+                );
+            }
+            continue;
+        }
         match range_status(
             versions,
             range,
@@ -810,6 +899,7 @@ mod provider_truth_table_tests {
             version_ambiguous: false,
             fact: FactId(fact),
             scope: "global".to_string(),
+            confirmed: true,
         }
     }
 
@@ -836,6 +926,20 @@ mod provider_truth_table_tests {
                 VersionDialect::FabricExtendedSemver,
             ),
             ProviderStatus::Unsatisfied(..)
+        ));
+    }
+
+    #[test]
+    fn plausible_provider_cannot_satisfy_but_prevents_absence() {
+        let mut plausible = provider(Some("2.0.0"), 1);
+        plausible.confirmed = false;
+        assert!(matches!(
+            provider_status(
+                Some(&vec![plausible]),
+                ">=1.0.0",
+                VersionDialect::GenericSemver
+            ),
+            ProviderStatus::Unknown(..)
         ));
     }
 }

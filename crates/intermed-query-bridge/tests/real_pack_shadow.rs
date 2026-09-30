@@ -13,13 +13,67 @@
 use intermed_facts::{Fact, FactStore};
 use intermed_query_bridge::{ShadowResult, shadow_compare};
 use intermed_rules::default_core_pack;
+use std::collections::BTreeSet;
+
+const EXPECTED_CORE_RULE_IDS: &[&str] = &[
+    "corrupt-jar",
+    "duplicate-id",
+    "forge-coremod-present",
+    "invalid-active-metadata",
+    "known-incompatible-mods",
+    "loader-mismatch",
+    "log-ClassNotFound",
+    "log-DatapackValidationError",
+    "log-JvmCrash",
+    "log-MissingDependency",
+    "log-MixinApplyError",
+    "log-ModLoadingFailure",
+    "log-NoClassDefFound",
+    "log-OutOfMemory",
+    "log-PortInUse",
+    "log-RegistryFreezeError",
+    "log-StackOverflow",
+    "mixin-overlap",
+    "mixin-overlap-hot",
+    "mixin-overwrite",
+    "mixin-overwrite-hot",
+    "recipe-disabled-platform",
+    "resource-conflict-binary-override-cosmetic",
+    "resource-conflict-binary-override-font",
+    "resource-conflict-binary-override-functional",
+    "resource-conflict-classification-unavailable",
+    "resource-conflict-json-merge",
+    "resource-conflict-json-override",
+    "resource-conflict-order-dependent-atlas",
+    "resource-conflict-order-dependent-shader",
+    "resource-conflict-order-dependent-sound-def",
+    "resource-conflict-root-metadata",
+    "resource-conflict-safe-crdt-merge",
+    "resource-conflict-safe-json-object-merge",
+    "resource-conflict-sound-event-merge",
+    "resource-conflict-tag-invalid",
+    "resource-conflict-tag-mixed-required",
+    "resource-conflict-tag-remove",
+    "resource-conflict-tag-replace",
+    "resource-conflict-unsafe-replace",
+    "sbom-security-correlation",
+    "scan-incomplete",
+    "side-mismatch-client-on-server",
+    "side-mismatch-server-on-client",
+    "tag-replace-platform",
+    "unknown-source",
+    "unsigned-jar",
+];
+
+const EXPECTED_UNSUPPORTED_RULE_IDS: &[&str] =
+    &["known-incompatible-mods", "sbom-security-correlation"];
 
 fn rebuild_store(facts: &[Fact]) -> FactStore {
     let mut s = FactStore::new();
     for f in facts {
         let mut b = s
             .fact(&f.extractor, &f.kind)
-            .subject(f.subject.clone())
+            .subject(f.subject.to_string())
             .confidence(f.confidence)
             .source(f.source.clone());
         for (k, v) in &f.attributes {
@@ -32,13 +86,20 @@ fn rebuild_store(facts: &[Fact]) -> FactStore {
 
 /// Run the whole default pack through the shadow comparator; assert no divergence,
 /// return `(supported, skipped)` counts.
-fn shadow_pack(store: &FactStore) -> (usize, usize) {
+fn shadow_pack(store: &FactStore) -> (BTreeSet<String>, BTreeSet<String>) {
     let pack = default_core_pack();
-    let (mut supported, mut skipped) = (0, 0);
+    let (mut supported, mut skipped) = (BTreeSet::new(), BTreeSet::new());
     for spec in &pack.rules {
         match shadow_compare(spec, store) {
-            ShadowResult::Match { .. } => supported += 1,
-            ShadowResult::Skipped(_) => skipped += 1,
+            ShadowResult::Match { .. } => {
+                supported.insert(spec.id.clone());
+            }
+            ShadowResult::Unsupported(_) => {
+                skipped.insert(spec.id.clone());
+            }
+            ShadowResult::ExecutionFailed(error) => {
+                panic!("rule `{}` backend execution failed: {error}", spec.id)
+            }
             ShadowResult::Diverged {
                 only_interpreter,
                 only_ir,
@@ -48,6 +109,20 @@ fn shadow_pack(store: &FactStore) -> (usize, usize) {
             ),
         }
     }
+    let all = supported.union(&skipped).cloned().collect::<BTreeSet<_>>();
+    let expected_all = EXPECTED_CORE_RULE_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect::<BTreeSet<_>>();
+    let expected_skipped = EXPECTED_UNSUPPORTED_RULE_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(all, expected_all, "default rule-pack surface changed");
+    assert_eq!(
+        skipped, expected_skipped,
+        "columnar shadow coverage changed; support loss/addition must be reviewed"
+    );
     (supported, skipped)
 }
 
@@ -69,9 +144,13 @@ fn default_pack_shadow_matches_on_synthetic_store() {
         .attr("method_conflict", true)
         .emit();
     let (supported, skipped) = shadow_pack(&s);
-    eprintln!("default pack on synthetic store: {supported} supported, {skipped} skipped");
-    // The bridge must lower *some* of the real pack's rules (else it is vacuous).
-    assert!(supported > 0, "bridge lowered no default-pack rules");
+    eprintln!(
+        "default pack on synthetic store: {} supported, {} skipped",
+        supported.len(),
+        skipped.len()
+    );
+    assert_eq!(supported.len(), 45);
+    assert_eq!(skipped.len(), 2);
 }
 
 /// Demonstrate `EXPLAIN` / `EXPLAIN ANALYZE` (Phase 3.3) on real facts: lower the
@@ -128,8 +207,11 @@ fn default_pack_shadow_matches_on_real_dump() {
     let store = rebuild_store(&facts);
     let (supported, skipped) = shadow_pack(&store);
     eprintln!(
-        "default pack on {} real facts: {supported} rules matched the interpreter, {skipped} skipped",
-        facts.len()
+        "default pack on {} real facts: {} rules matched the interpreter, {} skipped",
+        facts.len(),
+        supported.len(),
+        skipped.len()
     );
-    assert!(supported > 0);
+    assert_eq!(supported.len(), 45);
+    assert_eq!(skipped.len(), 2);
 }

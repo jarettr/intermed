@@ -20,7 +20,7 @@ thiserror = { workspace = true }
 
 # ── Optional engines/backends (feature-gated; NOT in the default build) ──
 # Real WASM sandbox for CallExternal.
-wasmtime = { version = "47", optional = true }
+wasmtime = { version = "36.0.16", optional = true }
 wat = { version = "1", optional = true }
 # DataFusion query backend (uses the same arrow 58 — no version duplication).
 datafusion = { version = "54", optional = true }
@@ -40,3 +40,6 @@ datafusion-backend = ["dep:datafusion", "dep:tokio"]
 polars-backend = ["dep:polars"]
 # An `ascent` (Rust Datalog) backend for transitive closure / reachability.
 ascent-backend = ["dep:ascent"]
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -221,6 +221,8 @@ mod tests {
         SbomScan {
             target: "./mods".into(),
             records: vec![JarSbomRecord {
+                artifact_id: format!("sha256:{}", "abc".repeat(8)),
+                source_locator: "./mods/sodium.jar".into(),
                 archive: "sodium.jar".into(),
                 mod_id: Some("sodium".into()),
                 version: Some("0.5.3".into()),
@@ -232,6 +234,7 @@ mod tests {
                 signature_detail: None,
                 platform: None,
                 in_corpus_lock: false,
+                corpus_match: crate::CorpusMatchQuality::None,
                 trust_score: 80,
                 trust_breakdown: crate::TrustScoreBreakdown {
                     base: 20,
@@ -241,8 +244,17 @@ mod tests {
                     ..Default::default()
                 },
                 identity_status: crate::IdentityStatus::Parsed,
+                identity_origin: crate::IdentityOrigin::LocalDescriptorFallback,
                 identity_detail: None,
                 source_class: SourceClass::Identified,
+                provenance: crate::ProvenanceAssessment {
+                    identity: crate::IdentityCompleteness::DescriptorComplete,
+                    distribution: crate::DistributionProvenance::Unknown,
+                    binary_integrity: crate::BinaryIntegrity::ContentHashed,
+                    exact_materialization: crate::ExactMaterialization::Unpinned,
+                    cryptographic_authenticity: crate::CryptographicAuthenticity::Unsigned,
+                },
+                canonical_identities: Vec::new(),
             }],
             failures: Vec::new(),
         }

@@ -107,7 +107,7 @@ pub struct LabEvalArgs {
     #[arg(long, requires = "run")]
     pub report: Option<PathBuf>,
 
-    /// A single lab run JSON (`intermed-lab-run-v1`); use with `--report`.
+    /// A single lab run JSON (`intermed-lab-run-v2`; v1 is migration-readable); use with `--report`.
     #[arg(long, requires = "report")]
     pub run: Option<PathBuf>,
 
@@ -115,7 +115,7 @@ pub struct LabEvalArgs {
     #[arg(long = "min-severity", value_enum, default_value_t = SeverityFilter::Warn)]
     pub min_severity: SeverityFilter,
 
-    /// Output accuracy report path (`intermed-rule-accuracy-v3`).
+    /// Output accuracy report path (`intermed-rule-accuracy-v4`).
     #[arg(long, default_value = "accuracy.json")]
     pub out: PathBuf,
 }

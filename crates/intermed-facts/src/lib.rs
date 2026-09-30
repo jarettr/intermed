@@ -18,7 +18,8 @@
 //!
 //! Keep facts as plain data: no behaviour, no references to findings.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +37,10 @@ pub mod kind;
 mod store;
 mod value;
 
-pub use store::{FactBuilder, FactRetentionPolicy, FactStore};
-pub use value::{AttrValue, Fact, FactId, SourceRef};
+pub use store::{
+    FactBuilder, FactRead, FactRetentionPolicy, FactStore, FactWrite, FilteredFactView,
+};
+pub use value::{AttrValue, Attributes, Fact, FactId, InternedString, SourceRef};
 
 #[cfg(test)]
 mod tests {
@@ -60,6 +63,76 @@ mod tests {
         assert_eq!(mods.len(), 2);
         assert_eq!(mods[0].attr("version"), Some("0.5.3"));
         assert_eq!(store.stats().get(kind::MOD), Some(&2));
+    }
+
+    #[test]
+    fn repeated_schema_strings_and_subjects_share_the_store_pool() {
+        let mut store = FactStore::new();
+        for _ in 0..2 {
+            store
+                .fact("test", kind::MOD)
+                .subject("same-mod")
+                .attr("version", "1.0")
+                .source(SourceRef::file("same.jar"))
+                .emit();
+        }
+
+        // empty subject, extractor, kind, explicit subject, attribute key,
+        // and source locator; the second fact adds no interned allocation.
+        assert_eq!(store.interned_len(), 6);
+    }
+
+    #[test]
+    fn filtered_view_is_zero_copy_and_hides_undeclared_predicates() {
+        let mut store = FactStore::new();
+        store.fact("meta", kind::MOD).subject("alpha").emit();
+        store.fact("meta", kind::PLUGIN).subject("beta").emit();
+        let allowed = BTreeSet::from([kind::MOD.to_string()]);
+        let view = FilteredFactView::new(&store, &allowed);
+        let visible = FactRead::by_kind(&view, kind::MOD).next().unwrap();
+        assert!(std::ptr::eq(visible, &store.all()[0]));
+        assert_eq!(FactRead::by_kind(&view, kind::PLUGIN).count(), 0);
+        assert!(FactRead::get(&view, store.all()[1].id).is_none());
+    }
+
+    #[test]
+    fn staged_append_preserves_global_ids_and_indexes() {
+        let mut store = FactStore::new();
+        let first = store.fact("a", kind::MOD).subject("alpha").emit();
+        let mut staged = store.staging_after();
+        let second = staged.fact("b", kind::PLUGIN).subject("beta").emit();
+        assert!(second > first);
+        store.append_staged(staged);
+        assert_eq!(store.get(first).unwrap().subject.as_str(), "alpha");
+        assert_eq!(store.get(second).unwrap().subject.as_str(), "beta");
+        assert_eq!(store.by_kind(kind::PLUGIN).count(), 1);
+    }
+
+    #[test]
+    fn compact_fact_storage_preserves_wire_json_and_sorted_attributes() {
+        let mut store = FactStore::new();
+        store
+            .fact("test", kind::MOD)
+            .subject("example")
+            .attr("version", "1.0")
+            .attr("loader", "fabric")
+            .source(SourceRef::inside("example.jar", "fabric.mod.json"))
+            .emit();
+
+        let value = serde_json::to_value(&store.all()[0]).unwrap();
+        assert_eq!(value["kind"], kind::MOD);
+        assert_eq!(value["subject"], "example");
+        assert_eq!(value["extractor"], "test");
+        assert_eq!(value["source"]["locator"], "example.jar");
+        assert_eq!(value["source"]["inner"], "fabric.mod.json");
+        assert_eq!(value["attributes"]["loader"], "fabric");
+        assert_eq!(value["attributes"]["version"], "1.0");
+
+        let encoded = serde_json::to_string(&store.all()[0].attributes).unwrap();
+        assert_eq!(encoded, r#"{"loader":"fabric","version":"1.0"}"#);
+
+        let decoded: Fact = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, store.all()[0]);
     }
 
     #[test]

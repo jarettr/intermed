@@ -41,7 +41,6 @@ mod runtime_log;
 mod scan;
 mod selector;
 mod semantics;
-mod severity;
 mod signature;
 mod site;
 mod subsystem;
@@ -52,10 +51,13 @@ mod trace;
 pub mod fixtures;
 
 pub use analyzer::MixinInteractionEngine;
+pub use apply_failure::{ApplyFailure, ApplyFailureKind, TargetClassIndex};
 pub use class_parser::{ClassParseResult, parse_mixin_class, parse_mixin_class_with_hierarchy};
 pub use classpath::{ClasspathCoverage, CoverageLevel};
-pub use clusters::{ClusterKind, RiskCluster, build_clusters};
-pub use composition::{CompositionClass, HandlerRole, SiteComposition, analyze_compositions};
+pub use clusters::{ClusterKind, MixinVerdictStrength, RiskCluster, build_clusters};
+pub use composition::{
+    CoApplication, CompositionClass, HandlerRole, SiteComposition, analyze_compositions,
+};
 pub use graph::MixinInteractionGraph;
 pub use hot_path::{HotPathRules, default_rules};
 pub use locals::LocalCaptureStatus;
@@ -71,25 +73,32 @@ pub use model::{
     PrecisionLevel, Recommendation, ResolvedInjectionPoint, STATUS, Side,
 };
 pub use naming::{NameSource, ResolvedName};
-pub use perf_match::{MatchQuality, allows_high_severity, grade_match, is_destructive_operation};
+pub use perf_match::{
+    MatchQuality, allows_high_severity, allows_high_severity_for_site, grade_match,
+    grade_match_with_mappings, is_destructive_operation,
+};
 pub use profile::{PrecisionProfile, effective_profile, escalation_reasons};
 pub use recommendation::{recommend_for_scan, redirect_counts_by_method};
-pub use refmap::{MappingContext, Refmap, TinyMappings, dotted_name};
+pub use refmap::{
+    MappingCompatibility, MappingContext, Namespace, Refmap, RefmapStatus, TinyMappings,
+    dotted_name,
+};
 pub use resource_bridge::{
-    ResourceSubsystem, RuntimeResourceMutation, classify_resource_loader, detect_resource_mutations,
+    ResourceEffectEvidence, ResourceSubsystem, RuntimeResourceMutation, classify_resource_loader,
+    detect_resource_mutations,
 };
 pub use runtime_log::{
-    RuntimeFailureReason, RuntimeMixinFailure, SiteConfirmation, confirm_sites,
-    parse_runtime_failures,
+    RuntimeCandidateMatch, RuntimeFailureReason, RuntimeMatchStrength, RuntimeMixinFailure,
+    RuntimeSiteIdentity, SiteConfirmation, confirm_sites, match_failure_to_candidates,
+    match_failure_to_site, parse_runtime_failures,
 };
 pub use scan::{
     MixinScanError, cache_version, extractor_id, scan_mods_dir, scan_mods_dir_with_cache,
     scan_target,
 };
 pub use selector::SelectorVerification;
-pub use severity::{ConfirmationLevel, SeverityInputs, recommended_severity};
-pub use signature::SignatureCheck;
-pub use site::{ApplicationSite, build_application_sites};
+pub use signature::{SignatureCheck, check_handler_signature_with_target};
+pub use site::{ApplicationSite, SitePrecision, build_application_sites};
 pub use subsystem::{
     MixinCapability, MixinSecuritySurface, Subsystem, classify_subsystem, derive_subsystems,
 };
@@ -170,14 +179,61 @@ impl Collector for MixinCollector {
             intermed_doctor_core::CompletenessModel::PerArtifact,
         )
         .produces([
+            intermed_doctor_core::facts::kind::MIXIN_ACTIVATION,
+            intermed_doctor_core::facts::kind::MIXIN_CONFIG,
+            intermed_doctor_core::facts::kind::MIXIN_ADDED_MEMBER,
             intermed_doctor_core::facts::kind::MIXIN_APPLICATION_SITE,
+            intermed_doctor_core::facts::kind::MIXIN_BLOAT,
+            intermed_doctor_core::facts::kind::MIXIN_CALLS,
+            intermed_doctor_core::facts::kind::MIXIN_CLASS,
             intermed_doctor_core::facts::kind::MIXIN_CLASSPATH_COVERAGE,
+            intermed_doctor_core::facts::kind::MIXIN_CLASS_COMPLEXITY,
+            intermed_doctor_core::facts::kind::MIXIN_COMPOSITION,
+            intermed_doctor_core::facts::kind::MIXIN_CONFIG_PLUGIN,
+            intermed_doctor_core::facts::kind::MIXIN_CONFLICT_EDGE,
+            intermed_doctor_core::facts::kind::MIXIN_DATAFLOW_METRICS,
+            intermed_doctor_core::facts::kind::MIXIN_EFFECT,
             intermed_doctor_core::facts::kind::MIXIN_HANDLER_BODY,
+            intermed_doctor_core::facts::kind::MIXIN_HANDLER_EFFECT,
+            intermed_doctor_core::facts::kind::MIXIN_HIERARCHY,
+            intermed_doctor_core::facts::kind::MIXIN_HOTSPOT,
+            intermed_doctor_core::facts::kind::MIXIN_INJECTION_POINT,
+            intermed_doctor_core::facts::kind::MIXIN_INTERACTION,
+            intermed_doctor_core::facts::kind::MIXIN_MOD_COMPLEXITY,
+            intermed_doctor_core::facts::kind::MIXIN_OPERATION,
+            intermed_doctor_core::facts::kind::MIXIN_OVERLAP,
+            intermed_doctor_core::facts::kind::MIXIN_PRIORITY_CONFLICT,
+            intermed_doctor_core::facts::kind::MIXIN_RECOMMENDATION,
+            intermed_doctor_core::facts::kind::MIXIN_REFMAP_LOADED,
+            intermed_doctor_core::facts::kind::MIXIN_REFMAP_STATUS,
+            intermed_doctor_core::facts::kind::MIXIN_RISK_CLUSTER,
+            intermed_doctor_core::facts::kind::MIXIN_RISK_SCORE,
+            intermed_doctor_core::facts::kind::MIXIN_RUNTIME_RESOURCE_MUTATION,
+            intermed_doctor_core::facts::kind::MIXIN_RESOURCE_HOOK,
+            intermed_doctor_core::facts::kind::MIXIN_SECURITY_SURFACE,
+            intermed_doctor_core::facts::kind::MIXIN_SHADOW,
+            intermed_doctor_core::facts::kind::MIXIN_TARGET,
+            intermed_doctor_core::facts::kind::HIGH_RISK_OVERWRITE,
+            intermed_doctor_core::facts::kind::MOD_CAPABILITY,
+            intermed_doctor_core::facts::kind::SCAN_TRUNCATED,
+            "mixin_apply_target_class_missing",
+            "mixin_apply_target_method_missing",
+            "mixin_apply_descriptor_mismatch",
+            "mixin_apply_require_unsatisfied",
+            "mixin_apply_refmap_missing",
+            "mixin_apply_refmap_unavailable",
+            "mixin_apply_remap_false_suspicious",
+            "mixin_apply_ordinal_out_of_range",
         ])
         .regions([
             intermed_doctor_core::TargetRegion::ModClasspath,
             intermed_doctor_core::TargetRegion::MinecraftClasspath,
             intermed_doctor_core::TargetRegion::Mappings,
+        ])
+        .consumes([
+            intermed_doctor_core::facts::kind::ENVIRONMENT,
+            intermed_doctor_core::facts::kind::COMPATIBILITY_BRIDGE,
+            intermed_doctor_core::facts::kind::ARTIFACT_ROLE,
         ])
     }
 
@@ -187,20 +243,53 @@ impl Collector for MixinCollector {
 
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let Some(dir) = mods_dir(ctx.target) else {
-            return CollectorOutcome::skipped("no mods directory for mixin scan");
+            return CollectorOutcome::not_applicable("no mods directory for mixin scan");
         };
 
-        let target_minecraft_version = ctx
-            .store
-            .by_kind(intermed_doctor_core::facts::kind::ENVIRONMENT)
-            .find_map(|fact| fact.attr("mc_version"));
-        let target_loader = ctx
-            .store
-            .by_kind(intermed_doctor_core::facts::kind::ENVIRONMENT)
-            .find_map(|fact| fact.attr("loader"))
+        // Use canonical environment resolution from A layer instead of find_map,
+        // which would take an arbitrary fact and ignore authority ranking and
+        // equal-priority conflicts.
+        let mc_resolution = intermed_doctor_core::environment::resolve_environment_field(
+            ctx.inputs,
+            "mc_version",
+            &["mc_version_source", "evidence_source"],
+        );
+        let loader_resolution = intermed_doctor_core::environment::resolve_environment_field(
+            ctx.inputs,
+            "loader",
+            &["loader_source", "evidence_source"],
+        );
+        let side_resolution = intermed_doctor_core::environment::resolve_environment_field(
+            ctx.inputs,
+            "side",
+            &[
+                "side_source",
+                "instance_type_source",
+                "evidence_source",
+                "loader_source",
+            ],
+        );
+
+        let target_minecraft_version = mc_resolution.value;
+        let target_loader = loader_resolution
+            .value
             .and_then(intermed_doctor_core::Loader::parse);
+        let target_side = match side_resolution.value {
+            Some("client") => crate::model::Side::Client,
+            Some("server" | "dedicated-server") => crate::model::Side::Server,
+            Some("both" | "integrated") => crate::model::Side::Both,
+            _ => crate::model::Side::Unknown,
+        };
+
+        // Environment conflict degrades mixin analysis certainty: activation,
+        // runtime namespace, foreign descriptor selection, mapping compatibility,
+        // and apply-failure proofs all depend on knowing the authoritative loader.
+        let environment_conflicted = mc_resolution.is_conflicted()
+            || loader_resolution.is_conflicted()
+            || side_resolution.is_conflicted();
+
         let allow_foreign_configs = ctx
-            .store
+            .inputs
             .by_kind(intermed_doctor_core::facts::kind::COMPATIBILITY_BRIDGE)
             .any(|bridge| {
                 bridge.attr("scope") == Some("mod-runtime")
@@ -216,7 +305,75 @@ impl Collector for MixinCollector {
                         })
                     })
             });
-        match scan::scan_mods_dir_filtered_with_target_environment(
+        let mut exact_role_candidates: std::collections::BTreeMap<String, Vec<(String, String)>> =
+            std::collections::BTreeMap::new();
+        let mut basename_role_candidates: std::collections::BTreeMap<
+            String,
+            Vec<(String, String)>,
+        > = std::collections::BTreeMap::new();
+        for role in ctx
+            .inputs
+            .by_kind(intermed_doctor_core::facts::kind::ARTIFACT_ROLE)
+        {
+            if !matches!(
+                role.attr("activation"),
+                Some("active" | "self-loader-bootstrap")
+            ) {
+                continue;
+            }
+            let Some(declared_id) = role.attr("declared_id") else {
+                continue;
+            };
+            let file_name = std::path::Path::new(role.subject.as_str())
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(role.subject.as_str())
+                .to_string();
+            let candidate = (
+                declared_id.to_string(),
+                role.attr("identity_certainty")
+                    .unwrap_or("undecidable")
+                    .to_string(),
+            );
+            exact_role_candidates
+                .entry(role.subject.to_string())
+                .or_default()
+                .push(candidate.clone());
+            basename_role_candidates
+                .entry(file_name)
+                .or_default()
+                .push(candidate);
+        }
+        let make_binding = |mut candidates: Vec<(String, String)>| {
+            candidates.sort();
+            candidates.dedup();
+            if candidates.len() == 1 {
+                let (mod_id, certainty) = candidates.pop().expect("one candidate");
+                scan::ArtifactBinding {
+                    mod_id: Some(mod_id),
+                    identity_certainty: certainty,
+                }
+            } else {
+                scan::ArtifactBinding {
+                    mod_id: None,
+                    identity_certainty: "ambiguous-active-roles".to_string(),
+                }
+            }
+        };
+        let mut identity_bindings = exact_role_candidates
+            .into_iter()
+            .map(|(path, candidates)| (format!("path:{path}"), make_binding(candidates)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        // A basename is only a fallback for launchers whose metadata reports a
+        // relative locator. If two physical artifacts share it, keep the binding
+        // explicitly ambiguous rather than borrowing either artifact's identity.
+        identity_bindings.extend(
+            basename_role_candidates
+                .into_iter()
+                .map(|(name, candidates)| (format!("name:{name}"), make_binding(candidates))),
+        );
+
+        match scan::scan_mods_dir_filtered_with_identity(
             &dir,
             ctx.jar_cache,
             &ctx.settings.scan,
@@ -225,7 +382,10 @@ impl Collector for MixinCollector {
             ctx.settings.minecraft_mappings.as_deref(),
             target_minecraft_version,
             target_loader,
+            target_side,
             allow_foreign_configs,
+            environment_conflicted,
+            &identity_bindings,
         ) {
             Ok(scan) => {
                 let emitted = emit_scan(ctx, &scan);
@@ -285,11 +445,14 @@ mod tests {
         );
         let class = MixinConfigRecord {
             archive: "a.jar".into(),
+            artifact_id: "sha256:test".into(),
             path: "a.mixins.json".into(),
             mod_id: "alpha".into(),
+            identity_certainty: "confirmed".into(),
             package: "example.mixin".into(),
             priority: 1000,
             refmap: None,
+            refmap_status: crate::refmap::RefmapStatus::NotDeclared,
             mixins: vec!["RenderMixin".into()],
             plugin: None,
             mixin_sides: Default::default(),
@@ -338,11 +501,16 @@ mod tests {
         );
         let class = MixinConfigRecord {
             archive: "a.jar".into(),
+            artifact_id: "sha256:test".into(),
             path: "a.mixins.json".into(),
             mod_id: "alpha".into(),
+            identity_certainty: "confirmed".into(),
             package: "example.mixin".into(),
             priority: 1000,
             refmap: Some("a.refmap.json".into()),
+            refmap_status: crate::refmap::RefmapStatus::DeclaredAndLoaded {
+                path: "a.refmap.json".into(),
+            },
             mixins: vec!["TickMixin".into()],
             plugin: None,
             mixin_sides: Default::default(),

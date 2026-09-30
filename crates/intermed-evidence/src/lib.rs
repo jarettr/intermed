@@ -20,9 +20,9 @@ pub use graph::{
     EvidenceRelation, EvidenceStrength, ModInstanceNode,
 };
 pub use identity::{
-    ArtifactId, ClassSymbol, DependencyEdgeId, DescriptorKind, EntityRef, MappingGraphId,
-    MappingNamespace, MethodDescriptor, MethodSymbol, MixinSiteId, ModInstanceId, RecommendationId,
-    ResourceKey, RuntimeOccurrenceId, ThrowableId,
+    ArtifactId, ClassSymbol, DependencyEdgeId, DescriptorKind, EntityRef, EnvironmentId,
+    JavaRuntimeId, MappingGraphId, MappingNamespace, MethodDescriptor, MethodSymbol, MixinSiteId,
+    ModInstanceId, RecommendationId, ResourceKey, RuntimeOccurrenceId, ThrowableId,
 };
 pub use incident::{CausalNode, CausalTransition, Contributor, Incident};
 
@@ -78,6 +78,57 @@ pub enum Category {
     Performance,
     Packaging,
     Runtime,
+}
+
+/// Shared policy classification for security capabilities observed by Layer G
+/// and consumed by cross-layer provenance rules.  Keeping this classification
+/// in the evidence model prevents scanners and correlation rules from silently
+/// assigning different risk to the same capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CapabilityRiskClass {
+    Contextual,
+    Elevated,
+    High,
+}
+
+/// Classify a registered security-capability fact predicate.
+#[must_use]
+pub fn capability_risk_class(fact_kind: &str) -> Option<CapabilityRiskClass> {
+    use intermed_facts::kind;
+
+    Some(match fact_kind {
+        kind::USES_PROCESS_SPAWN
+        | kind::USES_DYNAMIC_CLASS_DEFINITION
+        | kind::USES_SCRIPT_ENGINE => CapabilityRiskClass::High,
+        kind::USES_UNSAFE
+        | kind::USES_NATIVE_LIBRARY
+        | kind::USES_DESERIALIZATION
+        | kind::USES_SYSTEM_EXIT => CapabilityRiskClass::Elevated,
+        kind::USES_SOCKET
+        | kind::USES_REFLECTION_SET_ACCESSIBLE
+        | kind::USES_REFLECTIVE_INVOCATION
+        | kind::USES_METHOD_HANDLES => CapabilityRiskClass::Contextual,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod capability_risk_tests {
+    use super::*;
+    use intermed_facts::kind;
+
+    #[test]
+    fn shared_capability_policy_distinguishes_high_from_elevated() {
+        assert_eq!(
+            capability_risk_class(kind::USES_PROCESS_SPAWN),
+            Some(CapabilityRiskClass::High)
+        );
+        assert_eq!(
+            capability_risk_class(kind::USES_UNSAFE),
+            Some(CapabilityRiskClass::Elevated)
+        );
+    }
 }
 
 /// How prominently a finding is surfaced in the default report.
@@ -507,16 +558,25 @@ impl EvidenceEdge {
     }
 }
 
-/// A proposed remediation. Phase 1 emits human-readable candidates; later
-/// phases may attach machine-applicable patches.
+/// A proposed remediation with machine semantics separated from display text.
+/// Commands remain suggestions and are never executed by the diagnostic core.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixCandidate {
+    /// Machine semantics supplied by the producer. Human prose must never be
+    /// parsed to recover this action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<RecommendationAction>,
+    /// Canonical target when the producer can identify it exactly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<EntityRef>,
     pub description: String,
     /// Optional concrete command the user can run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// 0.0..=1.0 confidence that this fix is correct.
     pub confidence: f32,
+    #[serde(default)]
+    pub safety: RecommendationSafety,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -532,9 +592,10 @@ pub enum RecommendationAction {
     Verify,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RecommendationSafety {
+    #[default]
     ReadOnly,
     Reversible,
     ReviewRequired,
@@ -556,13 +617,33 @@ pub struct Recommendation {
 impl FixCandidate {
     pub fn advice(description: impl Into<String>) -> Self {
         Self {
+            action: None,
+            target: None,
             description: description.into(),
             command: None,
             confidence: 0.6,
+            safety: RecommendationSafety::ReadOnly,
         }
+    }
+    pub fn action(mut self, action: RecommendationAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+    pub fn target(mut self, target: EntityRef) -> Self {
+        self.target = Some(target);
+        self
+    }
+    pub fn safety(mut self, safety: RecommendationSafety) -> Self {
+        self.safety = safety;
+        self
+    }
+    pub fn confidence(mut self, confidence: f32) -> Self {
+        self.confidence = confidence.clamp(0.0, 1.0);
+        self
     }
     pub fn with_command(mut self, command: impl Into<String>) -> Self {
         self.command = Some(command.into());
+        self.safety = RecommendationSafety::ReviewRequired;
         self
     }
 }
@@ -604,6 +685,10 @@ pub struct Finding {
     /// resolve fact ids against a dump. Empty until then.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_summary: Vec<EvidenceSummaryItem>,
+    /// Evidence-quality score within this finding's [`ProofKind`]. This is not
+    /// a globally calibrated probability: `0.9` observation quality and `0.9`
+    /// heuristic correlation are distinguished by `proof_kind` and the derived
+    /// certainty tier.
     pub confidence: f32,
     /// Mods / plugins / paths this finding concerns.
     pub affected_components: Vec<String>,

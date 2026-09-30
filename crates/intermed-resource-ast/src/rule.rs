@@ -33,8 +33,12 @@ impl Rule for ResourceSemanticRule {
         intermed_doctor_core::RuleRequirements::default()
             .facts([
                 kind::RESOURCE_SEMANTIC_DIFF,
-                kind::RESOURCE_REFERENCE,
-                kind::RESOURCE_AST_PARSED,
+                kind::RESOURCE_DANGLING_REFERENCE,
+                kind::RESOURCE_SEMANTIC_ISSUE,
+            ])
+            .optional_facts([
+                kind::RESOURCE_DEFINITION,
+                kind::RESOURCE_PLATFORM_OBSERVATION,
             ])
             .layers([intermed_doctor_core::Layer::DataSemantics])
             .regions([
@@ -54,7 +58,7 @@ impl Rule for ResourceSemanticRule {
         let mut findings = Vec::new();
         // Per-path semantic overrides (recipe / loot / atlas / model / blockstate).
         for f in &diffs {
-            if let Some(finding) = per_path_override_finding(f) {
+            if let Some(finding) = per_path_override_finding(ctx, f) {
                 findings.push(finding);
             }
         }
@@ -65,6 +69,9 @@ impl Rule for ResourceSemanticRule {
         // Parse/validation issues → one grouped, explain-only finding (auditable,
         // never per-file noise).
         if let Some(f) = parse_issue_finding(ctx) {
+            findings.push(f);
+        }
+        if let Some(f) = platform_observation_finding(ctx) {
             findings.push(f);
         }
         // Dangling datapack references (loot/advancement/tag only) → internal (Warn)
@@ -79,7 +86,7 @@ impl Rule for ResourceSemanticRule {
 /// **Models / textures / blockstates are excluded** — they are routinely
 /// runtime-generated or shipped by resource packs, so absence is not proof of a
 /// bug (the documented false-positive trap).
-const SAFE_DANGLING_RELATIONS: &[&str] = &["loot_entry", "advancement_criterion", "uses_tag"];
+const SAFE_DANGLING_RELATIONS: &[&str] = &["loot_entry", "parent_advancement", "uses_tag"];
 
 /// Findings for references to a datapack resource not present in the pack, split by
 /// who owns the missing target. An **internal** dangling — a mod referencing its own
@@ -115,6 +122,7 @@ fn dangling_reference_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 }
 
 /// Sorted, deduplicated, truncated sample of the missing target ids with a `(+N)` tail.
+/// Returns (sample_string, unique_target_count).
 fn dangling_sample(facts: &[&Fact]) -> (String, usize) {
     let mut targets: Vec<&str> = facts.iter().filter_map(|f| f.attr("to")).collect();
     targets.sort_unstable();
@@ -139,10 +147,15 @@ fn internal_dangling_finding(facts: &[&Fact]) -> Option<Finding> {
     let (sample, count) = dangling_sample(facts);
     let mut b = Finding::builder("resource-semantics", "dangling-reference-internal")
         .conclusion_kind(ConclusionKind::StaticResourceState)
+        .coverage_requirement(CoverageRequirement::RelevantResources)
+        .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
+        .proof_kind(ProofKind::DeterministicDerivation)
+        .impact(Impact::CompatibilityRisk)
+        .evidence_origin(EvidenceOrigin::StaticExact)
         .severity(Severity::Warn)
         .category(Category::Resource)
         .title(format!(
-            "{count} reference(s) point to a resource the *same* mod does not ship"
+            "{count} missing target(s) referenced by the *same* mod but not shipped"
         ))
         .explanation(format!(
             "These loot table / advancement / tag references resolve to a resource in the \
@@ -185,10 +198,15 @@ fn cross_dangling_finding(facts: &[&Fact]) -> Option<Finding> {
     };
     let mut b = Finding::builder("resource-semantics", "dangling-reference")
         .conclusion_kind(ConclusionKind::StaticResourceState)
+        .coverage_requirement(CoverageRequirement::RelevantResources)
+        .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
+        .proof_kind(ProofKind::DeterministicDerivation)
+        .impact(Impact::CompatibilityRisk)
+        .evidence_origin(EvidenceOrigin::StaticExact)
         .severity(Severity::Note)
         .category(Category::Resource)
         .title(format!(
-            "{count} datapack reference(s) point to a resource not present in the pack"
+            "{count} missing target(s) referenced across mods but not present in the pack"
         ))
         .explanation(format!(
             "These loot table / advancement / tag references resolve to a resource that no \
@@ -231,6 +249,7 @@ fn parse_issue_finding(ctx: &RuleCtx<'_>) -> Option<Finding> {
     let mut builder = Finding::builder("resource-semantics", "resource-parse-issues")
         .severity(Severity::Info)
         .category(Category::Resource)
+        .proof_kind(ProofKind::Observation)
         .visibility(FindingVisibility::ExplainOnly)
         .title(format!(
             "{} resource(s) had parse/validation issues",
@@ -283,8 +302,8 @@ fn presentation(diff_kind: &str) -> Option<DiffPresentation> {
             "recipe",
         ),
         "recipe-ingredient-override" => p(
-            "Recipe `{path}` produces the same output from different ingredients",
-            "Often an intentional compatibility recipe. Confirm the intended inputs if it matters.",
+            "Recipe `{path}` uses different ingredient structure across mods",
+            "Ingredient ids, multiplicity, or shaped layout differ. This may be intentional compatibility content; confirm the intended inputs.",
             "recipe",
         ),
         "recipe-condition-override" => p(
@@ -304,6 +323,11 @@ fn presentation(diff_kind: &str) -> Option<DiffPresentation> {
              intended owner.",
             "loot-table",
         ),
+        "loot-table-structure-override" => p(
+            "Loot table `{path}` changes drop probabilities or processing by load order",
+            "The item ids agree, but rolls, weights, conditions, functions, counts, or entry order differ. Choose or merge the intended definition.",
+            "loot-table",
+        ),
         "atlas-source-override" => p(
             "Atlas `{path}` texture sources are order-dependent",
             "Merge the atlas source lists into one file, or make one writer authoritative — a later \
@@ -315,9 +339,19 @@ fn presentation(diff_kind: &str) -> Option<DiffPresentation> {
             "Verify which model definition should win; models may also be runtime-generated.",
             "model",
         ),
+        "model-texture-override" => p(
+            "Model `{path}` maps texture slots differently across mods",
+            "Verify which texture-slot mapping should win; models may also be changed by resource packs.",
+            "model",
+        ),
+        "model-predicate-override" => p(
+            "Model `{path}` has different item override predicates across mods",
+            "Item override order affects which model is selected. Verify the intended predicate list and ordering.",
+            "model",
+        ),
         "blockstate-override" => p(
-            "Blockstate `{path}` maps to different models across mods",
-            "Verify which blockstate definition should win.",
+            "Blockstate `{path}` has different variant/model semantics across mods",
+            "Verify which variant mapping, rotation, weight, and model definition should win.",
             "blockstate",
         ),
         "advancement-override" => p(
@@ -340,6 +374,11 @@ fn presentation(diff_kind: &str) -> Option<DiffPresentation> {
             "A datapack registry object is kept by load order; confirm which mod should own it.",
             "registry-object",
         ),
+        "same-writer-ambiguous-definition" => p(
+            "Resource `{path}` has incompatible copies under one writer identity",
+            "Remove the duplicate artifact or verify which physical copy should provide this resource.",
+            "duplicate-writer",
+        ),
         _ => None,
     }
 }
@@ -358,7 +397,7 @@ fn severity_from_attr(s: Option<&str>) -> Severity {
 }
 
 /// Build one finding for a per-path semantic override diff fact.
-fn per_path_override_finding(f: &Fact) -> Option<Finding> {
+fn per_path_override_finding(ctx: &RuleCtx<'_>, f: &Fact) -> Option<Finding> {
     let diff_kind = f.attr("diff_kind")?;
     let pres = presentation(diff_kind)?;
     let path = f.subject.as_str();
@@ -366,6 +405,9 @@ fn per_path_override_finding(f: &Fact) -> Option<Finding> {
     let detail = f.attr("detail").unwrap_or_default();
     let severity = severity_from_attr(f.attr("severity"));
     let impact_label = f.attr("impact").unwrap_or("gameplay-behavior");
+    let impact = crate::semantic::diff::DiffKind::from_kind_str(diff_kind)
+        .map(|kind| kind.impact().evidence_impact())
+        .unwrap_or(Impact::PackHealth);
     let title = pres.title.replace("{path}", path);
     let order_note = if severity >= Severity::Warn {
         "Which one wins is order-dependent — decided by mod/resource-pack load order, a silent \
@@ -373,33 +415,79 @@ fn per_path_override_finding(f: &Fact) -> Option<Finding> {
     } else {
         "Resolved by load order."
     };
-    Some(
-        Finding::builder("resource-semantics", format!("{diff_kind}:{path}"))
-            .conclusion_kind(ConclusionKind::StaticResourceState)
-            .family(diff_kind)
-            .coverage_requirement(CoverageRequirement::RelevantResources)
-            .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
-            .proof_kind(ProofKind::DeterministicDerivation)
-            .impact(Impact::PackHealth)
-            .evidence_origin(EvidenceOrigin::StaticExact)
-            .severity(severity)
-            .category(Category::Resource)
-            .title(title)
-            .explanation(format!(
-                "Multiple mods ({writers}) define `{path}` differently ({detail}). {order_note} \
+    let mut builder = Finding::builder("resource-semantics", format!("{diff_kind}:{path}"))
+        .conclusion_kind(ConclusionKind::StaticResourceState)
+        .family(diff_kind)
+        .coverage_requirement(CoverageRequirement::RelevantResources)
+        .coverage_requirement(CoverageRequirement::KnownRuntimeMutators)
+        .proof_kind(ProofKind::DeterministicDerivation)
+        .impact(impact)
+        .evidence_origin(EvidenceOrigin::StaticExact)
+        .severity(severity)
+        .category(Category::Resource)
+        .title(title)
+        .explanation(format!(
+            "Multiple mods ({writers}) define `{path}` differently ({detail}). {order_note} \
                  Impact: {impact_label}."
-            ))
-            .affects(path.to_string())
-            .fix(FixCandidate::advice(pres.fix))
-            .tag("resource")
-            .tag(pres.domain_tag)
-            .tag("override")
-            .tag("semantic-override")
-            .tag(impact_label)
-            .evidence(EvidenceEdge::subject(f.id))
-            .confidence(0.9)
-            .build(),
-    )
+        ))
+        .affects(path.to_string())
+        .fix(FixCandidate::advice(pres.fix))
+        .tag("resource")
+        .tag(pres.domain_tag)
+        .tag("override")
+        .tag("semantic-override")
+        .tag(impact_label)
+        .evidence(EvidenceEdge::subject(f.id));
+    let writer_set: std::collections::BTreeSet<&str> = writers
+        .split(',')
+        .filter(|writer| !writer.is_empty())
+        .collect();
+    for definition in ctx
+        .store
+        .by_kind(kind::RESOURCE_DEFINITION)
+        .filter(|definition| definition.subject == path)
+        .filter(|definition| {
+            writer_set.is_empty()
+                || definition
+                    .attr("writer")
+                    .is_some_and(|writer| writer_set.contains(writer))
+        })
+    {
+        builder = builder.evidence(EvidenceEdge::supports(definition.id));
+    }
+    Some(builder.confidence(0.9).build())
+}
+
+fn platform_observation_finding(ctx: &RuleCtx<'_>) -> Option<Finding> {
+    use intermed_doctor_core::evidence::FindingVisibility;
+    let observations: Vec<_> = ctx
+        .store
+        .by_kind(kind::RESOURCE_PLATFORM_OBSERVATION)
+        .collect();
+    if observations.is_empty() {
+        return None;
+    }
+    let mut builder = Finding::builder("resource-semantics", "platform-resource-observations")
+        .conclusion_kind(ConclusionKind::StaticResourceState)
+        .proof_kind(ProofKind::Observation)
+        .impact(Impact::PackHealth)
+        .evidence_origin(EvidenceOrigin::StaticExact)
+        .visibility(FindingVisibility::ExplainOnly)
+        .severity(Severity::Info)
+        .category(Category::Resource)
+        .title(format!(
+            "{} platform-namespace resource operation(s) are available for review",
+            observations.len()
+        ))
+        .explanation(
+            "These are neutral observations such as replacing a platform tag or shipping an empty platform recipe. They are not security verdicts or failures by themselves.",
+        )
+        .tag("resource")
+        .tag("platform-observation");
+    for observation in observations {
+        builder = builder.evidence(EvidenceEdge::subject(observation.id));
+    }
+    Some(builder.confidence(1.0).build())
 }
 
 // NOTE on dangling model references: we deliberately do *not* raise a finding for
@@ -515,7 +603,41 @@ mod tests {
         let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Warn);
+        assert_eq!(findings[0].proposed_impact, Impact::CompatibilityRisk);
         assert!(findings[0].machine_tags.iter().any(|t| t == "recipe"));
+    }
+
+    #[test]
+    fn semantic_diff_cites_each_competing_definition() {
+        let mut store = FactStore::new();
+        let path = "data/create/recipe/x.json";
+        diff_fact(
+            &mut store,
+            path,
+            "recipe-output-override",
+            "create,addon",
+            "conflicting outputs",
+        );
+        for (writer, archive) in [("create", "mods/create.jar"), ("addon", "mods/addon.jar")] {
+            store
+                .fact("resource-ast-scanner", kind::RESOURCE_DEFINITION)
+                .subject(path)
+                .attr("writer", writer)
+                .attr("artifact_id", format!("sha256:{writer}"))
+                .source(intermed_doctor_core::facts::SourceRef::inside(
+                    archive, path,
+                ))
+                .emit();
+        }
+        let target = test_target();
+        let findings = ResourceSemanticRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        let finding = findings
+            .iter()
+            .find(|finding| finding.id.starts_with("recipe-output-override:"))
+            .unwrap();
+        assert_eq!(finding.evidence.len(), 3);
     }
 
     #[test]
@@ -581,6 +703,7 @@ mod tests {
         let findings = ResourceSemanticRule.evaluate(&ctx).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Note);
+        assert_eq!(findings[0].proposed_impact, Impact::CompatibilityRisk);
         assert!(findings[0].id.starts_with("model-override:"));
     }
 
@@ -675,5 +798,27 @@ mod tests {
         let target = test_target();
         let ctx = RuleCtx::for_test(&store, &target);
         assert!(ResourceSemanticRule.evaluate(&ctx).unwrap().is_empty());
+    }
+
+    #[test]
+    fn platform_observation_has_an_explain_only_consumer() {
+        let mut store = FactStore::new();
+        store
+            .fact("resource-ast-scanner", kind::RESOURCE_PLATFORM_OBSERVATION)
+            .subject("data/minecraft/tags/items/logs.json")
+            .attr("observation", "tag_replace")
+            .emit();
+        let target = test_target();
+        let findings = ResourceSemanticRule
+            .evaluate(&RuleCtx::for_test(&store, &target))
+            .unwrap();
+        let finding = findings
+            .iter()
+            .find(|finding| finding.id == "platform-resource-observations")
+            .expect("neutral observation must remain explainable");
+        assert_eq!(
+            finding.visibility,
+            intermed_doctor_core::evidence::FindingVisibility::ExplainOnly
+        );
     }
 }

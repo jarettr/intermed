@@ -220,12 +220,8 @@ impl SecuritySignal {
 
     /// High-risk capabilities that warrant `Warn` severity by default.
     pub fn is_high_risk(self) -> bool {
-        matches!(
-            self,
-            SecuritySignal::ProcessSpawn
-                | SecuritySignal::DynamicClassDefinition
-                | SecuritySignal::ScriptEngine
-        )
+        intermed_doctor_core::evidence::capability_risk_class(self.fact_kind())
+            == Some(intermed_doctor_core::evidence::CapabilityRiskClass::High)
     }
 
     pub fn severity(self) -> Severity {

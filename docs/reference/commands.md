@@ -107,13 +107,13 @@ redaction boundary.
 
 | Flag | Effect |
 |------|--------|
-| `--logic <columnar\|souffle\|duckdb>` | Rule backend. Default `columnar` (in-process). The others are external engines over the same IR. |
+| `--logic <columnar\|souffle\|duckdb>` | Rule backend. Default `columnar`; `duckdb` is the production SQL/reference backend, while `souffle` is an experimental parity backend. |
 | `--jobs <N>` | Worker thread cap. `0` = all cores. |
 | `--db <FILE>` | Persist this run into a DuckDB analytics store. |
 | `--db-best-effort` | Do not fail the run if the DB write fails. |
 | `--security-min-note-signals <N>` | Signals needed before a grouped security finding. Default 2. |
 | `--security-corroborated-confidence <S>` | Confidence for reflection-corroborated security facts. |
-| `--sbom-well-identified-trust <S>` | Trust score for well-identified jars. Default 60. |
+| `--sbom-well-identified-trust <S>` | Compatibility threshold for legacy SBOM facts without typed provenance axes. Default 60. |
 | `--log-parallel-line-threshold <N>` | Log size above which scanning parallelizes. |
 | `--perf-tick-spike-ms`, `--perf-tick-spike-warn-ms`, `--perf-high-cpu-percent`, `--perf-hot-method-floor` | Spark thresholds (see [Configuration](configuration.md#performance)). |
 
@@ -126,7 +126,7 @@ Inspect resource/data overrides. See the [Resources guide](../guides/resources.m
 ```
 intermed vfs scan    [OPTIONS] [TARGET]      # classify every resource collision
 intermed vfs explain [OPTIONS] [TARGET]      # explain one path; --path <P>, --ast
-intermed vfs overlay [OPTIONS] --out <OUT> [TARGET]  # write the merged result
+intermed vfs overlay [OPTIONS] --out <OUT> [TARGET]  # materialize proven-safe merges
 ```
 
 `vfs overlay` reads jars and writes only under `--out`. `--explain-plan` prints

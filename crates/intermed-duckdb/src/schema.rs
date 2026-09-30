@@ -388,11 +388,11 @@ pub fn fact_row(fact: &Fact, run_id: &str) -> FactRow {
     FactRow {
         run_id: run_id.to_string(),
         fact_id: fact.id.0,
-        kind: fact.kind.clone(),
-        subject: fact.subject.clone(),
+        kind: fact.kind.to_string(),
+        subject: fact.subject.to_string(),
         confidence: fact.confidence,
-        extractor: fact.extractor.clone(),
-        source_locator: fact.source.locator.clone(),
+        extractor: fact.extractor.to_string(),
+        source_locator: fact.source.locator.to_string(),
         source_line: fact.source.line,
         source_inner: fact.source.inner.clone(),
     }

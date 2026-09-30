@@ -9,6 +9,9 @@ pub enum ColumnarError {
     /// A schema/column shape mismatch while reading a batch back.
     #[error("schema: {0}")]
     Schema(String),
+    /// A `CallExternal` node requested a transform which the host did not register.
+    #[error("external module `{0}` is not registered")]
+    MissingExternalModule(String),
     /// An internal invariant was violated — e.g. the physical plan lowered an
     /// aggregate/window node into a state the executor's dispatch considers
     /// impossible. Returned instead of panicking so a planner bug surfaces as a

@@ -3,8 +3,8 @@ use std::path::Path;
 
 use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_doctor_core::{
-    CollectCtx, Collector, CollectorStatus, DiagnosisSettings, MetadataLevel, Target, TargetKind,
-    default_settings,
+    CollectCtx, Collector, CollectorStatus, DiagnosisSettings, LayoutKind, MetadataLevel, Target,
+    TargetKind, default_settings,
 };
 use intermed_minecraft_scan::MetadataCollector;
 use zip::write::SimpleFileOptions;
@@ -36,6 +36,29 @@ fn legacy_forge_mcmod_info_establishes_provider_identity_and_range() {
         .expect("legacy Forge requiredMods dependency");
     assert_eq!(dependency.attr("dep"), Some("forge"));
     assert_eq!(dependency.attr("range"), Some("[14.23.5.2847,)"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn legacy_forge_mcmod_info_accepts_platform_encoded_display_text() {
+    let root = temp_dir("legacy-forge-platform-encoding");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("legacy.jar"),
+        &[(
+            "mcmod.info",
+            b"[{\"modid\":\"legacy\",\"name\":\"Legacy \xb4 Name\",\"version\":\"1.0\"}]",
+        )],
+    );
+
+    let facts = collect_facts(&mods);
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::MOD && fact.subject == "legacy" && fact.attr("version") == Some("1.0")
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED && fact.attr("layer") == Some("metadata")
+    }));
     std::fs::remove_dir_all(root).ok();
 }
 
@@ -73,10 +96,12 @@ fn forge_1_12_environment_selects_legacy_descriptor_for_real_collector() {
         .attr("loader", "forge")
         .attr("mc_version", "1.12.2")
         .emit();
+    let inputs = FactStore::from_snapshot(store.all().to_vec());
     let settings = default_settings();
     MetadataCollector.collect(&mut CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings,
     });
@@ -117,6 +142,95 @@ fn fabric_dep_space_and_range_emits_dependency_fact() {
 }
 
 #[test]
+fn normalized_game_root_plugins_are_scanned() {
+    let root = temp_dir("normalized-plugin-root");
+    let plugins = root.join("overrides/plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    write_jar(
+        &plugins.join("vault-compat.jar"),
+        &[("plugin.yml", b"name: VaultCompat\nversion: 1.0\n")],
+    );
+    let target = Target {
+        path: root.clone(),
+        kind: TargetKind::Instance,
+        mods_dir: None,
+        game_root: Some(root.join("overrides")),
+        layout: Some(LayoutKind::CurseForgePack),
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut store = FactStore::new();
+    store
+        .fact("environment", kind::ENVIRONMENT)
+        .attr("loader", "paper")
+        .attr("loader_source", "pack-manifest")
+        .emit();
+    let inputs = FactStore::from_snapshot(store.all().to_vec());
+    let outcome = MetadataCollector.collect(&mut CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: default_settings(),
+    });
+    assert_eq!(outcome.status, CollectorStatus::Active);
+    assert!(
+        store
+            .by_kind(kind::PLUGIN)
+            .any(|fact| fact.subject == "VaultCompat")
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn conflicting_equal_authority_environment_does_not_select_a_descriptor() {
+    let root = temp_dir("conflicting-environment");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("hybrid.jar"),
+        &[
+            (
+                "fabric.mod.json",
+                br#"{"schemaVersion":1,"id":"fabric_role","version":"1.0"}"#,
+            ),
+            (
+                "META-INF/neoforge.mods.toml",
+                b"[[mods]]\nmodId=\"neoforge_role\"\nversion=\"1.0\"\n",
+            ),
+        ],
+    );
+    let target = Target {
+        path: root.clone(),
+        kind: TargetKind::Instance,
+        mods_dir: Some(mods),
+        game_root: Some(root.clone()),
+        layout: None,
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut store = FactStore::new();
+    for loader in ["fabric", "neoforge"] {
+        store
+            .fact("environment", kind::ENVIRONMENT)
+            .attr("loader", loader)
+            .attr("loader_source", "runtime-log")
+            .emit();
+    }
+    let inputs = FactStore::from_snapshot(store.all().to_vec());
+    MetadataCollector.collect(&mut CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: default_settings(),
+    });
+    let artifact = store.by_kind(kind::MOD).next().expect("candidate artifact");
+    assert_eq!(artifact.attr("identity_certainty"), Some("undecidable"));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn fabric_instance_dependency_override_removes_descriptor_break() {
     let root = temp_dir("fabric-dependency-override");
     let mods = root.join("mods");
@@ -151,9 +265,11 @@ fn fabric_instance_dependency_override_removes_descriptor_break() {
         .subject("")
         .attr("loader", "fabric")
         .emit();
+    let inputs = FactStore::from_snapshot(store.all().to_vec());
     let outcome = MetadataCollector.collect(&mut CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings: default_settings(),
     });
@@ -221,9 +337,11 @@ fn malformed_fabric_dependency_override_suppresses_descriptor_dependency_truth()
         .subject("")
         .attr("loader", "fabric")
         .emit();
+    let inputs = FactStore::from_snapshot(store.all().to_vec());
     let outcome = MetadataCollector.collect(&mut CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings: default_settings(),
     });
@@ -302,6 +420,7 @@ fn basic_metadata_level_preserves_legacy_facts_only() {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: &settings,
     };
@@ -434,6 +553,7 @@ fn full_level_whole_jar_scan_detects_content_and_networking_capabilities() {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: &settings,
     };
@@ -545,6 +665,7 @@ fn full_metadata_level_extracts_real_entrypoint_events_from_bytecode() {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: &settings,
     };
@@ -714,6 +835,11 @@ side="CLIENT"
             .any(|f| f.kind == kind::MOD && f.subject == "alpha")
     );
     assert!(!facts.iter().any(|f| f.kind == kind::MOD_SIDE));
+    let dependency = facts
+        .iter()
+        .find(|fact| fact.kind == kind::DEPENDENCY && fact.subject == "alpha")
+        .expect("Forge dependency fact");
+    assert_eq!(dependency.attr("side"), Some("client"));
 }
 
 #[test]
@@ -760,11 +886,170 @@ fn plugins_sibling_directory_is_scanned() {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: default_settings(),
     };
     MetadataCollector.collect(&mut ctx);
     assert!(store.by_kind(kind::PLUGIN).any(|f| f.subject == "Demo"));
+}
+
+#[test]
+fn sanitized_paper_corpus_selects_modern_descriptor_and_keeps_legacy_role() {
+    let root = temp_dir("paper-corpus");
+    let plugins = root.join("plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    write_jar(
+        &plugins.join("dual-plugin.jar"),
+        &[
+            (
+                "plugin.yml",
+                include_bytes!("fixtures/ecosystem/paper/plugin.yml"),
+            ),
+            (
+                "paper-plugin.yml",
+                include_bytes!("fixtures/ecosystem/paper/paper-plugin.yml"),
+            ),
+        ],
+    );
+
+    let facts = collect_instance_with_loader(&root, "paper");
+    let plugin = facts
+        .iter()
+        .find(|fact| fact.kind == kind::PLUGIN)
+        .expect("active Paper plugin");
+    assert_eq!(plugin.subject.as_str(), "SanitizedPaperPlugin");
+    assert_eq!(plugin.source.inner.as_deref(), Some("paper-plugin.yml"));
+    let roles = facts
+        .iter()
+        .filter(|fact| fact.kind == kind::ARTIFACT_ROLE)
+        .collect::<Vec<_>>();
+    assert_eq!(roles.len(), 2);
+    assert!(roles.iter().any(|fact| {
+        fact.attr("descriptor") == Some("paper-plugin.yml")
+            && fact.attr("activation") == Some("active")
+    }));
+    assert!(roles.iter().any(|fact| {
+        fact.attr("descriptor") == Some("plugin.yml")
+            && fact.attr("activation") == Some("compatible-candidate")
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn sanitized_quilt_corpus_emits_lossless_group_expressions() {
+    let root = temp_dir("quilt-corpus");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("quilt.jar"),
+        &[(
+            "quilt.mod.json",
+            include_bytes!("fixtures/ecosystem/quilt/quilt.mod.json"),
+        )],
+    );
+
+    let facts = collect_instance_with_loader(&root, "quilt");
+    let expressions = facts
+        .iter()
+        .filter(|fact| fact.kind == kind::DEPENDENCY_EXPRESSION)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expressions.len(),
+        3,
+        "any, unless and environment are grouped"
+    );
+    assert!(expressions.iter().any(|fact| {
+        fact.attr("expression")
+            .is_some_and(|expression| expression.contains("\"operator\":\"any\""))
+    }));
+    assert!(expressions.iter().any(|fact| {
+        fact.attr("expression")
+            .is_some_and(|expression| expression.contains("\"unless\""))
+    }));
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::DEPENDENCY
+            && fact.attr("dep") == Some("bounded_provider")
+            && fact.attr("range") == Some(r#"{"all":[">=1.0.0","<2.0.0"]}"#)
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn sanitized_universal_corpus_records_every_role_but_activates_target_loader_only() {
+    let root = temp_dir("hybrid-corpus");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("universal.jar"),
+        &[
+            (
+                "fabric.mod.json",
+                include_bytes!("fixtures/ecosystem/hybrid/fabric.mod.json"),
+            ),
+            (
+                "META-INF/mods.toml",
+                include_bytes!("fixtures/ecosystem/hybrid/META-INF/mods.toml"),
+            ),
+            (
+                "META-INF/neoforge.mods.toml",
+                include_bytes!("fixtures/ecosystem/hybrid/META-INF/neoforge.mods.toml"),
+            ),
+        ],
+    );
+
+    let facts = collect_instance_with_loader(&root, "forge");
+    let roles = facts
+        .iter()
+        .filter(|fact| fact.kind == kind::ARTIFACT_ROLE)
+        .collect::<Vec<_>>();
+    assert_eq!(roles.len(), 3);
+    assert_eq!(
+        roles
+            .iter()
+            .filter(|fact| fact.attr("activation") == Some("active"))
+            .count(),
+        1
+    );
+    assert!(roles.iter().any(|fact| {
+        fact.attr("loader") == Some("forge") && fact.attr("activation") == Some("active")
+    }));
+    assert!(
+        !facts.iter().any(|fact| {
+            fact.kind == kind::DEPENDENCY && fact.attr("dep") == Some("fabricloader")
+        })
+    );
+    std::fs::remove_dir_all(root).ok();
+}
+
+fn collect_instance_with_loader(
+    root: &Path,
+    loader: &str,
+) -> Vec<intermed_doctor_core::facts::Fact> {
+    let target = Target {
+        path: root.to_path_buf(),
+        kind: TargetKind::Instance,
+        mods_dir: Some(root.join("mods")),
+        game_root: Some(root.to_path_buf()),
+        layout: None,
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut inputs = FactStore::new();
+    inputs
+        .fact("test-environment", kind::ENVIRONMENT)
+        .attr("loader", loader)
+        .attr("loader_source", "explicit-pack-manifest")
+        .emit();
+    let mut store = FactStore::new();
+    MetadataCollector.collect(&mut CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: default_settings(),
+    });
+    store.all().to_vec()
 }
 
 fn collect_facts(mods_dir: &Path) -> Vec<intermed_doctor_core::facts::Fact> {
@@ -781,6 +1066,7 @@ fn collect_facts(mods_dir: &Path) -> Vec<intermed_doctor_core::facts::Fact> {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: default_settings(),
     };
@@ -839,12 +1125,13 @@ fn hybrid_plugin_with_mod_manifest_records_secondary_identity() {
     );
 
     let facts = collect_facts(&mods);
-    // Primary identity stays the plugin (no competing mod fact → no false loader-mismatch).
-    assert!(
-        facts
-            .iter()
-            .any(|f| f.kind == kind::PLUGIN && f.subject == "ViaBridge")
-    );
+    // The plugin remains the deterministic presentation candidate, but without
+    // target-loader evidence the hybrid identity is not canonical truth.
+    let plugin = facts
+        .iter()
+        .find(|f| f.kind == kind::PLUGIN && f.subject == "ViaBridge")
+        .expect("plugin candidate");
+    assert_eq!(plugin.attr("identity_certainty"), Some("undecidable"));
     assert!(
         !facts
             .iter()
@@ -944,6 +1231,7 @@ fn paper_plugin_yml_emits_api_version() {
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &FactStore::new(),
         jar_cache: None,
         settings: default_settings(),
     };
@@ -985,6 +1273,7 @@ fn metadata_cache_records_hits_on_second_collect() {
     let mut ctx1 = CollectCtx {
         target: &target,
         store: &mut store1,
+        inputs: &FactStore::new(),
         jar_cache: Some(&cache),
         settings: default_settings(),
     };
@@ -995,6 +1284,7 @@ fn metadata_cache_records_hits_on_second_collect() {
     let mut ctx2 = CollectCtx {
         target: &target,
         store: &mut store2,
+        inputs: &FactStore::new(),
         jar_cache: Some(&cache),
         settings: default_settings(),
     };
@@ -1197,6 +1487,81 @@ file="META-INF/accesstransformer.cfg"
 }
 
 #[test]
+fn neoforge_access_transformer_basename_is_relative_to_meta_inf() {
+    let root = temp_dir("neoforge-at-relative");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("alpha.jar"),
+        &[
+            (
+                "META-INF/neoforge.mods.toml",
+                br#"
+modLoader="javafml"
+loaderVersion="[1,)"
+license="MIT"
+[[mods]]
+modId="alpha"
+version="1.0.0"
+[[accessTransformers]]
+file="accesstransformer.cfg"
+"#,
+            ),
+            (
+                "META-INF/accesstransformer.cfg",
+                b"public net.minecraft.example.Cls method",
+            ),
+        ],
+    );
+
+    let facts = collect_facts(&mods);
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::ACCESS_TRANSFORM
+            && fact.subject == "alpha"
+            && fact.attr("target_class") == Some("net.minecraft.example.Cls")
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED
+            && fact.attr("layer") == Some("metadata")
+            && fact
+                .attr("reason")
+                .is_some_and(|reason| reason.contains("access transformer"))
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn commented_coremods_manifest_matches_modlauncher_json_dialect() {
+    let root = temp_dir("forge-commented-coremods");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("alpha.jar"),
+        &[
+            (
+                "META-INF/mods.toml",
+                b"modLoader=\"javafml\"\nloaderVersion=\"[1,)\"\n[[mods]]\nmodId=\"alpha\"\nversion=\"1.0.0\"\n",
+            ),
+            (
+                "META-INF/coremods.json",
+                b"{\n  // \"disabled\": \"coremods/disabled.js\"\n}\n",
+            ),
+        ],
+    );
+
+    let facts = collect_facts(&mods);
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED
+            && fact.attr("layer") == Some("metadata")
+            && fact
+                .attr("reason")
+                .is_some_and(|reason| reason.contains("coremods.json"))
+    }));
+    assert!(!facts.iter().any(|fact| fact.kind == kind::COREMOD));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn nested_jar_registers_versioned_provider() {
     let root = temp_dir("nested-jij");
     let mods = root.join("mods");
@@ -1212,7 +1577,7 @@ fn nested_jar_registers_versioned_provider() {
         &[
             (
                 "fabric.mod.json",
-                br#"{"schemaVersion":1,"id":"api","version":"1.0.0"}"#,
+                br#"{"schemaVersion":1,"id":"api","version":"1.0.0","jars":[{"file":"META-INF/jars/renderer-api.jar"}]}"#,
             ),
             ("META-INF/jars/renderer-api.jar", &child),
         ],
@@ -1245,7 +1610,242 @@ fn nested_jar_registers_versioned_provider() {
 }
 
 #[test]
-fn descriptorless_container_retains_nested_mod_as_confirmed_provider() {
+fn forge_jarjar_fabric_library_is_observed_without_becoming_a_provider_gap() {
+    let root = temp_dir("forge-jarjar-fabric-library");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let child = build_jar(&[(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"generated_maven_library","version":"4.5.10","custom":{"fabric-loom:generated":true}}"#,
+    )]);
+    write_jar(
+        &mods.join("forge-parent.jar"),
+        &[
+            (
+                "META-INF/mods.toml",
+                b"modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n[[mods]]\nmodId=\"forge_parent\"\nversion=\"1.0\"\n",
+            ),
+            (
+                "META-INF/jarjar/metadata.json",
+                br#"{"jars":[{"path":"META-INF/jars/library.jar"}]}"#,
+            ),
+            ("META-INF/jars/library.jar", &child),
+        ],
+    );
+
+    let facts = collect_facts(&mods);
+    let nested = facts
+        .iter()
+        .find(|fact| {
+            fact.kind == kind::NESTED_JAR && fact.attr("nested") == Some("generated_maven_library")
+        })
+        .expect("classpath-only nested component");
+    assert_eq!(
+        nested.attr("activation"),
+        Some("classpath-only-cross-loader-descriptor")
+    );
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::PROVIDED_DEPENDENCY
+            && fact.attr("provides") == Some("generated_maven_library")
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED && fact.attr("layer") == Some("metadata")
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn quilt_nested_jar_registers_versioned_provider() {
+    let root = temp_dir("quilt-nested-jij");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+
+    let child = build_jar(&[(
+        "quilt.mod.json",
+        br#"{"schema_version":1,"quilt_loader":{"group":"org.example","id":"quilt-api-module","version":"4.2.0","provides":[{"id":"fabric-api-base","version":"0.4.15"}]}}"#,
+    )]);
+    write_jar(
+        &mods.join("quilt-api.jar"),
+        &[
+            (
+                "quilt.mod.json",
+                br#"{"schema_version":1,"quilt_loader":{"group":"org.example","id":"quilt-api","version":"1.0.0","jars":["META-INF/jars/quilt-api-module.jar"]}}"#,
+            ),
+            ("META-INF/jars/quilt-api-module.jar", &child),
+        ],
+    );
+
+    let facts = collect_facts(&mods);
+    let nested = facts
+        .iter()
+        .find(|fact| {
+            fact.kind == kind::NESTED_JAR && fact.attr("nested") == Some("quilt-api-module")
+        })
+        .expect("Quilt nested_jar fact");
+    assert_eq!(nested.attr("version"), Some("4.2.0"));
+
+    let provided = facts
+        .iter()
+        .find(|fact| {
+            fact.kind == kind::PROVIDED_DEPENDENCY
+                && fact.attr("provides") == Some("quilt-api-module")
+        })
+        .expect("Quilt nested provider");
+    assert_eq!(provided.attr("version"), Some("4.2.0"));
+    let alias = facts
+        .iter()
+        .find(|fact| {
+            fact.kind == kind::PROVIDED_DEPENDENCY
+                && fact.attr("provides") == Some("fabric-api-base")
+        })
+        .expect("versioned Quilt compatibility alias");
+    assert_eq!(alias.attr("version"), Some("0.4.15"));
+}
+
+#[test]
+fn quilt_target_honors_nested_jars_from_active_fabric_descriptor() {
+    let root = temp_dir("quilt-fabric-nested-jij");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let child = build_jar(&[(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"fabric-module","version":"1.2.3"}"#,
+    )]);
+    write_jar(
+        &mods.join("fabric-on-quilt.jar"),
+        &[
+            (
+                "fabric.mod.json",
+                br#"{"schemaVersion":1,"id":"fabric-parent","version":"1.0.0","jars":[{"file":"META-INF/jars/module.jar"}]}"#,
+            ),
+            ("META-INF/jars/module.jar", &child),
+        ],
+    );
+
+    let facts = collect_instance_with_loader(&root, "quilt");
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::PROVIDED_DEPENDENCY
+            && fact.attr("provides") == Some("fabric-module")
+            && fact.attr("version") == Some("1.2.3")
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED && fact.attr("layer") == Some("metadata")
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn fabric_lenient_descriptor_keeps_nested_provider_complete() {
+    let root = temp_dir("fabric-lenient-nested-jij");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+
+    let child = build_jar(&[(
+        "fabric.mod.json",
+        br#"{"schemaVersion":1,"id":"lenient-child","version":"2.0.0"}"#,
+    )]);
+    write_jar(
+        &mods.join("lenient-parent.jar"),
+        &[
+            (
+                "fabric.mod.json",
+                b"{\"schemaVersion\":1,\"id\":\"lenient-parent\",\"version\":\"1.0.0\",\"description\":\"first line\nsecond line\",\"jars\":[{\"file\":\"META-INF/jars/child.jar\"}]}",
+            ),
+            ("META-INF/jars/child.jar", &child),
+        ],
+    );
+
+    let facts = collect_facts(&mods);
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::PROVIDED_DEPENDENCY
+            && fact.attr("provides") == Some("lenient-child")
+            && fact.attr("version") == Some("2.0.0")
+    }));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::SCAN_TRUNCATED
+            && fact.attr("layer") == Some("metadata")
+            && fact.subject == "lenient-parent.jar"
+    }));
+}
+
+#[test]
+fn missing_loader_declared_nested_jar_marks_metadata_incomplete() {
+    let root = temp_dir("missing-declared-jij");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("broken-parent.jar"),
+        &[(
+            "fabric.mod.json",
+            br#"{"schemaVersion":1,"id":"broken_parent","version":"1.0","jars":[{"file":"libs/missing.jar"}]}"#,
+        )],
+    );
+    let target = Target {
+        path: mods.clone(),
+        kind: TargetKind::ModsDir,
+        mods_dir: Some(mods),
+        game_root: Some(root.clone()),
+        layout: None,
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut store = FactStore::new();
+    let inputs = FactStore::new();
+    let outcome = MetadataCollector.collect(&mut CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: default_settings(),
+    });
+    assert_eq!(outcome.status, CollectorStatus::Incomplete);
+    assert!(store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
+        fact.attr("reason")
+            .is_some_and(|reason| reason.contains("loader-declared nested archive is missing"))
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn missing_declared_access_widener_marks_metadata_incomplete() {
+    let root = temp_dir("missing-access-widener");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    write_jar(
+        &mods.join("broken-aw.jar"),
+        &[(
+            "fabric.mod.json",
+            br#"{"schemaVersion":1,"id":"broken_aw","version":"1.0","accessWidener":"missing.accesswidener"}"#,
+        )],
+    );
+    let target = Target {
+        path: mods.clone(),
+        kind: TargetKind::ModsDir,
+        mods_dir: Some(mods),
+        game_root: Some(root.clone()),
+        layout: None,
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut store = FactStore::new();
+    let inputs = FactStore::new();
+    let outcome = MetadataCollector.collect(&mut CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: default_settings(),
+    });
+    assert_eq!(outcome.status, CollectorStatus::Incomplete);
+    assert!(store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
+        fact.attr("reason")
+            .is_some_and(|reason| reason.contains("access widener") && reason.contains("missing"))
+    }));
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn physically_nested_but_undeclared_mod_is_not_a_provider() {
     let root = temp_dir("detached-nested-provider");
     let mods = root.join("mods");
     std::fs::create_dir_all(&mods).unwrap();
@@ -1268,24 +1868,14 @@ displayName="Kotlin for Forge"
 
     let facts = collect_facts(&mods);
     assert!(!facts.iter().any(|fact| fact.kind == kind::MOD));
-    let provider = facts
-        .iter()
-        .find(|fact| {
-            fact.kind == kind::PROVIDED_DEPENDENCY
-                && fact.attr("provides") == Some("kotlinforforge")
-        })
-        .expect("provider identity from the nested authoritative descriptor");
-    assert_eq!(provider.attr("version"), Some("4.12.0"));
-    assert_eq!(provider.attr("identity_certainty"), Some("confirmed"));
-    assert_eq!(
-        provider.attr("nested_path"),
-        Some("META-INF/jarjar/kffmod-4.12.0.jar")
-    );
-    let nested = facts
-        .iter()
-        .find(|fact| fact.kind == kind::NESTED_JAR && fact.attr("nested") == Some("kotlinforforge"))
-        .expect("nested artifact evidence");
-    assert_eq!(nested.attr("version"), Some("4.12.0"));
+    assert!(!facts.iter().any(|fact| {
+        fact.kind == kind::PROVIDED_DEPENDENCY && fact.attr("provides") == Some("kotlinforforge")
+    }));
+    assert!(facts.iter().any(|fact| {
+        fact.kind == kind::NESTED_JAR
+            && fact.attr("nested_path") == Some("META-INF/jarjar/kffmod-4.12.0.jar")
+            && fact.attr("activation") == Some("not-loader-declared")
+    }));
     std::fs::remove_dir_all(root).ok();
 }
 

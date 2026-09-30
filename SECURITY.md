@@ -8,13 +8,13 @@ and a parser is exactly the kind of code that can be made to misbehave by a
 crafted file.
 
 This policy covers what to report, how, and what to expect back. It is written
-honestly: this is a `0.1.9-alpha` project with a small maintainer base, so the
+honestly: this is a `0.2.0-alpha` project with a small maintainer base, so the
 guarantees below are best-effort, not an SLA.
 
 ## Supported versions
 
 Only the latest `main` and the most recent tagged release receive security
-fixes. Pre-`0.1.x` alphas are not patched in place; fixes land in a new release.
+fixes. Older alpha releases are not patched in place; fixes land in a new release.
 
 ## What counts as a vulnerability
 

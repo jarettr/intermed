@@ -26,23 +26,25 @@ pub fn compute_injection_effect(
     hot_path: bool,
 ) -> MixinEffect {
     // JVM method identity is name + descriptor. Prefer an exact (name, descriptor)
-    // match so overloaded handlers bind to the right body; fall back to name-only
-    // when the descriptor is unknown on either side (older caches / overwrite path).
-    let handler_summary = class
-        .handler_bodies
-        .iter()
-        .find(|h| {
-            h.handler_method == inj.handler_method
-                && !h.handler_descriptor.is_empty()
-                && !inj.handler_descriptor.is_empty()
-                && h.handler_descriptor == inj.handler_descriptor
+    // match so overloaded handlers bind to the right body. A name-only fallback
+    // is safe only when there is exactly one candidate.
+    let handler_summary = if inj.handler_descriptor.is_empty() {
+        let mut candidates = class
+            .handler_bodies
+            .iter()
+            .filter(|body| body.handler_method == inj.handler_method);
+        let first = candidates.next();
+        if candidates.next().is_none() {
+            first
+        } else {
+            None
+        }
+    } else {
+        class.handler_bodies.iter().find(|body| {
+            body.handler_method == inj.handler_method
+                && body.handler_descriptor == inj.handler_descriptor
         })
-        .or_else(|| {
-            class
-                .handler_bodies
-                .iter()
-                .find(|h| h.handler_method == inj.handler_method)
-        });
+    };
     let handler_effect = handler_summary.map(derive_handler_effect);
     let operation = operation_from_injection_type(&inj.injection_type);
     let kinds = classify_effect_kinds(&operation, inj, handler_summary, handler_effect.as_ref());
@@ -55,6 +57,7 @@ pub fn compute_injection_effect(
         target: inj.target.clone(),
         method: inj.resolved.clone(),
         handler_method: inj.handler_method.clone(),
+        handler_descriptor: inj.handler_descriptor.clone(),
         operation,
         effect_kinds: kinds,
         effect_description,
@@ -434,6 +437,7 @@ mod tests {
     fn handler_effect() -> HandlerEffect {
         HandlerEffect {
             handler_method: "h".into(),
+            bytecode_observed: true,
             handler_local_store: false,
             modifies_return: true,
             early_return: true,
@@ -475,7 +479,9 @@ mod tests {
     fn inject_record(at: &str, modifies_return: bool) -> MixinClassRecord {
         MixinClassRecord {
             archive: "a.jar".into(),
+            artifact_id: "sha256:test".into(),
             mod_id: "alpha".into(),
+            identity_certainty: "confirmed".into(),
             config: "mixins.json".into(),
             class_name: "alpha.Mixin".into(),
             class_path: "alpha/Mixin.class".into(),
@@ -503,6 +509,7 @@ mod tests {
                 meta: Default::default(),
                 at_ordinal: None,
                 at_target_member: String::new(),
+                at_constraints: Default::default(),
             }],
             shadows: Vec::new(),
             added_members: Vec::new(),

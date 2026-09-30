@@ -27,7 +27,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{RESOURCE_AST_CACHE_SCHEMA, classify, parse_resource, parser_version};
+use crate::domain::{RESOURCE_AST_CACHE_SCHEMA, classify, parser_version};
 use crate::model::{CachedResourceAst, DomainParseExt, ResourceLevel};
 use crate::semantic::namespace::path_namespace;
 
@@ -56,6 +56,10 @@ pub struct JarAstPartial {
     /// Every namespace this jar ships *any* resource under (incl. binary-only),
     /// for namespace ownership without per-asset facts.
     pub owned_namespaces: Vec<String>,
+    /// Every safe resource path observed in the central directory, including
+    /// entries whose bodies were not parsed because of level or size limits.
+    #[serde(default)]
+    pub present_paths: Vec<String>,
     /// Diagnostics for resources skipped by a cap (path + reason).
     pub truncations: Vec<String>,
 }
@@ -74,8 +78,18 @@ pub fn cache_version(
     max_json_bytes: u64,
     max_lang_json_bytes: u64,
 ) -> String {
+    cache_version_bounded(level, max_json_bytes, max_lang_json_bytes, 256)
+}
+
+#[must_use]
+pub fn cache_version_bounded(
+    level: ResourceLevel,
+    max_json_bytes: u64,
+    max_lang_json_bytes: u64,
+    max_references: usize,
+) -> String {
     format!(
-        "{}|{}|{}|{}|json={max_json_bytes}|lang={max_lang_json_bytes}",
+        "{}|{}|{}|{}|json={max_json_bytes}|lang={max_lang_json_bytes}|refs={max_references}",
         env!("CARGO_PKG_VERSION"),
         RESOURCE_AST_CACHE_SCHEMA,
         parser_version(),
@@ -92,6 +106,17 @@ pub fn scan_jar(
     max_json_bytes: u64,
     max_lang_json_bytes: u64,
 ) -> JarAstScan {
+    scan_jar_bounded(jar, level, max_json_bytes, max_lang_json_bytes, 256)
+}
+
+#[must_use]
+pub fn scan_jar_bounded(
+    jar: &Path,
+    level: ResourceLevel,
+    max_json_bytes: u64,
+    max_lang_json_bytes: u64,
+    max_references: usize,
+) -> JarAstScan {
     let file = match std::fs::File::open(jar) {
         Ok(f) => f,
         Err(e) => return JarAstScan::Err(format!("open {}: {e}", jar.display())),
@@ -107,6 +132,7 @@ pub fn scan_jar(
     let mut asts = Vec::new();
     let mut owned: BTreeSet<String> = BTreeSet::new();
     let mut truncations = Vec::new();
+    let mut present_paths = Vec::new();
     let mut total_parsed: u64 = 0;
     let mut entries = 0usize;
 
@@ -136,6 +162,7 @@ pub fn scan_jar(
         if let Some(ns) = path_namespace(&path) {
             owned.insert(ns);
         }
+        present_paths.push(path.clone());
 
         // Only parsed domains cost a read; binary/unmodelled resources contribute
         // namespace ownership above and nothing more.
@@ -151,12 +178,12 @@ pub fn scan_jar(
         if entry.size() > entry_cap {
             truncations.push(format!(
                 "{path}: {} bytes exceeds {entry_cap} byte {} cap, skipped",
+                entry.size(),
                 if domain == crate::model::ResourceDomain::Lang {
                     "language JSON"
                 } else {
                     "JSON"
                 },
-                entry.size()
             ));
             continue;
         }
@@ -189,13 +216,26 @@ pub fn scan_jar(
         total_parsed = total_parsed.saturating_add(bytes.len() as u64);
 
         // Summarise, then drop `bytes`.
-        asts.push(parse_resource(&path, &bytes, level));
+        let ast = crate::domain::parse_resource_with_limits(
+            &path,
+            &bytes,
+            level,
+            crate::domain::ExtractionLimits {
+                max_references,
+                ..crate::domain::ExtractionLimits::default()
+            },
+        );
+        if let Some(gap) = &ast.reference_gap {
+            truncations.push(format!("{path}: {gap}"));
+        }
+        asts.push(ast);
     }
 
     JarAstScan::Ok(JarAstPartial {
         writer,
         asts,
         owned_namespaces: owned.into_iter().collect(),
+        present_paths,
         truncations,
     })
 }
@@ -270,7 +310,7 @@ fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Op
 
 #[cfg(test)]
 mod writer_identity_tests {
-    use super::{JarAstScan, cache_version, descriptor_writer_id, scan_jar};
+    use super::{JarAstScan, cache_version, descriptor_writer_id, scan_jar, scan_jar_bounded};
     use crate::model::ResourceLevel;
     use std::io::Write;
 
@@ -333,5 +373,73 @@ mod writer_identity_tests {
         let baseline = cache_version(ResourceLevel::Semantic, 1024, 4096);
         assert_ne!(baseline, cache_version(ResourceLevel::Semantic, 2048, 4096));
         assert_ne!(baseline, cache_version(ResourceLevel::Semantic, 1024, 8192));
+    }
+
+    #[test]
+    fn oversized_resource_remains_physically_present() {
+        let path = std::env::temp_dir().join(format!(
+            "intermed-oversized-resource-{}.jar",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create jar");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "data/example/recipe/large.json",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
+            )
+            .expect("start resource");
+        write!(
+            archive,
+            "{{\"type\":\"minecraft:crafting_shapeless\",\"padding\":\"{}\"}}",
+            "x".repeat(4096)
+        )
+        .expect("write resource");
+        archive.finish().expect("finish jar");
+
+        let JarAstScan::Ok(scan) = scan_jar(&path, ResourceLevel::Semantic, 128, 128) else {
+            panic!("fixture jar should be readable");
+        };
+        assert!(scan.asts.is_empty());
+        assert_eq!(scan.present_paths, vec!["data/example/recipe/large.json"]);
+        assert_eq!(scan.truncations.len(), 1);
+        std::fs::remove_file(path).expect("remove fixture");
+    }
+
+    #[test]
+    fn reference_extraction_limit_marks_scan_partial() {
+        let path = std::env::temp_dir().join(format!(
+            "intermed-many-resource-refs-{}.jar",
+            std::process::id()
+        ));
+        let file = std::fs::File::create(&path).expect("create jar");
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "data/example/recipe/many.json",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("start resource");
+        let ingredients = (0..20)
+            .map(|index| format!(r#"{{"item":"example:item_{index}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        write!(
+            archive,
+            r#"{{"type":"minecraft:crafting_shapeless","ingredients":[{ingredients}],"result":{{"item":"minecraft:stick"}}}}"#
+        )
+        .expect("write resource");
+        archive.finish().expect("finish jar");
+
+        let JarAstScan::Ok(scan) =
+            scan_jar_bounded(&path, ResourceLevel::Semantic, 1 << 20, 1 << 20, 4)
+        else {
+            panic!("fixture jar should be readable");
+        };
+        assert_eq!(scan.asts.len(), 1);
+        assert!(!scan.asts[0].references_complete);
+        assert_eq!(scan.truncations.len(), 1);
+        std::fs::remove_file(path).expect("remove fixture");
     }
 }

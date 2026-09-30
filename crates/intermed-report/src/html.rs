@@ -98,6 +98,16 @@ fn summary_section(report: &DoctorReport) -> String {
         ),
         ("Minecraft", derived(&env.minecraft_version)),
         ("Launcher", opt(&env.launcher)),
+        ("Host launcher", opt(&env.host_launcher)),
+        (
+            "Layout topology",
+            opt(&env
+                .layout_topology
+                .map(|topology| topology.as_str().to_string())),
+        ),
+        ("Instance type", dbg_opt(&env.instance_type)),
+        ("Instance certainty", dbg_opt(&env.instance_type_certainty)),
+        ("Instance evidence", opt(&env.instance_type_reason)),
         ("Side", dbg_opt(&env.side)),
         ("Target Java", opt(&env.java_version)),
         (
@@ -1266,7 +1276,7 @@ fn dbg_opt<T: std::fmt::Debug>(o: &Option<T>) -> String {
 }
 
 fn source_str(s: &SourceRef) -> String {
-    let mut out = s.locator.clone();
+    let mut out = s.locator.to_string();
     if let Some(line) = s.line {
         out.push_str(&format!(":{line}"));
     }

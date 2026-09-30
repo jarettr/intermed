@@ -7,17 +7,18 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use thiserror::Error;
 
-use intermed_doctor_core::facts::{SourceRef, kind};
+use intermed_doctor_core::facts::{FactRead, SourceRef, kind};
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, JarCache, Layer, ResourceSettings, ScanSettings,
-    Target, TargetKind,
+    Target,
 };
+use intermed_evidence::ArtifactId;
 use intermed_evidence::{CoverageGap, CoverageState};
 
 use crate::model::ResourceLevel;
 use crate::scan::{self, EXTRACTOR, JarAstScan};
 use crate::semantic::diff;
-use crate::semantic::refs::{ResourceAstRecord, ResourceGraph};
+use crate::semantic::refs::{ResourceAstRecord, ResourceGraph, ResourcePresence};
 
 /// The Layer-M collector.
 #[must_use]
@@ -30,8 +31,10 @@ pub fn collector() -> impl Collector {
 #[derive(Debug, Default)]
 pub struct ResourceAstScan {
     pub records: Vec<ResourceAstRecord>,
-    /// `(namespace, writer)` ownership from resources with no parsed AST (binary).
-    pub extra_owners: Vec<(String, String)>,
+    pub presences: Vec<ResourcePresence>,
+    /// `(namespace, writer, archive)` ownership from resources with no parsed AST (binary).
+    /// The archive path is stored so writer identity normalization can be applied later.
+    pub extra_owners: Vec<(String, String, String)>,
     /// `(archive, reason)` for jars that could not be inspected.
     pub failures: Vec<(String, String)>,
     /// `(archive, reason)` for resources dropped by a scan cap.
@@ -41,6 +44,88 @@ pub struct ResourceAstScan {
 #[derive(Debug, Error)]
 #[error("{0}")]
 pub struct ScanError(pub String);
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IdentityBinding {
+    writer: String,
+    artifact_id: Option<String>,
+}
+
+type IdentityBindings =
+    std::collections::BTreeMap<String, std::collections::BTreeSet<IdentityBinding>>;
+
+fn canonical_identity_bindings(inputs: &dyn FactRead) -> IdentityBindings {
+    let mut identities = IdentityBindings::new();
+    for fact in inputs.by_kind(kind::RESOURCE_WRITER) {
+        let archive = fact.attr("archive").unwrap_or(&fact.source.locator);
+        let locator = fact.attr("source_locator").unwrap_or(&fact.source.locator);
+        let portable = intermed_doctor_core::portable_artifact_locator(locator, archive);
+        identities
+            .entry(portable)
+            .or_default()
+            .insert(IdentityBinding {
+                writer: fact.subject.to_string(),
+                artifact_id: fact.attr("artifact_id").map(str::to_string),
+            });
+    }
+    for fact in inputs
+        .by_kind(kind::MOD)
+        .chain(inputs.by_kind(kind::PLUGIN))
+    {
+        let Some(file) = fact.attr("file") else {
+            continue;
+        };
+        let archive_name = Path::new(file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(file);
+        let archive = intermed_doctor_core::portable_artifact_locator(file, archive_name);
+        identities
+            .entry(archive)
+            .or_default()
+            .insert(IdentityBinding {
+                writer: fact.subject.to_string(),
+                artifact_id: fact.attr("artifact_id").map(str::to_string),
+            });
+    }
+    identities
+}
+
+fn normalize_scan_identities(
+    scan: &mut ResourceAstScan,
+    identities: &IdentityBindings,
+) -> Vec<(String, String)> {
+    let unique = |archive: &str| {
+        identities
+            .get(archive)
+            .filter(|bindings| bindings.len() == 1)
+            .and_then(|bindings| bindings.first())
+    };
+    for record in &mut scan.records {
+        if let Some(binding) = unique(&record.archive) {
+            record.writer = binding.writer.clone();
+            if let Some(artifact_id) = &binding.artifact_id {
+                record.artifact_id = artifact_id.clone();
+            }
+        }
+    }
+    for presence in &mut scan.presences {
+        if let Some(binding) = unique(&presence.archive) {
+            presence.writer = binding.writer.clone();
+            if let Some(artifact_id) = &binding.artifact_id {
+                presence.artifact_id = artifact_id.clone();
+            }
+        }
+    }
+    scan.extra_owners
+        .iter()
+        .map(|(namespace, original_writer, archive)| {
+            let writer = unique(archive)
+                .map_or_else(|| original_writer.clone(), |binding| binding.writer.clone());
+            (namespace.clone(), writer)
+        })
+        .collect()
+}
 
 pub struct ResourceAstCollector;
 
@@ -58,33 +143,52 @@ impl Collector for ResourceAstCollector {
         )
         .produces([
             kind::RESOURCE_AST_PARSED,
+            kind::RESOURCE_DEFINITION,
             kind::RESOURCE_REFERENCE,
+            kind::RESOURCE_DANGLING_REFERENCE,
+            kind::RESOURCE_RESOLVE_RESULT,
             kind::RESOURCE_SEMANTIC_DIFF,
+            kind::RESOURCE_SEMANTIC_CONFLICT,
+            kind::RESOURCE_SEMANTIC_ISSUE,
+            kind::RESOURCE_PLATFORM_OBSERVATION,
+            kind::IMPLICIT_DEPENDENCY_CANDIDATE,
+            kind::IMPLICIT_DEPENDENCY_EDGE,
+            kind::NAMESPACE_OWNER,
+            kind::SCAN_TRUNCATED,
+            kind::UNPARSEABLE_ARCHIVE,
         ])
         .regions([
             intermed_doctor_core::TargetRegion::Datapacks,
             intermed_doctor_core::TargetRegion::VanillaResources,
         ])
+        .consumes([
+            kind::MOD,
+            kind::PLUGIN,
+            kind::PROVIDED_DEPENDENCY,
+            kind::RESOURCE_WRITER,
+        ])
     }
 
     fn applies(&self, target: &Target) -> bool {
-        mods_dir(target).is_some()
+        !target.artifact_roots().is_empty()
     }
 
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let settings = ctx.settings.resource;
         let level = ResourceLevel::from(settings.level);
         if !level.is_enabled() {
-            return CollectorOutcome::skipped(format!(
+            return CollectorOutcome::not_applicable(format!(
                 "resource AST disabled at `{}` level (use --resource-level semantic|full)",
                 settings.level.as_str()
             ));
         }
-        let Some(dir) = mods_dir(ctx.target) else {
-            return CollectorOutcome::skipped("no mods directory for resource AST scan");
-        };
-
-        match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan, settings, level) {
+        match scan_target_filtered(
+            ctx.target,
+            ctx.jar_cache,
+            &ctx.settings.scan,
+            settings,
+            level,
+        ) {
             Ok(scan) => {
                 let incomplete = !scan.truncations.is_empty() || !scan.failures.is_empty();
                 // Opt-in vanilla resource index: scan the Minecraft jar
@@ -114,6 +218,7 @@ impl Collector for ResourceAstCollector {
 #[derive(Debug)]
 pub struct VanillaIndexResult {
     pub records: Vec<ResourceAstRecord>,
+    pub presences: Vec<ResourcePresence>,
     pub coverage: CoverageState,
     pub reasons: Vec<CoverageGap>,
 }
@@ -135,6 +240,7 @@ fn scan_vanilla_records(
         .with_scope("vanilla-resources");
         return VanillaIndexResult {
             records: Vec::new(),
+            presences: Vec::new(),
             coverage: CoverageState::Unavailable {
                 reasons: vec![gap.clone()],
             },
@@ -154,20 +260,38 @@ fn scan_vanilla_records(
         .with_scope("vanilla-resources");
         return VanillaIndexResult {
             records: Vec::new(),
+            presences: Vec::new(),
             coverage: CoverageState::Unavailable {
                 reasons: vec![gap.clone()],
             },
             reasons: vec![gap],
         };
     }
-    let version = scan::cache_version(level, settings.max_json_bytes, settings.max_lang_json_bytes);
+    let version = scan::cache_version_bounded(
+        level,
+        settings.max_json_bytes,
+        settings.max_lang_json_bytes,
+        settings.max_ast_facts_per_resource,
+    );
     let max_bytes = settings.max_json_bytes;
     let max_lang_bytes = settings.max_lang_json_bytes;
     let result = match cache {
         Some(c) => c.get_or_scan(EXTRACTOR, &version, jar, || {
-            scan::scan_jar(jar, level, max_bytes, max_lang_bytes)
+            scan::scan_jar_bounded(
+                jar,
+                level,
+                max_bytes,
+                max_lang_bytes,
+                settings.max_ast_facts_per_resource,
+            )
         }),
-        None => scan::scan_jar(jar, level, max_bytes, max_lang_bytes),
+        None => scan::scan_jar_bounded(
+            jar,
+            level,
+            max_bytes,
+            max_lang_bytes,
+            settings.max_ast_facts_per_resource,
+        ),
     };
     let archive = file_name_of(jar);
     match result {
@@ -187,16 +311,29 @@ fn scan_vanilla_records(
                     gaps: reasons.clone(),
                 }
             };
+            let artifact_id = ArtifactId::unresolved(&archive).to_string();
+            let presences = partial
+                .present_paths
+                .iter()
+                .map(|path| ResourcePresence {
+                    archive: archive.clone(),
+                    artifact_id: artifact_id.clone(),
+                    writer: "minecraft".to_string(),
+                    path: path.clone(),
+                })
+                .collect();
             VanillaIndexResult {
                 records: partial
                     .asts
                     .into_iter()
                     .map(|ast| ResourceAstRecord {
                         archive: archive.clone(),
+                        artifact_id: artifact_id.clone(),
                         writer: "minecraft".to_string(),
                         ast,
                     })
                     .collect(),
+                presences,
                 coverage,
                 reasons,
             }
@@ -206,6 +343,7 @@ fn scan_vanilla_records(
                 .with_scope("vanilla-resources");
             VanillaIndexResult {
                 records: Vec::new(),
+                presences: Vec::new(),
                 coverage: CoverageState::Unavailable {
                     reasons: vec![gap.clone()],
                 },
@@ -215,27 +353,93 @@ fn scan_vanilla_records(
     }
 }
 
+/// Domain-specific baseline coverage. A successfully scanned client JAR is not a
+/// proof that every hand-authored vanilla datapack domain is present in it.
+fn vanilla_domain_coverage(
+    result: &VanillaIndexResult,
+) -> std::collections::BTreeMap<String, CoverageState> {
+    use crate::model::ResourceDomain as D;
+    let domains = [
+        D::Tag,
+        D::Recipe,
+        D::Model,
+        D::Blockstate,
+        D::LootTable,
+        D::Atlas,
+        D::Advancement,
+        D::Predicate,
+        D::ItemModifier,
+        D::GenericJson,
+    ];
+    let mut coverage = std::collections::BTreeMap::new();
+    if !result.coverage.is_complete() {
+        for domain in domains {
+            coverage.insert(domain.as_str().to_string(), result.coverage.clone());
+        }
+        return coverage;
+    }
+
+    for domain in domains {
+        let state = match domain {
+            // Generated recipes and client assets are represented completely by
+            // the matching game artifact when its scan completed.
+            D::Recipe | D::Model | D::Blockstate | D::Atlas => CoverageState::Complete,
+            // The client JAR does not contain the complete hand-authored datapack
+            // universe for these domains.
+            D::Tag => CoverageState::Unavailable {
+                reasons: vec![CoverageGap::new(
+                    "vanilla-domain-not-contained",
+                    "the client Minecraft JAR does not contain the authoritative vanilla tag universe",
+                )
+                .with_scope("vanilla-tags")],
+            },
+            _ => CoverageState::Partial {
+                gaps: vec![CoverageGap::new(
+                    "vanilla-domain-partial",
+                    format!(
+                        "the Minecraft artifact provides only a partial `{}` baseline",
+                        domain.as_str()
+                    ),
+                )
+                .with_scope(format!("vanilla-{}", domain.as_str()))],
+            },
+        };
+        coverage.insert(domain.as_str().to_string(), state);
+    }
+    coverage
+}
+
 /// Build graph + diffs from the scan and lower everything into facts. Returns
 /// `(facts_emitted, human_summary)`.
 fn emit(
     ctx: &mut CollectCtx<'_>,
-    scan: ResourceAstScan,
+    mut scan: ResourceAstScan,
     vanilla: &VanillaIndexResult,
     settings: ResourceSettings,
 ) -> (usize, String) {
+    let identities = canonical_identity_bindings(ctx.inputs);
+    let extra_owners_normalized = normalize_scan_identities(&mut scan, &identities);
     // The graph indexes pack resources *and* the vanilla index (definitions + tags
     // + `minecraft` ownership); diffs are computed over pack records only, so
     // vanilla is a resolution baseline, never a competing writer.
+
     let mut graph = ResourceGraph::build(&scan.records);
-    for (ns, writer) in &scan.extra_owners {
+    graph.add_presences(&scan.presences);
+    for (ns, writer) in &extra_owners_normalized {
         graph.add_owner(ns.clone(), writer.clone());
     }
-    graph.add_vanilla_index(&vanilla.records, vanilla.coverage.is_complete());
+    graph.add_vanilla_index(
+        &vanilla.records,
+        &vanilla.presences,
+        vanilla_domain_coverage(vanilla),
+    );
     let diffs = diff::compute(&scan.records);
 
     let mut emitted = crate::semantic::facts::emit(
         ctx.store,
+        ctx.inputs,
         &scan.records,
+        &scan.presences,
         &graph,
         &diffs,
         settings.max_ast_facts_per_resource,
@@ -344,19 +548,71 @@ pub fn scan_mods_dir_filtered(
     let jars = intermed_doctor_core::list_jar_archives(dir, scan)
         .map_err(|e| ScanError(format!("read {}: {e}", dir.display())))?;
 
-    let version = scan::cache_version(level, settings.max_json_bytes, settings.max_lang_json_bytes);
+    scan_jars(&jars, cache, settings, level)
+}
+
+fn scan_target_filtered(
+    target: &Target,
+    cache: Option<&JarCache>,
+    scan: &ScanSettings,
+    settings: ResourceSettings,
+    level: ResourceLevel,
+) -> Result<ResourceAstScan, ScanError> {
+    let roots = target.artifact_roots();
+    if roots.is_empty() {
+        return Err(ScanError("target has no artifact roots".into()));
+    }
+    let mut jars = Vec::new();
+    for root in roots {
+        let mut root_jars = intermed_doctor_core::list_jar_archives(&root.path, scan)
+            .map_err(|e| ScanError(format!("read {}: {e}", root.path.display())))?;
+        jars.append(&mut root_jars);
+    }
+    jars.sort();
+    jars.dedup();
+    scan_jars(&jars, cache, settings, level)
+}
+
+fn scan_jars(
+    jars: &[PathBuf],
+    cache: Option<&JarCache>,
+    settings: ResourceSettings,
+    level: ResourceLevel,
+) -> Result<ResourceAstScan, ScanError> {
+    let version = scan::cache_version_bounded(
+        level,
+        settings.max_json_bytes,
+        settings.max_lang_json_bytes,
+        settings.max_ast_facts_per_resource,
+    );
     let max_bytes = settings.max_json_bytes;
     let max_lang_bytes = settings.max_lang_json_bytes;
 
     let scanned: Vec<(String, JarAstScan)> = jars
         .par_iter()
         .map(|jar| {
-            let archive = file_name_of(jar);
+            let archive_name = file_name_of(jar);
+            let archive = intermed_doctor_core::portable_artifact_locator(
+                &jar.display().to_string(),
+                &archive_name,
+            );
             let result = match cache {
                 Some(c) => c.get_or_scan(EXTRACTOR, &version, jar, || {
-                    scan::scan_jar(jar, level, max_bytes, max_lang_bytes)
+                    scan::scan_jar_bounded(
+                        jar,
+                        level,
+                        max_bytes,
+                        max_lang_bytes,
+                        settings.max_ast_facts_per_resource,
+                    )
                 }),
-                None => scan::scan_jar(jar, level, max_bytes, max_lang_bytes),
+                None => scan::scan_jar_bounded(
+                    jar,
+                    level,
+                    max_bytes,
+                    max_lang_bytes,
+                    settings.max_ast_facts_per_resource,
+                ),
             };
             (archive, result)
         })
@@ -366,15 +622,26 @@ pub fn scan_mods_dir_filtered(
     for (archive, result) in scanned {
         match result {
             JarAstScan::Ok(partial) => {
+                let artifact_id = ArtifactId::unresolved(&archive).to_string();
                 for ns in partial.owned_namespaces {
-                    out.extra_owners.push((ns, partial.writer.clone()));
+                    out.extra_owners
+                        .push((ns, partial.writer.clone(), archive.clone()));
                 }
                 for reason in partial.truncations {
                     out.truncations.push((archive.clone(), reason));
                 }
+                for path in partial.present_paths {
+                    out.presences.push(ResourcePresence {
+                        archive: archive.clone(),
+                        artifact_id: artifact_id.clone(),
+                        writer: partial.writer.clone(),
+                        path,
+                    });
+                }
                 for ast in partial.asts {
                     out.records.push(ResourceAstRecord {
                         archive: archive.clone(),
+                        artifact_id: artifact_id.clone(),
                         writer: partial.writer.clone(),
                         ast,
                     });
@@ -396,21 +663,9 @@ pub fn scan_mods_dir_filtered(
     out.extra_owners.dedup();
     out.failures.sort();
     out.truncations.sort();
+    out.presences.sort();
+    out.presences.dedup();
     Ok(out)
-}
-
-fn mods_dir(target: &Target) -> Option<PathBuf> {
-    if let Some(dir) = &target.mods_dir {
-        return Some(dir.clone());
-    }
-    if matches!(target.kind, TargetKind::ModsDir) {
-        return Some(target.path.clone());
-    }
-    let direct = target.path.join("mods");
-    if direct.is_dir() {
-        return Some(direct);
-    }
-    None
 }
 
 fn file_name_of(path: &Path) -> String {
@@ -451,6 +706,109 @@ mod vanilla_index_tests {
         .unwrap();
         zip.write_all(body).unwrap();
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn target_scan_includes_plugin_artifact_root() {
+        let root = temp_dir();
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        write_jar(
+            &plugins.join("plugin.jar"),
+            br#"{"type":"minecraft:crafting_shapeless"}"#,
+        );
+        let target = Target {
+            path: root.clone(),
+            kind: intermed_doctor_core::TargetKind::Server,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let scan = scan_target_filtered(
+            &target,
+            None,
+            &ScanSettings::default(),
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        )
+        .unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].archive, "plugins/plugin.jar");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn equal_basenames_in_different_artifact_roots_remain_distinct() {
+        let root = temp_dir();
+        let mods = root.join("mods");
+        let plugins = root.join("plugins");
+        fs::create_dir_all(&mods).unwrap();
+        fs::create_dir_all(&plugins).unwrap();
+        write_jar(
+            &mods.join("common.jar"),
+            br#"{"type":"minecraft:crafting_shapeless"}"#,
+        );
+        write_jar(
+            &plugins.join("common.jar"),
+            br#"{"type":"minecraft:crafting_shaped"}"#,
+        );
+        let target = Target {
+            path: root.clone(),
+            kind: intermed_doctor_core::TargetKind::Server,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let scan = scan_target_filtered(
+            &target,
+            None,
+            &ScanSettings::default(),
+            ResourceSettings::default(),
+            ResourceLevel::Semantic,
+        )
+        .unwrap();
+        let archives: std::collections::BTreeSet<_> = scan
+            .records
+            .iter()
+            .map(|record| record.archive.as_str())
+            .collect();
+        assert_eq!(
+            archives,
+            std::collections::BTreeSet::from(["mods/common.jar", "plugins/common.jar",])
+        );
+        assert_ne!(scan.records[0].artifact_id, scan.records[1].artifact_id);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn binary_only_extra_owner_uses_canonical_artifact_identity() {
+        let mut inputs = intermed_doctor_core::facts::FactStore::new();
+        inputs
+            .fact("vfs", kind::RESOURCE_WRITER)
+            .subject("canonical_mod")
+            .attr("archive", "binary.jar")
+            .attr("source_locator", "/instance/mods/binary.jar")
+            .attr("artifact_id", "sha256:binary")
+            .source(SourceRef::file("/instance/mods/binary.jar"))
+            .emit();
+        let bindings = canonical_identity_bindings(&inputs);
+        let mut scan = ResourceAstScan {
+            extra_owners: vec![(
+                "binary_namespace".into(),
+                "binary".into(),
+                "mods/binary.jar".into(),
+            )],
+            ..ResourceAstScan::default()
+        };
+        let owners = normalize_scan_identities(&mut scan, &bindings);
+        assert_eq!(
+            owners,
+            vec![("binary_namespace".into(), "canonical_mod".into())]
+        );
     }
 
     #[test]
@@ -499,6 +857,19 @@ mod vanilla_index_tests {
         );
         assert!(complete.coverage.is_complete());
         assert_eq!(complete.records.len(), 1);
+        let by_domain = vanilla_domain_coverage(&complete);
+        assert!(matches!(
+            by_domain.get(crate::model::ResourceDomain::Recipe.as_str()),
+            Some(CoverageState::Complete)
+        ));
+        assert!(matches!(
+            by_domain.get(crate::model::ResourceDomain::Tag.as_str()),
+            Some(CoverageState::Unavailable { .. })
+        ));
+        assert!(matches!(
+            by_domain.get(crate::model::ResourceDomain::LootTable.as_str()),
+            Some(CoverageState::Partial { .. })
+        ));
 
         let partial = scan_vanilla_records(
             Some(&jar),

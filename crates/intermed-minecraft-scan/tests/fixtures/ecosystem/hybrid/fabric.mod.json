@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "sanitized_universal",
+  "version": "1.0.0",
+  "environment": "*",
+  "depends": { "fabricloader": ">=0.15.0" }
+}

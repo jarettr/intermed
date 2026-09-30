@@ -74,17 +74,22 @@ graph. Pairwise loader-dialect checks give the precise per-edge findings
 resolver adds joint satisfiability — when the installed catalog is inconsistent in
 a way no single pair shows, it raises `dependency-unsat:global` with a
 human-readable derivation tree. A bundled library satisfies the dependency it
-provides. Loader and runtime pseudo-dependencies (`minecraft`, `java`, the loader)
+provides only when its loader activation and provider identity are confirmed;
+an unresolved nested archive blocks definitive absence but is not hard truth.
+Loader and runtime pseudo-dependencies (`minecraft`, `java`, the loader)
 are never reported missing.
 
 Version predicates retain the language of their declaring manifest. Fabric uses
 Loader's extended SemVer comparison (including direct prerelease comparison and
-ignored build metadata), Forge and NeoForge use Maven interval syntax, Quilt is
-kept as a distinct dialect, and generic or opaque metadata is evaluated
+ignored build metadata), Forge and NeoForge use Maven interval syntax, Quilt
+implements bare-as-caret plus `^^`/`~~`, and generic or opaque metadata is evaluated
 conservatively. The pairwise checker, update-impact analysis, and global resolver
-all use the same dialect decision. If a predicate cannot be decided, global
-resolution includes the installed candidate rather than turning uncertainty into
-a hard contradiction.
+all use the same dialect decision. Global resolution represents every installed
+raw version with an opaque finite-catalog token. If a predicate or provider cannot
+be decided, uncertainty is retained rather than turned into a hard contradiction.
+Loader-native applicability is retained as well: side-inapplicable constraints are
+excluded, while feature-gated and unresolved conditional constraints block a hard
+conclusion instead of being assumed active.
 
 An implicit dependency is only *required* when its reference is unconditioned: a
 tag entry with `"required": false`, or a recipe gated on a mod being loaded, is
@@ -106,8 +111,10 @@ loot tables, advancements, models, blockstates, atlases, language files,
 `pack.mcmeta`. Which domains are parsed depends on `--resource-level`.
 
 **Concludes:** for each path written by more than one source, whether the result
-is a safe merge (tags, lang — unioned), an override (single-document — one wins by
-load order), or order-dependent (atlases — source order decides). With the
+is a proven safe merge (pure-append tags, compatible sound definitions, and
+non-conflicting language keys), an override (single-document — one wins by load
+order), or order-dependent (atlases — source order decides). Generic JSON is not
+called safe merely because its top-level keys are disjoint. With the
 semantic level, it compares meaning: recipe output overrides, tag replacements,
 disabled recipes, registry-object overrides. It also derives the
 namespace-reference graph that feeds implicit dependencies.
@@ -127,10 +134,12 @@ this: byte-level collisions (identical / override / safe union) from the VFS, an
 *semantic* diffs the bytes cannot express — two writers crafting different outputs
 at the same recipe path, or mapping the same lang key to different text. Severity
 for a semantic diff is derived centrally from the kind of impact it declares plus
-confidence, not hand-assigned per domain. Worldgen and small-registry edges are
-emitted as *soft* (`required: false`): they feed the implicit-dependency model but
-never the dangling-file check, because such an id often resolves to an inline
-sibling, a datapack-merged entry, or a runtime registration.
+confidence, not hand-assigned per domain. Worldgen links use schema-specific
+requiredness: exact links such as placed-feature → configured-feature and dimension
+→ dimension-type are required, while extensible lists and heuristic registry-spec
+edges stay soft. Reference facts retain whether they came from an exact schema,
+a registry heuristic, or an opaque custom payload; hard dependency conclusions
+require exact-schema evidence.
 
 **Stops at:** it resolves references at the namespace level, not the individual id
 level. A recipe that uses a non-existent item within an *installed* mod's
@@ -187,12 +196,14 @@ See the [Mixins guide](../guides/mixins.md).
 
 **Reads:** KubeJS (`.js`) and CraftTweaker (`.zs`) script source on disk.
 
-**Concludes:** recipe removals and replacements that name a concrete id, with a
-confidence label. This feeds the resource analysis: a recipe override that a
-script deletes is not reported as a conflict.
+**Concludes:** typed mutation intent for recipe ids, namespaces, types, input/output
+items, tags, and composite selectors. Multiline calls are normalized before
+classification. Static declarations and runtime observations remain distinct;
+only applicable, selector-matching evidence can caveat a resource conclusion,
+and separate script logs are not assumed to belong to the current run.
 
-**Stops at:** it is a keyword-and-literal read, not a script interpreter. A removal
-whose id is computed at runtime produces no fact rather than a guess.
+**Stops at:** it is a bounded lexical/call parser, not a script interpreter. A
+selector computed at runtime produces no exact-target fact rather than a guess.
 
 ---
 
@@ -263,13 +274,19 @@ itself.
 **Reads:** candidate lists, `.mrpack` manifests, materialized real packs,
 captured logs, Doctor reports, and explicit sandboxed execution plans.
 
-**Concludes:** content-addressed corpus/materialization identity, structured
-runtime observations shared with Layer D, coverage-aware accuracy, semantic
-mismatch clusters, and resumable campaign reports.
+**Concludes:** separately identified corpus content, lock manifest, and
+acquisition provenance; structured runtime observations shared with Layer D;
+per-environment coverage-aware accuracy; semantic mismatch clusters; and
+resumable campaign reports. Inconclusive, harness, infrastructure, and skipped
+attempts are never counted as successful compatibility cells.
 
 **Stops at:** acquisition and loader installation are explicit inputs. Arbitrary
 mod code is never launched without an explicit sandbox policy; a successful
 smoke run only refutes findings whose required runtime region was reached.
+Accuracy uses directional entity attribution (`method/class → mod → artifact`),
+never reverse expansion into sibling classes. Undefined precision is reported as
+`N/A`, and severity suggestions use support, a Wilson lower bound, proof kind,
+impact, and the finding trust contract.
 
 See [the command reference](commands.md#lab).
 
@@ -290,7 +307,7 @@ layers; the cross-layer correlations that currently fire:
 | Mixins × Logs | A runtime mixin-apply failure in a supplied log upgrades a static apply *hypothesis* to a confirmed finding. |
 | Mixins × Metadata / Security | A mixin's target subsystem yields a behaviour-grounded capability and a security-sensitivity flag (networking, class loading, (de)serialization, save IO). |
 | SBOM × Security | An artifact with unresolved identity that also references a dangerous capability needs more provenance review than either signal alone; unresolved identity is not itself a malware or safety verdict. |
-| Scripts × Resources | A recipe a KubeJS/CraftTweaker script removes is not reported as a resource conflict — the runtime removal suppresses the static collision. |
+| Scripts × Resources | Applicable typed selectors caveat matching static resource conclusions. Static intent is weaker than a same-file/current-session runtime observation; unrelated client/startup selectors and historical logs do not suppress server recipe findings. |
 | Resources × Dependencies | The namespace-reference graph from resources drives implicit dependencies and the `impact` blast radius — see [Dependencies](../guides/dependencies.md#implicit-dependencies). |
 
 Each link only fires when the inputs are present: the mixin links need

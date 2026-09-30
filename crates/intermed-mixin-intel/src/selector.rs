@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 pub enum SelectorVerification {
     /// The selector matched at least one instruction in the target body.
     Matched,
+    /// The owner/name/descriptor selector matched, but one or more `@At`
+    /// constraints (currently slice/implementation-specific args) could not be
+    /// proven against the indexed bytecode.
+    MatchedPartial,
     /// `HEAD`/`RETURN`/`TAIL` — always present on an existing method.
     MatchesByConstruction,
     /// The selector found zero matching instructions — the injector won't apply.
@@ -38,6 +42,7 @@ impl SelectorVerification {
     pub fn as_str(self) -> &'static str {
         match self {
             SelectorVerification::Matched => "matched",
+            SelectorVerification::MatchedPartial => "matched-partial",
             SelectorVerification::MatchesByConstruction => "matches-by-construction",
             SelectorVerification::NoMatch => "no-match",
             SelectorVerification::OrdinalOutOfRange => "ordinal-out-of-range",
@@ -61,8 +66,15 @@ impl SelectorVerification {
     pub fn is_matched(self) -> bool {
         matches!(
             self,
-            SelectorVerification::Matched | SelectorVerification::MatchesByConstruction
+            SelectorVerification::Matched
+                | SelectorVerification::MatchedPartial
+                | SelectorVerification::MatchesByConstruction
         )
+    }
+
+    /// `true` only when every modeled selector constraint was checked.
+    pub fn is_fully_verified(self) -> bool {
+        matches!(self, Self::Matched | Self::MatchesByConstruction)
     }
 }
 
@@ -109,6 +121,8 @@ mod tests {
         assert!(SelectorVerification::OrdinalOutOfRange.is_failure());
         assert!(!SelectorVerification::Unsupported.is_failure());
         assert!(SelectorVerification::Matched.is_matched());
+        assert!(SelectorVerification::MatchedPartial.is_matched());
+        assert!(!SelectorVerification::MatchedPartial.is_fully_verified());
         assert!(SelectorVerification::MatchesByConstruction.is_matched());
         assert!(!SelectorVerification::Unchecked.is_matched());
     }

@@ -49,6 +49,7 @@ fn provider_with_out_of_range_version_is_flagged() {
         .attr("provides", "libfoo")
         .attr("version", "1.0.0")
         .attr("bundled", true)
+        .attr("identity_certainty", "confirmed")
         .emit();
 
     let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
@@ -86,6 +87,7 @@ fn optional_out_of_range_provider_is_not_described_as_startup_blocking() {
         .subject("compatibility-mod")
         .attr("provides", "optional-api")
         .attr("version", "4.6.1")
+        .attr("identity_certainty", "confirmed")
         .emit();
 
     let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
@@ -125,6 +127,7 @@ fn provider_with_in_range_version_satisfies() {
         .subject("modb")
         .attr("provides", "libfoo")
         .attr("version", "2.3.0")
+        .attr("identity_certainty", "confirmed")
         .emit();
 
     let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
@@ -236,5 +239,49 @@ fn absent_provider_still_missing() {
         findings
             .iter()
             .any(|f| f.id == "missing-dependency:moda->libfoo")
+    );
+}
+
+#[test]
+fn inactive_cross_loader_alias_cannot_satisfy_hard_dependency() {
+    let mut store = FactStore::new();
+    store
+        .fact("meta", kind::MOD)
+        .subject("consumer")
+        .attr("version", "1.0.0")
+        .attr("loader", "neoforge")
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("consumer")
+        .attr("dep", "bridge-api")
+        .attr("range", ">=1.0.0")
+        .attr("mandatory", true)
+        .attr("relation", "depends")
+        .emit();
+    store
+        .fact("meta", kind::PROVIDED_DEPENDENCY)
+        .subject("fabric-candidate")
+        .attr("provides", "bridge-api")
+        .attr("version", "9.0.0")
+        .attr("identity_certainty", "cross-loader-unresolved")
+        .attr("activation", "descriptor-unresolved")
+        .emit();
+
+    let findings = DependencyRule.evaluate(&ctx_from(&store)).unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|finding| finding.id == "provided-version-unknown:consumer->bridge-api")
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.id == "missing-dependency:consumer->bridge-api")
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Error)
     );
 }

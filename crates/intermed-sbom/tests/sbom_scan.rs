@@ -290,7 +290,11 @@ fn content_cache_does_not_freeze_pack_specific_corpus_trust() {
     assert!(!without_lock.records[0].in_corpus_lock);
     assert_eq!(without_lock.records[0].trust_breakdown.corpus_lock, 0);
     assert!(with_lock.records[0].in_corpus_lock);
-    assert_eq!(with_lock.records[0].trust_breakdown.corpus_lock, 7);
+    assert_eq!(
+        with_lock.records[0].corpus_match,
+        intermed_sbom::CorpusMatchQuality::KnownProjectIdentity
+    );
+    assert_eq!(with_lock.records[0].trust_breakdown.corpus_lock, 4);
     assert!(
         cache.stats().hits >= 1,
         "second scan must exercise the cache hit"
@@ -332,6 +336,10 @@ fn materialization_hash_corroborates_descriptorless_jar_identity() {
 
     assert!(!without_manifest.records[0].in_corpus_lock);
     assert!(with_manifest.records[0].in_corpus_lock);
+    assert_eq!(
+        with_manifest.records[0].corpus_match,
+        intermed_sbom::CorpusMatchQuality::ExactArtifactPin
+    );
     assert_eq!(with_manifest.records[0].trust_breakdown.corpus_lock, 7);
     assert!(cache.stats().hits >= 1);
     std::fs::remove_dir_all(root).ok();
@@ -504,6 +512,14 @@ fn valid_jar_signature_is_cryptographically_verified_when_jdk_is_available() {
     );
     assert!(scan.records[0].signed);
     assert_eq!(scan.records[0].trust_breakdown.verified_signature, 10);
+    assert_eq!(
+        scan.records[0].provenance.binary_integrity,
+        intermed_sbom::BinaryIntegrity::SignatureVerified
+    );
+    assert_eq!(
+        scan.records[0].provenance.cryptographic_authenticity,
+        intermed_sbom::CryptographicAuthenticity::Unestablished
+    );
 
     // Adding content after signing must not retain the verified classification:
     // the new entry is outside the signed digest set.

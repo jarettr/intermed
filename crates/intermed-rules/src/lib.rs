@@ -121,29 +121,20 @@ pub fn requirements_for_pack(pack: &RulePack) -> intermed_doctor_core::RuleRequi
 
 fn layer_for_fact_kind(kind: &str) -> intermed_doctor_core::Layer {
     use intermed_doctor_core::Layer;
-    if kind.starts_with("mixin_") || kind == "classpath_coverage" {
-        Layer::Mixin
-    } else if kind.starts_with("resource_") || kind == "archive_collision" {
-        Layer::Resource
-    } else if kind.starts_with("runtime_")
-        || kind == "log_signal"
-        || kind == "crash_anchor"
-        || kind == "throwable_node"
-        || kind == "stack_frame"
-    {
-        Layer::Log
-    } else if kind.starts_with("sbom_") || kind == "artifact_provenance" {
-        Layer::Sbom
-    } else if kind.starts_with("security_") || kind == "sensitive_api_usage" {
-        Layer::Security
-    } else if kind.starts_with("spark_") || kind.starts_with("hot_") {
-        Layer::Performance
-    } else if kind.contains("dependency") || kind == "provides" {
-        Layer::Dependency
-    } else if kind.starts_with("resource_ast") || kind.starts_with("data_") {
-        Layer::DataSemantics
-    } else {
-        Layer::Metadata
+    use intermed_doctor_core::facts::kind::FactLayer;
+    match intermed_doctor_core::facts::kind::layer(kind) {
+        Some(FactLayer::TargetDetection) => Layer::TargetDetection,
+        Some(FactLayer::Metadata) => Layer::Metadata,
+        Some(FactLayer::Dependency) => Layer::Dependency,
+        Some(FactLayer::Log) => Layer::Log,
+        Some(FactLayer::Resource) => Layer::Resource,
+        Some(FactLayer::Mixin) => Layer::Mixin,
+        Some(FactLayer::Security) => Layer::Security,
+        Some(FactLayer::Sbom) => Layer::Sbom,
+        Some(FactLayer::Performance) => Layer::Performance,
+        Some(FactLayer::Rules) => Layer::Rules,
+        Some(FactLayer::DataSemantics) => Layer::DataSemantics,
+        None => panic!("rule references unregistered fact kind `{kind}`"),
     }
 }
 
@@ -422,15 +413,19 @@ mod logic_tests {
     #[test]
     fn sbom_security_correlation_flags_low_trust() {
         let mut store = FactStore::new();
+        let artifact_id = format!("sha256:{}", "a".repeat(64));
         store
             .fact("sbom", kind::SBOM)
-            .subject("shady.jar")
+            .subject(artifact_id.clone())
+            .attr("archive", "shady.jar")
             .attr("trust_score", 10_i64)
+            .attr("provenance_correlation_eligible", true)
             .emit();
         store
             .fact("security", kind::USES_PROCESS_SPAWN)
             .subject("shady.jar")
             .attr("archive", "shady.jar")
+            .attr("artifact_id", artifact_id.clone())
             .emit();
         let target = Target {
             path: ".".into(),
@@ -446,17 +441,19 @@ mod logic_tests {
         assert!(
             findings
                 .iter()
-                .any(|f| f.id == "low-trust-capability:shady.jar"),
+                .any(|f| f.id == format!("low-trust-capability:{artifact_id}")),
             "findings: {:?}",
             findings.iter().map(|f| &f.id).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn v1_pack_upgrades_to_v2() {
-        let v1 = default_core_pack();
-        assert_eq!(v1.schema, RULE_PACK_SCHEMA);
+    fn offline_v1_struct_upgrade_remains_available_but_v1_runtime_load_is_removed() {
+        let mut v1 = default_core_pack_v2();
+        v1.schema = RULE_PACK_SCHEMA.to_string();
+        assert!(validate_rule_pack(&v1).is_err());
         let v2 = convert_v1_to_v2(v1);
         assert_eq!(v2.schema, RULE_PACK_SCHEMA_V2);
+        assert!(validate_rule_pack(&v2).is_ok());
     }
 }

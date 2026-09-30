@@ -463,7 +463,7 @@ fn evaluate_correlation<'a>(
         }
 
         let mut vars = vars_from_bindings(&bindings);
-        vars.insert("subject".to_string(), anchor.subject.clone());
+        vars.insert("subject".to_string(), anchor.subject.to_string());
         let labels: BTreeSet<String> = related.iter().map(|f| f.kind.replace('_', " ")).collect();
         vars.insert(
             "capabilities".to_string(),
@@ -617,7 +617,11 @@ pub fn group_distinct_findings<'a>(
 /// single source of truth for "does this fact match a `FactFinding` rule's filters"
 /// (the `where`-string refinement is applied separately by the caller).
 pub fn matches_where_v1(fact: &Fact, spec: &RuleSpec) -> bool {
-    (spec.input_kinds.is_empty() || spec.input_kinds.iter().any(|k| k == &fact.kind))
+    (spec.input_kinds.is_empty()
+        || spec
+            .input_kinds
+            .iter()
+            .any(|k| k.as_str() == fact.kind.as_str()))
         && spec
             .where_all
             .iter()
@@ -644,7 +648,7 @@ pub fn matching_fact_ids(
 
 fn vars_from_fact(fact: &Fact) -> VarMap {
     let mut vars = VarMap::new();
-    vars.insert("subject".to_string(), fact.subject.clone());
+    vars.insert("subject".to_string(), fact.subject.to_string());
     for (k, v) in &fact.attributes {
         if let Some(s) = v.as_str() {
             vars.insert(format!("attr:{k}"), s.to_string());
@@ -661,8 +665,8 @@ fn vars_from_fact(fact: &Fact) -> VarMap {
 fn vars_from_bindings(bindings: &BTreeMap<String, &Fact>) -> VarMap {
     let mut vars = VarMap::new();
     for (alias, fact) in bindings {
-        vars.insert(format!("{alias}.subject"), fact.subject.clone());
-        vars.insert("subject".to_string(), fact.subject.clone());
+        vars.insert(format!("{alias}.subject"), fact.subject.to_string());
+        vars.insert("subject".to_string(), fact.subject.to_string());
         for (k, v) in &fact.attributes {
             let rendered = match v {
                 intermed_doctor_core::facts::AttrValue::Str(s) => s.clone(),
@@ -815,7 +819,7 @@ impl<'a> EvidenceCache<'a> {
             .store
             .all()
             .iter()
-            .filter(|f| f.kind == related.kind)
+            .filter(|f| f.kind.as_str() == related.kind)
             .collect();
         let equijoins = plan_equijoins(&related.on, "primary", "related");
         let keyed = equijoins.first().map(|k| {

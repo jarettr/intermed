@@ -86,13 +86,138 @@ pub fn version_in_range_with_dialect(
         return Some(true);
     }
     match dialect {
-        VersionDialect::FabricExtendedSemver | VersionDialect::Quilt => {
-            fabric_version_in_range(version, range)
-        }
+        VersionDialect::FabricExtendedSemver => fabric_version_in_range(version, range),
+        VersionDialect::Quilt => quilt_version_in_range(version, range),
         VersionDialect::MavenRange => maven_version_in_range(version, range),
         VersionDialect::GenericSemver => generic_version_in_range(version, range),
         VersionDialect::Opaque => opaque_version_in_range(version, range),
     }
+}
+
+fn quilt_version_in_range(version: &str, range: &str) -> Option<bool> {
+    if !range.starts_with(['{', '[']) {
+        return quilt_constraint_matches(version, range);
+    }
+    let expression = serde_json::from_str::<serde_json::Value>(range).ok()?;
+    evaluate_quilt_version_expr(version, &expression)
+}
+
+fn evaluate_quilt_version_expr(version: &str, expression: &serde_json::Value) -> Option<bool> {
+    match expression {
+        serde_json::Value::String(range) => quilt_constraint_matches(version, range),
+        // Deprecated Quilt syntax: an array of version specifiers is OR.
+        serde_json::Value::Array(children) => {
+            let mut undecidable = false;
+            for child in children {
+                match evaluate_quilt_version_expr(version, child) {
+                    Some(true) => return Some(true),
+                    Some(false) => {}
+                    None => undecidable = true,
+                }
+            }
+            (!undecidable).then_some(false)
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(all) = object.get("all").and_then(serde_json::Value::as_array) {
+                let mut undecidable = false;
+                for child in all {
+                    match evaluate_quilt_version_expr(version, child) {
+                        Some(false) => return Some(false),
+                        Some(true) => {}
+                        None => undecidable = true,
+                    }
+                }
+                return (!undecidable).then_some(true);
+            }
+            if let Some(any) = object.get("any").and_then(serde_json::Value::as_array) {
+                let mut undecidable = false;
+                for child in any {
+                    match evaluate_quilt_version_expr(version, child) {
+                        Some(true) => return Some(true),
+                        Some(false) => {}
+                        None => undecidable = true,
+                    }
+                }
+                return (!undecidable).then_some(false);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Quilt's QMJ constraint language resembles Fabric's but is not an alias for
+/// it. Bare constraints mean `^`, while `^^`/`~~` match the named components
+/// without imposing a lower bound.
+fn quilt_constraint_matches(version: &str, range: &str) -> Option<bool> {
+    let version = parse_fabric_version(version)?;
+    let branches = range
+        .split("||")
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .collect::<Vec<_>>();
+    if branches.is_empty() {
+        return None;
+    }
+    let mut saw_valid = false;
+    for branch in branches {
+        let tokens = branch.split_whitespace().collect::<Vec<_>>();
+        if tokens.is_empty() {
+            return None;
+        }
+        let matches = tokens
+            .iter()
+            .map(|token| quilt_token_matches(&version, token))
+            .collect::<Option<Vec<_>>>()?;
+        saw_valid = true;
+        if matches.into_iter().all(|matched| matched) {
+            return Some(true);
+        }
+    }
+    saw_valid.then_some(false)
+}
+
+fn quilt_token_matches(version: &FabricVersion, token: &str) -> Option<bool> {
+    if token == "*" {
+        return Some(true);
+    }
+    for (prefix, predicate) in [
+        (">=", OrderingPredicate::GreaterEqual),
+        ("<=", OrderingPredicate::LessEqual),
+        (">", OrderingPredicate::Greater),
+        ("<", OrderingPredicate::Less),
+        ("=", OrderingPredicate::Equal),
+    ] {
+        if let Some(raw) = token.strip_prefix(prefix) {
+            return Some(predicate.test(version.cmp(&parse_fabric_version(raw)?)));
+        }
+    }
+    if let Some(raw) = token.strip_prefix("^^") {
+        let required = parse_fabric_version(raw)?;
+        return Some(version.components.first() == required.components.first());
+    }
+    if let Some(raw) = token.strip_prefix("~~") {
+        let required = parse_fabric_version(raw)?;
+        return Some(
+            version.components.first() == required.components.first()
+                && version.components.get(1).copied().unwrap_or(0)
+                    == required.components.get(1).copied().unwrap_or(0),
+        );
+    }
+    let (raw, same_minor) = if let Some(raw) = token.strip_prefix('^') {
+        (raw, false)
+    } else if let Some(raw) = token.strip_prefix('~') {
+        (raw, true)
+    } else {
+        // QMJ: a bare version has the same meaning as `^version`.
+        (token, false)
+    };
+    let required = parse_fabric_version(raw)?;
+    let components_match = version.components.first() == required.components.first()
+        && (!same_minor
+            || version.components.get(1).copied().unwrap_or(0)
+                == required.components.get(1).copied().unwrap_or(0));
+    Some(components_match && version >= &required)
 }
 
 fn generic_version_in_range(version: &str, range: &str) -> Option<bool> {
@@ -1055,5 +1180,65 @@ mod tests {
             "1.20.1-forge"
         );
         assert_eq!(parse_lenient("2.4_fabric").unwrap().to_string(), "2.4.0");
+    }
+
+    #[test]
+    fn quilt_compound_version_expressions_preserve_all_and_any() {
+        let all = r#"{"all":[">=1.0.0","<2.0.0"]}"#;
+        assert_eq!(
+            version_in_range_with_dialect("1.5.0", all, VersionDialect::Quilt),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.1.0", all, VersionDialect::Quilt),
+            Some(false)
+        );
+        let any = r#"{"any":["<1.0.0",">=3.0.0"]}"#;
+        assert_eq!(
+            version_in_range_with_dialect("3.1.0", any, VersionDialect::Quilt),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.0.0", any, VersionDialect::Quilt),
+            Some(false)
+        );
+        let deprecated_any = r#"["<1.0.0",">=3.0.0"]"#;
+        assert_eq!(
+            version_in_range_with_dialect("3.1.0", deprecated_any, VersionDialect::Quilt),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.0.0", deprecated_any, VersionDialect::Quilt),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn quilt_bare_double_caret_and_double_tilde_follow_qmj() {
+        let q = VersionDialect::Quilt;
+        assert_eq!(
+            version_in_range_with_dialect("1.1.0", "1.0.0", q),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.0.0", "1.0.0", q),
+            Some(false)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.1.0", "^^1.2.3", q),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("2.0.0", "^^1.2.3", q),
+            Some(false)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.2.0", "~~1.2.3", q),
+            Some(true)
+        );
+        assert_eq!(
+            version_in_range_with_dialect("1.3.0", "~~1.2.3", q),
+            Some(false)
+        );
     }
 }

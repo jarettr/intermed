@@ -8,6 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::refmap::{MappingCompatibility, MappingResolution, TinyMappings};
 use crate::site::ApplicationSite;
 
 /// How precisely a Spark hot method matches a mixin application site, best first.
@@ -133,6 +134,53 @@ pub fn grade_match(
     }
 }
 
+/// Mapping-aware variant for Spark samples expressed in another namespace.
+/// `MappedOwnerMethod` is returned only after an overload-safe, version-verified
+/// class+method translation; spelling heuristics never receive that grade.
+pub fn grade_match_with_mappings(
+    hot_owner: &str,
+    hot_method: &str,
+    hot_descriptor: Option<&str>,
+    hot_namespace: &str,
+    site_namespace: &str,
+    mappings: &TinyMappings,
+    site: &ApplicationSite,
+) -> MatchQuality {
+    let direct = grade_match(hot_owner, hot_method, hot_descriptor, site);
+    if direct.is_method_exact()
+        || !matches!(
+            mappings.mapping_compatibility(),
+            MappingCompatibility::Compatible
+        )
+    {
+        return direct;
+    }
+    let Some(hot_desc) = hot_descriptor else {
+        return direct;
+    };
+    let MappingResolution::Exact { value, .. } = mappings.resolve_method_symbol(
+        hot_owner,
+        method_name(hot_method),
+        hot_desc,
+        hot_namespace,
+        site_namespace,
+        mappings.target_minecraft_version(),
+    ) else {
+        return direct;
+    };
+    let mapped_owner = normalize_class(&value.owner);
+    let site_owner = normalize_class(&site.target_class);
+    let site_descriptor = descriptor(&site.target_method);
+    if mapped_owner == site_owner
+        && value.name == method_name(&site.target_method)
+        && site_descriptor == Some(value.descriptor.as_str())
+    {
+        MatchQuality::MappedOwnerMethod
+    } else {
+        direct
+    }
+}
+
 /// May a correlation drive a *high-severity* performance finding? Only when the hot
 /// method is pinned exactly, the handler is destructive, the side matches, and the
 /// site resolution is confident (plan Phase 12).
@@ -146,6 +194,21 @@ pub fn allows_high_severity(
         && is_destructive_operation(operation)
         && side_matches
         && site_confidence >= 70
+}
+
+/// Precision-axis-aware policy for real application sites.
+pub fn allows_high_severity_for_site(
+    quality: MatchQuality,
+    side_matches: bool,
+    site: &ApplicationSite,
+) -> bool {
+    quality.is_method_exact()
+        && is_destructive_operation(&site.operation)
+        && side_matches
+        && site.precision.identity >= 70
+        && site.precision.activation >= 70
+        && site.precision.verification >= 70
+        && site.precision.effect >= 70
 }
 
 #[cfg(test)]
@@ -163,6 +226,8 @@ mod tests {
         ApplicationSite {
             site_id: "s".into(),
             mod_id: "mod".into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: "mod.jar".into(),
             config_path: "m.json".into(),
             mixin_class: "mod.M".into(),
@@ -186,6 +251,7 @@ mod tests {
             },
             target_resolution: crate::target_res::TargetResolution::Unchecked,
             selector_verification: crate::selector::SelectorVerification::Unchecked,
+            selector_offsets: Vec::new(),
             signature_check: crate::signature::SignatureCheck::Unchecked,
             local_capture_status: crate::locals::LocalCaptureStatus::NoLocalCapture,
             side: crate::model::Side::Both,
@@ -195,8 +261,15 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence,
             imprecision_reasons: Vec::new(),
+            precision: crate::site::SitePrecision {
+                identity: 100,
+                activation: 100,
+                verification: 100,
+                effect: 100,
+            },
         }
     }
 
@@ -295,5 +368,43 @@ mod tests {
             40
         ));
         let _ = s;
+    }
+
+    #[test]
+    fn mapped_owner_method_requires_version_verified_overload_safe_edge() {
+        let tiny = "tiny\t2\t0\tintermediary\tnamed\n\
+                    c\tnet/minecraft/class_1\tnet/minecraft/Server\n\
+                    \tm\t()V\tmethod_1\ttick\n";
+        let mappings =
+            TinyMappings::parse_with_identity(tiny, "mappings-1.20.1.tiny", Some("1.20.1".into()))
+                .unwrap()
+                .with_target_minecraft_version(Some("1.20.1".into()));
+        let s = site("net.minecraft.Server", "tick()V", "redirect", 100);
+        assert_eq!(
+            grade_match_with_mappings(
+                "net/minecraft/class_1",
+                "method_1",
+                Some("()V"),
+                "intermediary",
+                "named",
+                &mappings,
+                &s,
+            ),
+            MatchQuality::MappedOwnerMethod
+        );
+
+        let unverified = TinyMappings::parse(tiny).unwrap();
+        assert_ne!(
+            grade_match_with_mappings(
+                "net/minecraft/class_1",
+                "method_1",
+                Some("()V"),
+                "intermediary",
+                "named",
+                &unverified,
+                &s,
+            ),
+            MatchQuality::MappedOwnerMethod
+        );
     }
 }

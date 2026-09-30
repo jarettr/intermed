@@ -28,7 +28,26 @@ use crate::model::{
 };
 
 /// Schema tag for the cached resource-AST payload (cache-invalidating).
-pub const RESOURCE_AST_CACHE_SCHEMA: &str = "intermed-resource-ast-cache-v5";
+pub const RESOURCE_AST_CACHE_SCHEMA: &str = "intermed-resource-ast-cache-v8";
+
+/// Bounded semantic extraction limits. The raw entry is already byte-bounded by
+/// the ZIP scanner; these limits bound the transient JSON walk and reference graph.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractionLimits {
+    pub max_references: usize,
+    pub max_nodes: usize,
+    pub max_depth: usize,
+}
+
+impl Default for ExtractionLimits {
+    fn default() -> Self {
+        Self {
+            max_references: 256,
+            max_nodes: 65_536,
+            max_depth: 128,
+        }
+    }
+}
 
 /// Uniform output of a single domain parser.
 pub struct DomainParse {
@@ -67,7 +86,7 @@ pub fn parser_version() -> String {
     format!(
         // Trailing literal covers cross-cutting hashing behaviour (generic-json
         // fingerprinting, content-hash for coarse registry domains).
-        "{}+{}+{}+{}+{}+{}+{}+{}+{}+{}+{}+genjson-r3",
+        "{}+{}+{}+{}+{}+{}+{}+{}+{}+{}+{}+genjson-r6",
         tag::TAG_AST_VERSION,
         recipe::RECIPE_AST_VERSION,
         lang::LANG_AST_VERSION,
@@ -86,11 +105,23 @@ pub fn parser_version() -> String {
 /// malformed resources become `ParseStatus::Invalid` with a diagnostic.
 #[must_use]
 pub fn parse_resource(path: &str, bytes: &[u8], level: ResourceLevel) -> CachedResourceAst {
+    parse_resource_with_limits(path, bytes, level, ExtractionLimits::default())
+}
+
+/// Parse one resource while enforcing extraction limits before domain parsers
+/// allocate reference vectors.
+#[must_use]
+pub fn parse_resource_with_limits(
+    path: &str,
+    bytes: &[u8],
+    level: ResourceLevel,
+    limits: ExtractionLimits,
+) -> CachedResourceAst {
     let domain = classify::classify(path);
-    let parse = if domain.parsed_at(level) {
-        parse_domain(domain, path, bytes)
+    let (parse, reference_gap) = if domain.parsed_at(level) {
+        parse_domain(domain, path, bytes, limits)
     } else {
-        DomainParse::skipped()
+        (DomainParse::skipped(), None)
     };
 
     let mut references = parse.references;
@@ -121,25 +152,56 @@ pub fn parse_resource(path: &str, bytes: &[u8], level: ResourceLevel) -> CachedR
         semantic_hash,
         summary: parse.summary,
         references,
+        references_complete: reference_gap.is_none(),
+        reference_gap,
         diagnostics: parse.diagnostics,
     }
 }
 
-fn parse_domain(domain: ResourceDomain, path: &str, bytes: &[u8]) -> DomainParse {
+fn parse_domain(
+    domain: ResourceDomain,
+    path: &str,
+    bytes: &[u8],
+    limits: ExtractionLimits,
+) -> (DomainParse, Option<String>) {
     // Lang has a non-JSON `.lang` variant; everything else is JSON-rooted.
     if domain == ResourceDomain::Lang && path.ends_with(".lang") {
-        return lang::parse_properties(bytes);
+        return (lang::parse_properties(bytes), None);
     }
     let value = match crate::syntax::json::parse(bytes) {
         Ok(v) => v,
         Err(e) => {
-            return DomainParse::invalid(vec![ResourceParseDiagnostic {
-                severity: crate::model::DiagnosticSeverity::Error,
-                message: format!("invalid JSON: {e}"),
-            }]);
+            return (
+                DomainParse::invalid(vec![ResourceParseDiagnostic {
+                    severity: crate::model::DiagnosticSeverity::Error,
+                    message: format!("invalid JSON: {e}"),
+                }]),
+                None,
+            );
         }
     };
-    match domain {
+    // Lang values are display text, not registry references; `pack.mcmeta`
+    // likewise has no reference extractor.  Counting every colon-containing
+    // localized sentence against the reference budget made large, perfectly
+    // valid language catalogs look incomplete even though their full semantic
+    // summary was available.
+    let count_reference_candidates =
+        !matches!(domain, ResourceDomain::Lang | ResourceDomain::PackMcmeta);
+    if let Some(reason) = extraction_gap(&value, limits, count_reference_candidates) {
+        return (
+            DomainParse {
+                summary: ResourceSummary::Generic,
+                references: Vec::new(),
+                diagnostics: vec![ResourceParseDiagnostic {
+                    severity: crate::model::DiagnosticSeverity::Warning,
+                    message: reason.clone(),
+                }],
+                status: ParseStatus::PartiallyParsed,
+            },
+            Some(reason),
+        );
+    }
+    let parsed = match domain {
         ResourceDomain::Tag => tag::parse(path, &value),
         ResourceDomain::Recipe => recipe::parse(&value),
         ResourceDomain::Lang => lang::parse_json(&value),
@@ -173,27 +235,101 @@ fn parse_domain(domain: ResourceDomain, path: &str, bytes: &[u8]) -> DomainParse
             }
         }
         _ => DomainParse::skipped(),
-    }
+    };
+    (parsed, None)
 }
 
-/// Recursively canonicalizes JSON by sorting arrays of primitives (strings/numbers)
-/// so that set-like structures yield a consistent hash. `serde_json::Value` already
-/// uses BTreeMap for objects, so object keys are sorted automatically.
+fn extraction_gap(
+    value: &serde_json::Value,
+    limits: ExtractionLimits,
+    count_reference_candidates: bool,
+) -> Option<String> {
+    fn walk(
+        value: &serde_json::Value,
+        depth: usize,
+        limits: ExtractionLimits,
+        nodes: &mut usize,
+        candidates: &mut usize,
+        count_reference_candidates: bool,
+    ) -> Option<String> {
+        if depth > limits.max_depth {
+            return Some(format!(
+                "resource JSON depth exceeds extraction limit {}",
+                limits.max_depth
+            ));
+        }
+        *nodes = nodes.saturating_add(1);
+        if *nodes > limits.max_nodes {
+            return Some(format!(
+                "resource JSON nodes exceed extraction limit {}",
+                limits.max_nodes
+            ));
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                for child in map.values() {
+                    if let Some(gap) = walk(
+                        child,
+                        depth + 1,
+                        limits,
+                        nodes,
+                        candidates,
+                        count_reference_candidates,
+                    ) {
+                        return Some(gap);
+                    }
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for child in values {
+                    if let Some(gap) = walk(
+                        child,
+                        depth + 1,
+                        limits,
+                        nodes,
+                        candidates,
+                        count_reference_candidates,
+                    ) {
+                        return Some(gap);
+                    }
+                }
+            }
+            serde_json::Value::String(text) if count_reference_candidates && text.contains(':') => {
+                *candidates = candidates.saturating_add(1);
+                if *candidates > limits.max_references {
+                    return Some(format!(
+                        "resource reference candidates exceed extraction limit {}",
+                        limits.max_references
+                    ));
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
+    let mut nodes = 0;
+    let mut candidates = 0;
+    walk(
+        value,
+        0,
+        limits,
+        &mut nodes,
+        &mut candidates,
+        count_reference_candidates,
+    )
+}
+
+/// Recursively canonicalizes JSON by ensuring object keys are sorted. Array order
+/// is preserved, so structural resources (loot tables, shaped recipes, blockstates)
+/// retain their positional semantics. `serde_json::Value` uses BTreeMap for objects
+/// by default, so object keys are already sorted; this function ensures nested
+/// structures follow the same contract (a pass-through when `preserve_order` is off).
 fn canonicalize_json(val: &mut serde_json::Value) {
     match val {
         serde_json::Value::Array(arr) => {
             for v in arr.iter_mut() {
                 canonicalize_json(v);
-            }
-            // If all elements are strings, sort them as a set.
-            if arr.iter().all(|v| v.is_string()) {
-                arr.sort_by(|a, b| a.as_str().unwrap().cmp(b.as_str().unwrap()));
-            } else if arr.iter().all(|v| v.is_number()) {
-                arr.sort_by(|a, b| {
-                    let f_a = a.as_f64().unwrap_or(0.0);
-                    let f_b = b.as_f64().unwrap_or(0.0);
-                    f_a.partial_cmp(&f_b).unwrap_or(std::cmp::Ordering::Equal)
-                });
             }
         }
         serde_json::Value::Object(obj) => {
@@ -252,7 +388,12 @@ pub fn parse_conditions(
 
 fn parse_condition(v: &serde_json::Value) -> Option<crate::model::ResourceCondition> {
     use crate::model::ResourceCondition;
-    let obj = v.as_object()?;
+    let Some(obj) = v.as_object() else {
+        return Some(ResourceCondition::Malformed {
+            condition_type: "unknown".to_string(),
+            reason: "condition is not an object".to_string(),
+        });
+    };
     // Forge/NeoForge name the discriminator `type`; Fabric's `fabric:load_conditions`
     // names it `condition`. Reading only `type` dropped every Fabric load-gate, so
     // mod-gated compat recipes (`fabric:all_mods_loaded: [betterend]`) looked
@@ -260,54 +401,65 @@ fn parse_condition(v: &serde_json::Value) -> Option<crate::model::ResourceCondit
     let ctype = obj
         .get("type")
         .or_else(|| obj.get("condition"))
-        .and_then(|t| t.as_str())?;
+        .and_then(|t| t.as_str());
+    let Some(ctype) = ctype else {
+        return Some(ResourceCondition::Malformed {
+            condition_type: "unknown".to_string(),
+            reason: "condition has no string `type` or `condition` discriminator".to_string(),
+        });
+    };
+
+    let malformed = |reason: &str| ResourceCondition::Malformed {
+        condition_type: ctype.to_string(),
+        reason: reason.to_string(),
+    };
 
     match ctype {
         "forge:mod_loaded" | "neoforge:mod_loaded" => {
-            let modid = obj
-                .get("modid")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(ResourceCondition::ModLoaded { modid })
+            match obj.get("modid").and_then(|v| v.as_str()) {
+                Some(modid) if !modid.is_empty() => Some(ResourceCondition::ModLoaded {
+                    modid: modid.to_string(),
+                }),
+                _ => Some(malformed("mod-loaded condition has no non-empty `modid`")),
+            }
         }
         // Fabric mod-list gates carry a `values` array of mod ids (`all` ⇒ And,
         // `any` ⇒ Or); they also tolerate a Forge-style single `modid`.
         "fabric:all_mods_loaded" | "fabric:any_mod_loaded" => {
             let mods = fabric_mod_loaded_list(obj);
             match (mods.len(), ctype == "fabric:any_mod_loaded") {
-                (0, _) => Some(ResourceCondition::Other {
-                    condition_type: ctype.to_string(),
-                }),
+                (0, _) => Some(malformed("Fabric mod-loaded condition has no mod ids")),
                 (1, _) => mods.into_iter().next(),
                 (_, true) => Some(ResourceCondition::Or { conditions: mods }),
                 (_, false) => Some(ResourceCondition::And { conditions: mods }),
             }
         }
-        "forge:not" | "neoforge:not" => {
-            let inner = obj.get("value")?;
-            parse_condition(inner).map(|c| ResourceCondition::Not {
+        "forge:not" | "neoforge:not" => match obj.get("value") {
+            Some(inner) => parse_condition(inner).map(|c| ResourceCondition::Not {
                 condition: Box::new(c),
-            })
-        }
+            }),
+            None => Some(malformed("not condition has no `value`")),
+        },
         "forge:and" | "neoforge:and" => {
-            let arr = obj.get("values")?.as_array()?;
-            let conds: Vec<_> = arr.iter().filter_map(parse_condition).collect();
-            Some(ResourceCondition::And { conditions: conds })
+            match obj.get("values").and_then(|value| value.as_array()) {
+                Some(arr) => Some(ResourceCondition::And {
+                    conditions: arr.iter().filter_map(parse_condition).collect(),
+                }),
+                None => Some(malformed("and condition has no `values` array")),
+            }
         }
-        "forge:or" | "neoforge:or" => {
-            let arr = obj.get("values")?.as_array()?;
-            let conds: Vec<_> = arr.iter().filter_map(parse_condition).collect();
-            Some(ResourceCondition::Or { conditions: conds })
-        }
-        "forge:tag_empty" | "neoforge:tag_empty" => {
-            let tag = obj
-                .get("tag")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some(ResourceCondition::TagEmpty { tag })
-        }
+        "forge:or" | "neoforge:or" => match obj.get("values").and_then(|value| value.as_array()) {
+            Some(arr) => Some(ResourceCondition::Or {
+                conditions: arr.iter().filter_map(parse_condition).collect(),
+            }),
+            None => Some(malformed("or condition has no `values` array")),
+        },
+        "forge:tag_empty" | "neoforge:tag_empty" => match obj.get("tag").and_then(|v| v.as_str()) {
+            Some(tag) if !tag.is_empty() => Some(ResourceCondition::TagEmpty {
+                tag: tag.to_string(),
+            }),
+            _ => Some(malformed("tag-empty condition has no non-empty `tag`")),
+        },
         "forge:false" | "neoforge:false" => Some(ResourceCondition::False),
         _ => Some(ResourceCondition::Other {
             condition_type: ctype.to_string(),
@@ -399,5 +551,74 @@ mod condition_tests {
     #[test]
     fn unconditioned_resource_has_no_conditions() {
         assert!(conds(json!({"type": "minecraft:crafting_shaped"})).is_empty());
+    }
+
+    #[test]
+    fn malformed_known_condition_remains_explicitly_unknown() {
+        let got = conds(json!({
+            "conditions": [{"type": "forge:mod_loaded"}]
+        }));
+        assert!(matches!(
+            got.as_slice(),
+            [ResourceCondition::Malformed { condition_type, .. }]
+                if condition_type == "forge:mod_loaded"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod extraction_limit_tests {
+    use super::{ExtractionLimits, parse_resource_with_limits};
+    use crate::model::{ParseStatus, ResourceLevel};
+
+    #[test]
+    fn reference_candidates_are_bounded_during_extraction() {
+        let ids = (0..20)
+            .map(|index| format!(r#"{{"item":"example:item_{index}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!(
+            r#"{{"type":"minecraft:crafting_shapeless","ingredients":[{ids}],"result":{{"item":"minecraft:stick"}}}}"#
+        );
+        let ast = parse_resource_with_limits(
+            "data/example/recipe/bounded.json",
+            json.as_bytes(),
+            ResourceLevel::Semantic,
+            ExtractionLimits {
+                max_references: 4,
+                max_nodes: 1_000,
+                max_depth: 32,
+            },
+        );
+        assert_eq!(ast.parse_status, ParseStatus::PartiallyParsed);
+        assert!(!ast.references_complete);
+        assert!(ast.references.is_empty());
+        assert!(
+            ast.reference_gap
+                .as_deref()
+                .is_some_and(|gap| gap.contains("reference candidates"))
+        );
+    }
+
+    #[test]
+    fn language_text_does_not_consume_reference_budget() {
+        let entries = (0..20)
+            .map(|index| format!(r#""key.{index}":"Press mod:key_{index}: now""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let json = format!("{{{entries}}}");
+        let ast = parse_resource_with_limits(
+            "assets/example/lang/en_us.json",
+            json.as_bytes(),
+            ResourceLevel::Semantic,
+            ExtractionLimits {
+                max_references: 4,
+                max_nodes: 1_000,
+                max_depth: 32,
+            },
+        );
+        assert_eq!(ast.parse_status, ParseStatus::Parsed);
+        assert!(ast.references_complete);
+        assert!(ast.reference_gap.is_none());
     }
 }

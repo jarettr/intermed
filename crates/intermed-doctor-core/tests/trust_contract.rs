@@ -19,6 +19,8 @@ fn complete_capabilities() -> TargetCapabilities {
         mappings: CoverageState::Complete,
         logs: CoverageState::Complete,
         configs: CoverageState::Complete,
+        script_sources: CoverageState::Complete,
+        runtime_mutation_logs: CoverageState::Complete,
         scripts: CoverageState::Complete,
         runtime_mutators: CoverageState::Complete,
         resource_blobs: CoverageState::Complete,

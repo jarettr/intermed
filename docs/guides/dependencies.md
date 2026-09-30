@@ -15,12 +15,14 @@ Dependency findings appear in a normal `doctor` run:
   of the dependency would be rejected.
 - **Version range too wide** (`note`) — a lower bound with no upper bound, so a
   breaking major release would be accepted silently.
-- **Undisclosed dependency** (`warn`) — a mod uses another mod's content (a
+- **Undisclosed dependency** (`note`) — a mod uses another mod's content (a
   recipe type, a registry object) without declaring a dependency on it. See
   *implicit dependencies* below.
 
-A bundled (Jar-in-Jar) library counts as installed: if a mod ships its dependency
-inside itself, that dependency is satisfied and not reported missing.
+A bundled (Jar-in-Jar) library counts as installed only when loader metadata and
+active-descriptor evidence establish that the nested provider joins the runtime
+classpath. A merely present or unresolved nested archive prevents a definitive
+absence claim but does not satisfy a hard dependency as fact.
 
 ## Version languages
 
@@ -32,15 +34,22 @@ one universal SemVer dialect:
   `1.0.2-rc1+1.20` satisfies `>=1.0.0` because the `1.0.2` release tuple is newer.
 - Forge and NeoForge dependencies use Maven interval syntax such as `[47,)` and
   `[1.0,2.0)`.
-- Quilt is represented separately so its dependency language can remain distinct
-  from Fabric metadata.
+- Quilt uses its own constraints: a bare version means `^version`, and `^^`/`~~`
+  implement same-major and same-major-and-minor matching.
 - Generic and opaque metadata stays conservative: an unsupported comparison is
   undecidable, not an incompatible-version error.
 
 The same decision is reused by doctor findings, `impact update`, and the PubGrub
-whole-pack resolver. An undecidable installed candidate is admitted to global
-resolution, preventing an uncertain edge from becoming a false
-`dependency-unsat:global` error.
+whole-pack resolver. PubGrub receives stable surrogate tokens for every raw
+installed version; loader-specific evaluators decide which finite-catalog tokens
+each predicate permits. An undecidable provider blocks a definitive contradiction,
+preventing uncertainty from becoming a false `dependency-unsat:global` error.
+
+Dependency applicability is evaluated before either pairwise or global reasoning.
+Forge/NeoForge `side=CLIENT|SERVER|BOTH` constraints are matched against the
+resolved target side; a constraint for the opposite side is inactive. Feature-
+gated or otherwise conditional constraints remain undecidable until authoritative
+target configuration establishes that they are enabled.
 
 ## Implicit dependencies
 
@@ -68,8 +77,10 @@ intermed deps resolve ./mods             # full resolution (PubGrub), as JSON
 intermed deps graph ./mods               # the whole graph, as JSON
 ```
 
-`why` and `why-missing` print both declared and implicit reasons, each with its
-source.
+`why` can explain positive, negative, and ordering declarations with their real
+relation. `why-missing` and ordinary dependency paths use only positive
+presence-requiring edges, so `breaks` and `loadbefore` can never be presented as
+reasons that an absent mod is required.
 
 ## Blast radius
 
@@ -80,9 +91,9 @@ intermed impact remove create ./mods       # what depends on create, directly an
 intermed impact update sodium 0.6.0 ./mods # which declared ranges reject 0.6.0
 ```
 
-`impact remove` walks both the declared dependents and the resource references
-into the mod's namespace. `impact update` checks the proposed version against
-every range that mentions the mod.
+`impact remove` walks positive declared dependents and resource references into
+the mod's namespace. `impact update` respects relation polarity: leaving a
+`breaks`/`conflicts` range is a resolved incompatibility, not a new breakage.
 
 For the exact flags of each subcommand, see
 [the command reference](../reference/commands.md#deps).

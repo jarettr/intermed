@@ -1,7 +1,7 @@
-INFO Resource can be merged safely: data/minecraft/tags/items/test.json
+NOTE Resource can be merged safely: data/minecraft/tags/items/test.json
 id: resource-conflict:safe-crdt-merge:data/minecraft/tags/items/test.json
 semantic id: finding:generic:db27dcdf7319c360386e2fea
-occurrence id: finding-occurrence:c971cca1892c61ae7fd61be30cf1add3c4b70625db1fc6f5c44d71f73818807c
+occurrence id: finding-occurrence:ff92c63dcb8b98c808a30bfde2858402a40bdfbebacd3374f2141e3db45f7fac
 rule: resource-conflict
 
 2 writer(s) touch this path: alpha, beta. all writers append values without replace — a deterministic, order-independent set union
@@ -11,13 +11,13 @@ Fix candidates:
 
 Evidence:
 - f# Subject weight=1.00: resource_collision subject=data/minecraft/tags/items/test.json
-  attrs: {"archives":"alpha.jar,beta.jar","class":"safe-crdt-merge","coverage":"complete","domain":"tag","load_order_confidence":"high","order_dependent":false,"reason":"all writers append values without replace — a deterministic, order-independent set union","safe_merge":true,"writer_count":2,"writers":"alpha,beta"}
+  attrs: {"archives":"alpha.jar,beta.jar","class":"safe-crdt-merge","coverage":"complete","domain":"tag","load_order_confidence":"high","order_dependent":false,"reason":"all writers append values without replace — a deterministic, order-independent set union","safe_merge":true,"topology":"inter-artifact-collision","writer_count":2,"writers":"alpha,beta"}
   source: data/minecraft/tags/items/test.json extractor=vfs-scanner
 - f# ConflictsWith weight=0.80: resource_writer subject=alpha
-  attrs: {"archive":"alpha.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":30}
+  attrs: {"archive":"alpha.jar","artifact_id":"sha256:e84b29a6b2269016df1236d95729d347211846f607fe3c6017dd0a563e5e0d86","json":true,"mod_instances":"alpha","ownership":"exact","path":"data/minecraft/tags/items/test.json","size":30,"source_kind":"artifact-pack","source_locator":"<TMP>/mods/alpha.jar"}
   source: alpha.jar!data/minecraft/tags/items/test.json extractor=vfs-scanner
 - f# ConflictsWith weight=0.80: resource_writer subject=beta
-  attrs: {"archive":"beta.jar","json":true,"path":"data/minecraft/tags/items/test.json","size":29}
+  attrs: {"archive":"beta.jar","artifact_id":"sha256:99c97e7dd9ca243c95fbdec7a0f98b5846e9a8555d61f7e0333521c52172cae4","json":true,"mod_instances":"beta","ownership":"exact","path":"data/minecraft/tags/items/test.json","size":29,"source_kind":"artifact-pack","source_locator":"<TMP>/mods/beta.jar"}
   source: beta.jar!data/minecraft/tags/items/test.json extractor=vfs-scanner
 
 Cross-layer evidence path:

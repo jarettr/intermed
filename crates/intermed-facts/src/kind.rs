@@ -16,7 +16,15 @@ pub const INVALID_METADATA: &str = "invalid_metadata";
 /// plugin that also ships a `fabric.mod.json` for proxy hooks). Informational
 /// only — no rule consumes it, so it never creates a loader/dep false positive.
 pub const SECONDARY_IDENTITY: &str = "secondary_identity";
+/// One descriptor-declared role of a physical artifact. Unlike `mod`/`plugin`,
+/// candidate roles are observations and may be inactive or unresolved for the
+/// current target loader.
+pub const ARTIFACT_ROLE: &str = "artifact_role";
 pub const DEPENDENCY: &str = "dependency";
+/// Lossless loader-specific dependency expression (currently Quilt any/all/
+/// unless/environment). Layer C evaluates this as a group instead of treating
+/// its atoms as independent mandatory edges.
+pub const DEPENDENCY_EXPRESSION: &str = "dependency_expression";
 pub const PROVIDED_DEPENDENCY: &str = "provided_dependency";
 pub const MOD_SIDE: &str = "mod_side";
 pub const ENTRYPOINT: &str = "entrypoint";
@@ -137,6 +145,12 @@ pub const RESOURCE_SEMANTIC_CONFLICT: &str = "resource_semantic_conflict";
 /// `vfs explain --ast` and a single grouped, explain-only finding — never a
 /// per-file warning (anti-FP).
 pub const RESOURCE_SEMANTIC_ISSUE: &str = "resource_semantic_issue";
+/// A neutral, non-interpretive observation that a platform-namespace resource
+/// has a structurally notable property (e.g. a `minecraft:` tag with `replace=true`,
+/// or a `minecraft:` recipe with `output_count=0`). Carries `observation`,
+/// `namespace`, and `writer` attributes. Rules read this fact to decide whether the
+/// property constitutes a security concern — the AST never decides for them.
+pub const RESOURCE_PLATFORM_OBSERVATION: &str = "resource_platform_observation";
 /// Reserved. A model reference with no defining file is *not* emitted as a fact:
 /// mods generate models at runtime (baked / custom loaders) or ship them in
 /// resource packs, so absence is not proof of breakage. Unresolved references
@@ -155,6 +169,9 @@ pub const RUNTIME_SCRIPT_MODIFIES_RECIPE: &str = "runtime_script_modifies_recipe
 pub const RUNTIME_REMOVED_ITEM: &str = "runtime_removed_item";
 pub const RUNTIME_REMOVED_LOOT_TABLE: &str = "runtime_removed_loot_table";
 pub const RUNTIME_REMOVED_TAG: &str = "runtime_removed_tag";
+/// Canonical typed mutation emitted by static script parsing and runtime log
+/// observation. Legacy runtime_* predicates remain compatibility projections.
+pub const SCRIPT_MUTATION: &str = "script_mutation";
 // Layer F — mixin intelligence
 pub const MIXIN_CONFIG: &str = "mixin_config";
 /// Per-mixin-class activation status and application side (client/server/both),
@@ -184,6 +201,7 @@ pub const MIXIN_RISK_CLUSTER: &str = "mixin_risk_cluster";
 /// Dynamics layer use, so static datapack analysis can be told it has a runtime
 /// blind spot, and script + mixin mutation of one domain can be correlated.
 pub const MIXIN_RUNTIME_RESOURCE_MUTATION: &str = "mixin_runtime_resource_mutation";
+pub const MIXIN_RESOURCE_HOOK: &str = "mixin_resource_hook";
 /// A security-sensitive subsystem a mixin weaves into (Layer F → Layer G):
 /// networking, class loading, (de)serialization, or save IO. Woven code there is
 /// a real audit concern, and compounds with the mod's `uses_*` security facts.
@@ -191,9 +209,10 @@ pub const MIXIN_SECURITY_SURFACE: &str = "mixin_security_surface";
 /// A mixin config declares an `IMixinConfigPlugin`, which can toggle mixins at
 /// load time — static analysis of that config is necessarily incomplete.
 pub const MIXIN_CONFIG_PLUGIN: &str = "mixin_config_plugin";
-/// A mixin config declared a `.refmap.json` (obf↔intermediary↔named name
-/// resolution is available for its injection points).
+/// A mixin config's declared `.refmap.json` was successfully read and parsed,
+/// so obf↔intermediary↔named resolution is available for its injection points.
 pub const MIXIN_REFMAP_LOADED: &str = "mixin_refmap_loaded";
+pub const MIXIN_REFMAP_STATUS: &str = "mixin_refmap_status";
 pub const MIXIN_CLASS: &str = "mixin_class";
 pub const MIXIN_TARGET: &str = "mixin_target";
 pub const MIXIN_OPERATION: &str = "mixin_operation";
@@ -240,7 +259,6 @@ pub const USES_METHOD_HANDLES: &str = "uses_method_handles";
 /// Reserved schema kind; Layer G no longer emits this predicate (too noisy for security).
 pub const WRITES_FILES: &str = "writes_files";
 /// A potentially malicious data modification (e.g. wiping core game recipes or tags).
-pub const SECURITY_SUSPECT_MODIFICATION: &str = "security_suspect_modification";
 // Layer H — SBOM / provenance
 pub const CHECKSUM: &str = "checksum";
 pub const ARTIFACT_IDENTITY: &str = "artifact_identity";
@@ -259,6 +277,149 @@ pub const SPARK_IMPORT_FAILURE: &str = "spark_import_failure";
 // Cross-layer
 pub const DEFERRED_LAYER: &str = "deferred_layer";
 
+/// Authoritative producer/semantic owner of a fact predicate. Keeping this next
+/// to the canonical kind registry prevents policy code from inferring ownership
+/// from spelling conventions such as `mixin_*` or `resource_*`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactLayer {
+    TargetDetection,
+    Metadata,
+    Dependency,
+    Log,
+    Resource,
+    Mixin,
+    Security,
+    Sbom,
+    Performance,
+    Rules,
+    DataSemantics,
+}
+
+#[must_use]
+pub fn layer(kind: &str) -> Option<FactLayer> {
+    Some(match kind {
+        ENVIRONMENT | ANALYSIS_ENVIRONMENT | JAVA_RUNTIME | TARGET | SCAN_TRUNCATED => {
+            FactLayer::TargetDetection
+        }
+        MOD
+        | PLUGIN
+        | INVALID_METADATA
+        | SECONDARY_IDENTITY
+        | ARTIFACT_ROLE
+        | MOD_SIDE
+        | ENTRYPOINT
+        | MOD_METADATA
+        | ENTRYPOINT_DETAIL
+        | PACKAGE_OWNER
+        | BYTECODE_REFERENCE
+        | BYTECODE_CALL_EDGE
+        | CALL_SLICE_COVERAGE
+        | SCRIPT_DISCOVERY_COVERAGE
+        | MOD_RELATIONSHIP
+        | MOD_CAPABILITY
+        | NESTED_JAR
+        | COMPATIBILITY_BRIDGE
+        | UNPARSEABLE_ARCHIVE
+        | MODPACK_MANIFEST
+        | MODPACK_FILE_REF
+        | MODPACK_PROJECT_REF
+        | MODPACK_INCOMPLETE
+        | ACCESS_TRANSFORM
+        | COREMOD => FactLayer::Metadata,
+        DEPENDENCY
+        | DEPENDENCY_EXPRESSION
+        | PROVIDED_DEPENDENCY
+        | IMPLICIT_DEPENDENCY_CANDIDATE
+        | IMPLICIT_DEPENDENCY_EDGE => FactLayer::Dependency,
+        LOG_SIGNAL | LOG_MENTIONS_MOD | LOG_CRASH | LOG_MOD_ERROR | RUNTIME_EVENT
+        | THROWABLE_NODE | STACK_FRAME | CRASH_ANCHOR => FactLayer::Log,
+        RESOURCE_WRITER
+        | RESOURCE_COLLISION
+        | JSON_MERGE_CANDIDATE
+        | SAFE_CRDT_MERGE
+        | LANG_JSON_MERGE
+        | LANG_PROPERTIES_MERGE
+        | LANG_FORMAT_CONFLICT
+        | UNSAFE_REPLACE_CONFLICT
+        | TAG_REPLACE_CONFLICT
+        | TAG_MIXED_REQUIRED
+        | TAG_INVALID
+        | JSON_OVERRIDE_CONFLICT
+        | RESOURCE_OVERLAY_ACTION => FactLayer::Resource,
+        RESOURCE_AST_PARSED
+        | RESOURCE_DEFINITION
+        | RESOURCE_REFERENCE
+        | NAMESPACE_OWNER
+        | RESOURCE_RESOLVE_RESULT
+        | RESOURCE_SEMANTIC_DIFF
+        | RESOURCE_SEMANTIC_CONFLICT
+        | RESOURCE_SEMANTIC_ISSUE
+        | RESOURCE_PLATFORM_OBSERVATION
+        | RESOURCE_DANGLING_REFERENCE
+        | RUNTIME_REMOVED_RECIPE
+        | RUNTIME_SCRIPT_MODIFIES_RECIPE
+        | RUNTIME_REMOVED_ITEM
+        | RUNTIME_REMOVED_LOOT_TABLE
+        | RUNTIME_REMOVED_TAG
+        | SCRIPT_MUTATION => FactLayer::DataSemantics,
+        MIXIN_CONFIG
+        | MIXIN_ACTIVATION
+        | MIXIN_APPLICATION_SITE
+        | MIXIN_CLASSPATH_COVERAGE
+        | MIXIN_COMPOSITION
+        | MIXIN_RISK_CLUSTER
+        | MIXIN_RUNTIME_RESOURCE_MUTATION
+        | MIXIN_RESOURCE_HOOK
+        | MIXIN_SECURITY_SURFACE
+        | MIXIN_CONFIG_PLUGIN
+        | MIXIN_REFMAP_LOADED
+        | MIXIN_REFMAP_STATUS
+        | MIXIN_CLASS
+        | MIXIN_TARGET
+        | MIXIN_OPERATION
+        | MIXIN_HOTSPOT
+        | MIXIN_OVERLAP
+        | HIGH_RISK_OVERWRITE
+        | LOG_MIXIN_CORRELATION
+        | MIXIN_INJECTION_POINT
+        | MIXIN_SHADOW
+        | MIXIN_ADDED_MEMBER
+        | MIXIN_CALLS
+        | MIXIN_INTERACTION
+        | MIXIN_CONFLICT_EDGE
+        | MIXIN_PRIORITY_CONFLICT
+        | MIXIN_RISK_SCORE
+        | MIXIN_HANDLER_BODY
+        | MIXIN_HANDLER_EFFECT
+        | MIXIN_EFFECT
+        | MIXIN_RECOMMENDATION
+        | MIXIN_HIERARCHY
+        | MIXIN_CLASS_COMPLEXITY
+        | MIXIN_MOD_COMPLEXITY
+        | MIXIN_BLOAT
+        | MIXIN_DATAFLOW_METRICS => FactLayer::Mixin,
+        USES_PROCESS_SPAWN
+        | USES_SOCKET
+        | USES_REFLECTION_SET_ACCESSIBLE
+        | USES_UNSAFE
+        | USES_NATIVE_LIBRARY
+        | USES_DYNAMIC_CLASS_DEFINITION
+        | USES_REFLECTIVE_INVOCATION
+        | USES_SCRIPT_ENGINE
+        | USES_DESERIALIZATION
+        | USES_SYSTEM_EXIT
+        | USES_METHOD_HANDLES
+        | WRITES_FILES => FactLayer::Security,
+        CHECKSUM | ARTIFACT_IDENTITY | UNKNOWN_SOURCE | SIGNATURE_STATUS | SBOM | TRUST_SCORE => {
+            FactLayer::Sbom
+        }
+        TICK_SPIKE | HOT_METHOD | HOT_MOD | GC_PAUSE | HEAP_PRESSURE | THREAD_HOTSPOT
+        | SPARK_IMPORT_FAILURE => FactLayer::Performance,
+        DEFERRED_LAYER => FactLayer::Rules,
+        _ => return None,
+    })
+}
+
 /// Every fact-kind predicate declared in this module, in declaration order.
 ///
 /// This is the canonical registry used by the schema-contract gate
@@ -276,7 +437,9 @@ pub fn all_kinds() -> &'static [&'static str] {
         PLUGIN,
         INVALID_METADATA,
         SECONDARY_IDENTITY,
+        ARTIFACT_ROLE,
         DEPENDENCY,
+        DEPENDENCY_EXPRESSION,
         PROVIDED_DEPENDENCY,
         MOD_SIDE,
         ENTRYPOINT,
@@ -330,12 +493,14 @@ pub fn all_kinds() -> &'static [&'static str] {
         RESOURCE_SEMANTIC_DIFF,
         RESOURCE_SEMANTIC_CONFLICT,
         RESOURCE_SEMANTIC_ISSUE,
+        RESOURCE_PLATFORM_OBSERVATION,
         RESOURCE_DANGLING_REFERENCE,
         RUNTIME_REMOVED_RECIPE,
         RUNTIME_SCRIPT_MODIFIES_RECIPE,
         RUNTIME_REMOVED_ITEM,
         RUNTIME_REMOVED_LOOT_TABLE,
         RUNTIME_REMOVED_TAG,
+        SCRIPT_MUTATION,
         MIXIN_CONFIG,
         MIXIN_ACTIVATION,
         MIXIN_APPLICATION_SITE,
@@ -343,9 +508,11 @@ pub fn all_kinds() -> &'static [&'static str] {
         MIXIN_COMPOSITION,
         MIXIN_RISK_CLUSTER,
         MIXIN_RUNTIME_RESOURCE_MUTATION,
+        MIXIN_RESOURCE_HOOK,
         MIXIN_SECURITY_SURFACE,
         MIXIN_CONFIG_PLUGIN,
         MIXIN_REFMAP_LOADED,
+        MIXIN_REFMAP_STATUS,
         MIXIN_CLASS,
         MIXIN_TARGET,
         MIXIN_OPERATION,
@@ -382,7 +549,6 @@ pub fn all_kinds() -> &'static [&'static str] {
         USES_SYSTEM_EXIT,
         USES_METHOD_HANDLES,
         WRITES_FILES,
-        SECURITY_SUSPECT_MODIFICATION,
         CHECKSUM,
         ARTIFACT_IDENTITY,
         UNKNOWN_SOURCE,
@@ -398,4 +564,23 @@ pub fn all_kinds() -> &'static [&'static str] {
         SPARK_IMPORT_FAILURE,
         DEFERRED_LAYER,
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_registered_kind_has_an_authoritative_layer() {
+        let missing = all_kinds()
+            .iter()
+            .copied()
+            .filter(|kind| layer(kind).is_none())
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "fact kinds without a layer: {missing:?}"
+        );
+        assert_eq!(layer("mixin_looks_like_a_kind"), None);
+    }
 }

@@ -10,7 +10,7 @@ use crate::domain::{DomainParse, parse_conditions};
 use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary};
 use crate::semantic::namespace::namespace_of;
 
-pub const ADVANCEMENT_AST_VERSION: &str = "advancement-r2";
+pub const ADVANCEMENT_AST_VERSION: &str = "advancement-r3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdvancementSummary {
@@ -32,12 +32,13 @@ pub fn parse(value: &Value) -> DomainParse {
     if let Some(ref p) = parent {
         let p = p.trim_start_matches('#').to_string();
         references.push(ResourceReference {
-            relation: RefRelation::AdvancementCriterion, // Not entirely correct relation, but acceptable for generic deps. Or add ParentAdvancement. Let's reuse.
+            relation: RefRelation::ParentAdvancement,
             namespace: namespace_of(&p),
             target: p,
             required: conditions.is_empty(),
             conditions: conditions.clone(),
             is_tag: false,
+            certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
         });
     }
 
@@ -62,6 +63,7 @@ pub fn parse(value: &Value) -> DomainParse {
                         required: conditions.is_empty(),
                         conditions: conditions.clone(),
                         is_tag: false,
+                        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
                     });
                 }
             }
@@ -71,13 +73,13 @@ pub fn parse(value: &Value) -> DomainParse {
                 if let Some(s) = r.as_str() {
                     let t = s.to_string();
                     references.push(ResourceReference {
-                        // technically rewards a recipe, but ProducesItem or similar. UsesItem is generic enough for dependencies.
-                        relation: RefRelation::UsesItem,
+                        relation: RefRelation::UnlocksRecipe,
                         namespace: namespace_of(&t),
                         target: t,
                         required: conditions.is_empty(),
                         conditions: conditions.clone(),
                         is_tag: false,
+                        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
                     });
                 }
             }
@@ -138,6 +140,7 @@ fn push_ref(
         required: conditions.is_empty(),
         conditions: conditions.to_vec(),
         is_tag,
+        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
     });
 }
 

@@ -6,16 +6,54 @@ use super::*;
 pub fn build_evidence_graph(store: &FactStore) -> EvidenceGraph {
     let mut graph = EvidenceGraph::default();
     let mut artifact_by_locator = BTreeMap::<String, ArtifactId>::new();
+    let schema = intermed_facts::schema_contract::contract();
+
+    for fact in store
+        .by_kind(kind::ENVIRONMENT)
+        .chain(store.by_kind(kind::ANALYSIS_ENVIRONMENT))
+        .chain(store.by_kind(kind::JAVA_RUNTIME))
+    {
+        let Some(entity) = fact_subject_entity(fact, schema) else {
+            continue;
+        };
+        graph.entities.push(entity.clone());
+        graph.links.push(link(
+            entity.clone(),
+            EvidenceRelation::Corroborates,
+            entity,
+            if fact.kind == kind::ANALYSIS_ENVIRONMENT {
+                EvidenceOrigin::HostObservation
+            } else if fact.extractor == "log-analyzer" {
+                EvidenceOrigin::ObservedRuntime
+            } else {
+                EvidenceOrigin::StaticExact
+            },
+            EvidenceStrength::Exact,
+            fact.id,
+        ));
+    }
 
     for fact in store
         .by_kind(kind::CHECKSUM)
         .filter(|f| f.attr("algorithm") == Some("sha256"))
     {
         if let Some(id) = fact.attr("hex").and_then(ArtifactId::from_sha256) {
-            artifact_by_locator.insert(fact.subject.clone(), id.clone());
+            let mut locators = BTreeSet::new();
+            if let Some(locator) = fact.attr("source_locator") {
+                locators.insert(locator.replace('\\', "/"));
+            }
+            if !fact.subject.starts_with("sha256:") {
+                locators.insert(fact.subject.to_string());
+            }
+            if fact.source.locator != fact.subject {
+                locators.insert(fact.source.locator.replace('\\', "/"));
+            }
+            for locator in &locators {
+                artifact_by_locator.insert(locator.clone(), id.clone());
+            }
             graph.artifacts.push(ArtifactNode {
                 id: id.clone(),
-                locators: vec![fact.subject.clone()],
+                locators: locators.into_iter().collect(),
                 embedded_artifacts: Vec::new(),
             });
             graph.entities.push(EntityRef::Artifact(id));
@@ -23,31 +61,86 @@ pub fn build_evidence_graph(store: &FactStore) -> EvidenceGraph {
     }
     for fact in store.by_kind(kind::SBOM) {
         let id = fact
-            .attr("sha256")
-            .and_then(ArtifactId::from_sha256)
+            .attr("artifact_id")
+            .or_else(|| Some(fact.subject.as_str()))
+            .and_then(parse_artifact_id)
+            .or_else(|| fact.attr("sha256").and_then(ArtifactId::from_sha256))
             .unwrap_or_else(|| ArtifactId::unresolved(&fact.subject));
-        artifact_by_locator
-            .entry(fact.subject.clone())
-            .or_insert_with(|| id.clone());
+        let mut locators = BTreeSet::new();
+        if let Some(locator) = fact.attr("source_locator") {
+            locators.insert(locator.replace('\\', "/"));
+        }
+        if !fact.subject.starts_with("sha256:") {
+            locators.insert(fact.subject.to_string());
+        }
+        for locator in &locators {
+            artifact_by_locator
+                .entry(locator.clone())
+                .or_insert_with(|| id.clone());
+        }
         graph.artifacts.push(ArtifactNode {
             id: id.clone(),
-            locators: vec![fact.subject.clone()],
+            locators: locators.into_iter().collect(),
             embedded_artifacts: Vec::new(),
         });
         graph.entities.push(EntityRef::Artifact(id));
+    }
+
+    let mut role_artifacts = BTreeMap::<(String, String), BTreeSet<ArtifactId>>::new();
+    for role in store.by_kind(kind::ARTIFACT_ROLE) {
+        if role.attr("identity_certainty") != Some("confirmed")
+            || !matches!(
+                role.attr("activation"),
+                Some("active" | "self-loader-bootstrap")
+            )
+        {
+            continue;
+        }
+        let Some(declared_id) = role.attr("declared_id") else {
+            continue;
+        };
+        let locator = role.subject.replace('\\', "/");
+        let Some(artifact) = artifact_by_locator.get(&locator).cloned() else {
+            continue;
+        };
+        let basename = std::path::Path::new(&locator)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&locator)
+            .to_string();
+        role_artifacts
+            .entry((declared_id.to_string(), basename))
+            .or_default()
+            .insert(artifact);
     }
 
     let mut mods_by_declared = BTreeMap::<String, Vec<ModInstanceId>>::new();
     let mut ordinal_by_identity = BTreeMap::<(ArtifactId, String, DescriptorKind), u16>::new();
     for fact in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
         let locator = fact.attr("file").unwrap_or(&fact.source.locator);
-        let artifact = artifact_for(locator, &mut artifact_by_locator, &mut graph);
+        let normalized_locator = locator.replace('\\', "/");
+        let basename = std::path::Path::new(&normalized_locator)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&normalized_locator);
+        let role_artifact = role_artifacts
+            .get(&(fact.subject.to_string(), basename.to_string()))
+            .and_then(|candidates| {
+                (candidates.len() == 1)
+                    .then(|| candidates.first().cloned())
+                    .flatten()
+            });
+        let artifact = artifact_by_locator
+            .get(&normalized_locator)
+            .cloned()
+            .or(role_artifact)
+            .unwrap_or_else(|| artifact_for(locator, &mut artifact_by_locator, &mut graph));
         let descriptor_kind = DescriptorKind::from_token(fact.attr("loader").unwrap_or("unknown"));
-        let key = (artifact.clone(), fact.subject.clone(), descriptor_kind);
+        let key = (artifact.clone(), fact.subject.to_string(), descriptor_kind);
         let ordinal = ordinal_by_identity.entry(key).or_default();
         let id = ModInstanceId {
             artifact: artifact.clone(),
-            declared_id: fact.subject.clone(),
+            declared_id: fact.subject.to_string(),
             descriptor_kind,
             ordinal: *ordinal,
         };
@@ -72,17 +165,17 @@ pub fn build_evidence_graph(store: &FactStore) -> EvidenceGraph {
             fact.id,
         ));
         mods_by_declared
-            .entry(fact.subject.clone())
+            .entry(fact.subject.to_string())
             .or_default()
             .push(id);
     }
 
     for fact in store.by_kind(kind::DEPENDENCY) {
         let candidates = mods_by_declared
-            .get(&fact.subject)
+            .get(fact.subject.as_str())
             .cloned()
             .unwrap_or_default();
-        let source_artifact = artifact_by_locator.get(&fact.source.locator);
+        let source_artifact = artifact_by_locator.get(fact.source.locator.as_str());
         let mut sources = candidates
             .iter()
             .filter(|source| source_artifact.is_some_and(|artifact| source.artifact == *artifact))
@@ -119,7 +212,7 @@ pub fn build_evidence_graph(store: &FactStore) -> EvidenceGraph {
     for fact in store.by_kind(kind::NESTED_JAR) {
         let nested_name = fact.attr("nested").unwrap_or("unknown");
         let parents = mods_by_declared
-            .get(&fact.subject)
+            .get(fact.subject.as_str())
             .cloned()
             .unwrap_or_default();
         let mut parent_artifacts = parents
@@ -218,7 +311,7 @@ fn add_code_and_resource_entities(
 ) {
     let package_owners = store
         .by_kind(kind::PACKAGE_OWNER)
-        .filter_map(|fact| Some((fact.attr("package")?.to_string(), fact.subject.clone())))
+        .filter_map(|fact| Some((fact.attr("package")?.to_string(), fact.subject.to_string())))
         .collect::<Vec<_>>();
     for fact in store.by_kind(kind::ENTRYPOINT) {
         let Some(class) = fact.attr("class") else {
@@ -226,7 +319,7 @@ fn add_code_and_resource_entities(
         };
         let class = class_entity(class, fact.attr("namespace"));
         graph.entities.push(class.clone());
-        for owner in mods.get(&fact.subject).into_iter().flatten() {
+        for owner in mods.get(fact.subject.as_str()).into_iter().flatten() {
             graph.links.push(link(
                 EntityRef::Mod(owner.clone()),
                 EvidenceRelation::Owns,
@@ -249,7 +342,7 @@ fn add_code_and_resource_entities(
         };
         let resource = EntityRef::Resource(ResourceKey::new(path));
         graph.entities.push(resource.clone());
-        for owner in mods.get(&fact.subject).into_iter().flatten() {
+        for owner in mods.get(fact.subject.as_str()).into_iter().flatten() {
             if resource_links >= MAX_RESOURCE_GRAPH_LINKS {
                 break;
             }
@@ -419,7 +512,7 @@ fn add_code_and_resource_entities(
             },
             fact.id,
         ));
-        for owner in mods.get(&fact.subject).into_iter().flatten() {
+        for owner in mods.get(fact.subject.as_str()).into_iter().flatten() {
             graph.links.push(link(
                 EntityRef::Mod(owner.clone()),
                 EvidenceRelation::Owns,
@@ -433,7 +526,9 @@ fn add_code_and_resource_entities(
             .iter()
             .filter(|(package, _)| class_under_package(target_class, package))
             .max_by_key(|(package, _)| package.len())
-            && let Some(owner) = mods.get(target_mod).and_then(|instances| instances.first())
+            && let Some(owner) = mods
+                .get(target_mod.as_str())
+                .and_then(|instances| instances.first())
         {
             graph.links.push(link(
                 EntityRef::Mod(owner.clone()),
@@ -635,14 +730,24 @@ fn add_security_provenance_links(
         .iter()
         .filter(|fact| fact.extractor == "security-scanner")
     {
-        let locator = fact.attr("archive").unwrap_or(&fact.subject);
-        let Some(artifact) = artifacts.get(locator) else {
+        let artifact = fact
+            .attr("artifact_id")
+            .and_then(parse_artifact_id)
+            .or_else(|| {
+                fact.attr("source_locator")
+                    .and_then(|locator| artifacts.get(&locator.replace('\\', "/")).cloned())
+            })
+            .or_else(|| {
+                let locator = fact.attr("archive").unwrap_or(&fact.subject);
+                artifacts.get(locator).cloned()
+            });
+        let Some(artifact) = artifact else {
             continue;
         };
         for node in mods
             .values()
             .flatten()
-            .filter(|node| &node.artifact == artifact)
+            .filter(|node| node.artifact == artifact)
         {
             graph.links.push(link(
                 EntityRef::Artifact(artifact.clone()),
@@ -664,10 +769,10 @@ fn add_bridges(
 ) {
     for fact in store.by_kind(kind::COMPATIBILITY_BRIDGE) {
         let artifact = mods
-            .get(&fact.subject)
+            .get(fact.subject.as_str())
             .and_then(|instances| instances.first())
             .map(|instance| instance.artifact.clone())
-            .or_else(|| artifacts.get(&fact.source.locator).cloned())
+            .or_else(|| artifacts.get(fact.source.locator.as_str()).cloned())
             .unwrap_or_else(|| ArtifactId::unresolved(&fact.source.locator));
         let capabilities = fact
             .attr("capabilities")

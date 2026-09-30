@@ -117,27 +117,7 @@ pub fn apply_semantic_override_suppression(findings: &mut Vec<Finding>) -> usize
 /// heuristic): we downgrade `Warn`→`Note`, lower confidence, and append a caveat
 /// so a human can audit. Returns the number of findings downgraded.
 pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usize {
-    // Recipe ids/namespaces a script removed or modified.
-    let mut scripted_recipes: std::collections::BTreeSet<String> =
-        std::collections::BTreeSet::new();
-    for k in [
-        kind::RUNTIME_REMOVED_RECIPE,
-        kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
-    ] {
-        for f in store.by_kind(k) {
-            scripted_recipes.insert(f.subject.clone());
-        }
-    }
-    let mut scripted_loot: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for f in store.by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE) {
-        scripted_loot.insert(f.subject.clone());
-    }
-    let mutator_present = !scripted_recipes.is_empty()
-        || !scripted_loot.is_empty()
-        || store
-            .by_kind(kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
-            .next()
-            .is_some();
+    let mutations = store.by_kind(kind::SCRIPT_MUTATION).collect::<Vec<_>>();
     let coverage_partial = store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
         matches!(
             fact.attr("layer"),
@@ -153,10 +133,24 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
 
     let mut downgraded = 0;
     for f in findings.iter_mut() {
+        let path = f.affected_components.first().cloned();
+        let mutable_domain = path
+            .as_deref()
+            .map(ResourceKey::from_path)
+            .map(|key| key.domain.as_str())
+            .filter(|domain| matches!(*domain, "recipe" | "loot-table" | "tag"));
+        let domain_mutator_present = mutable_domain.is_some_and(|domain| {
+            mutations
+                .iter()
+                .any(|fact| fact.attr("domain") == Some(domain) && mutation_applicable(fact))
+        }) || store
+            .by_kind(kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+            .next()
+            .is_some();
         if f.category == intermed_evidence::Category::Resource {
             f.runtime_mutation_coverage = if coverage_partial {
                 RuntimeMutationCoverage::CoveragePartial
-            } else if mutator_present {
+            } else if domain_mutator_present {
                 RuntimeMutationCoverage::MutatorPresent
             } else if script_coverage_available {
                 RuntimeMutationCoverage::NoMutatorEvidence
@@ -166,7 +160,8 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
             if matches!(
                 f.runtime_mutation_coverage,
                 RuntimeMutationCoverage::MutatorPresent | RuntimeMutationCoverage::CoveragePartial
-            ) && f.conclusion_kind == intermed_evidence::ConclusionKind::StaticResourceState
+            ) && mutable_domain.is_some()
+                && f.conclusion_kind == intermed_evidence::ConclusionKind::StaticResourceState
             {
                 let prior = f.severity;
                 if f.severity > Severity::Warn {
@@ -186,41 +181,45 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
                 }
             }
         }
-        let path = f.affected_components.first().cloned();
-        let scripted = match (f.family.as_str(), path.as_deref()) {
+        let matching = match (f.family.as_str(), path.as_deref()) {
             (
                 "recipe-output-override"
                 | "recipe-type-override"
                 | "recipe-ingredient-override"
                 | "recipe-condition-override",
                 Some(path),
-            ) => recipe_is_scripted(path, &scripted_recipes),
-            ("loot-table-output-override", Some(path)) => recipe_is_scripted(path, &scripted_loot),
-            _ => false,
+            ) => matching_mutations(path, "recipe", store, &mutations),
+            ("loot-table-output-override", Some(path)) => {
+                matching_mutations(path, "loot-table", store, &mutations)
+            }
+            _ => Vec::new(),
         };
-        if scripted {
+        if !matching.is_empty() {
             f.runtime_mutation_coverage = RuntimeMutationCoverage::ExactTargetModified;
             let prior = f.severity;
-            if f.severity > Severity::Note {
-                f.severity = Severity::Note;
+            let runtime_current = matching.iter().any(|fact| {
+                fact.attr("origin") == Some("runtime-observed")
+                    && fact.attr("session_relation") == Some("current")
+            });
+            let cap = if runtime_current {
+                Severity::Note
+            } else {
+                Severity::Warn
+            };
+            if f.severity > cap {
+                f.severity = cap;
             }
             f.assessment.disposition = AssessmentDisposition::Downgraded;
             if prior != f.severity {
-                let contradicting_evidence = store
-                    .by_kind(kind::RUNTIME_REMOVED_RECIPE)
-                    .chain(store.by_kind(kind::RUNTIME_SCRIPT_MODIFIES_RECIPE))
-                    .chain(store.by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE))
-                    .filter(|fact| {
-                        path.as_deref().is_some_and(|path| {
-                            resource_matches_script_subject(path, &fact.subject)
-                        })
-                    })
-                    .map(|fact| fact.id)
-                    .collect();
+                let contradicting_evidence = matching.iter().map(|fact| fact.id).collect();
                 f.assessment.adjustments.push(ConclusionAdjustment {
                     code: "runtime-resource-mutator-observed".to_string(),
-                    detail: "runtime script evidence can replace the static resource before use"
-                        .to_string(),
+                    detail: if runtime_current {
+                        "same-session runtime script evidence modified the static resource"
+                    } else {
+                        "static script intent may modify the resource when its applicable script phase runs"
+                    }
+                    .to_string(),
                     original_disposition: Some(AssessmentDisposition::Asserted),
                     final_disposition: Some(AssessmentDisposition::Downgraded),
                     from_severity: Some(prior),
@@ -228,12 +227,14 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
                     contradicting_evidence,
                 });
             }
-            f.confidence = (f.confidence * 0.7).min(0.7);
+            f.confidence = if runtime_current {
+                (f.confidence * 0.7).min(0.7)
+            } else {
+                (f.confidence * 0.85).min(0.85)
+            };
             if !f.explanation.contains("data-pack script") {
                 f.explanation.push_str(
-                    " A data-pack script (KubeJS/CraftTweaker) removes or replaces this resource at \
-                     load time, so the static conflict may never reach the player — downgraded and \
-                     flagged for audit.",
+                    " An applicable data-pack script (KubeJS/CraftTweaker) selector may remove or replace this resource; static intent and same-session runtime observation are reported separately.",
                 );
             }
             if !f.machine_tags.iter().any(|t| t == "runtime-script-caveat") {
@@ -245,27 +246,74 @@ pub fn apply_runtime_caveats(findings: &mut [Finding], store: &FactStore) -> usi
     downgraded
 }
 
-/// Whether the resource at `path` matches a scripted id set, by its object id
-/// (`create:crushing/tuff`) or its namespace (mod-scoped script removal).
-fn recipe_is_scripted(path: &str, scripted: &std::collections::BTreeSet<String>) -> bool {
-    let key = ResourceKey::from_path(path);
-    if let Some(id) = &key.object_id
-        && scripted.contains(&id.to_string())
-    {
-        return true;
-    }
-    // Mod-scoped removal (`removeByModid("create")`) names the namespace only.
-    key.namespace
-        .as_deref()
-        .is_some_and(|ns| scripted.contains(ns))
+fn mutation_applicable(fact: &intermed_facts::Fact) -> bool {
+    let wrong_script_phase = matches!(fact.attr("applicability"), Some("client" | "startup"));
+    let stale_runtime_observation = fact.attr("origin") == Some("runtime-observed")
+        && fact.attr("session_relation") != Some("current");
+    !(wrong_script_phase || stale_runtime_observation)
 }
 
-fn resource_matches_script_subject(path: &str, subject: &str) -> bool {
+fn matching_mutations<'a>(
+    path: &str,
+    domain: &str,
+    store: &'a FactStore,
+    mutations: &[&'a intermed_facts::Fact],
+) -> Vec<&'a intermed_facts::Fact> {
+    mutations
+        .iter()
+        .copied()
+        .filter(|fact| fact.attr("domain") == Some(domain) && mutation_applicable(fact))
+        .filter(|fact| mutation_selector_matches(path, fact, store))
+        .collect()
+}
+
+fn mutation_selector_matches(path: &str, fact: &intermed_facts::Fact, store: &FactStore) -> bool {
+    let selector_kind = fact.attr("selector_kind").unwrap_or("dynamic");
+    if selector_kind == "composite" {
+        let Some(json) = fact.attr("selector_json") else {
+            return false;
+        };
+        let Ok(selectors) = serde_json::from_str::<Vec<(String, String)>>(json) else {
+            return false;
+        };
+        return !selectors.is_empty()
+            && selectors
+                .iter()
+                .all(|(kind, value)| selector_matches(path, kind, value, store));
+    }
+    selector_matches(
+        path,
+        selector_kind,
+        fact.attr("selector_value").unwrap_or_default(),
+        store,
+    )
+}
+
+fn selector_matches(path: &str, kind: &str, value: &str, store: &FactStore) -> bool {
     let key = ResourceKey::from_path(path);
-    key.object_id
-        .as_ref()
-        .is_some_and(|id| id.to_string() == subject)
-        || key.namespace.as_deref() == Some(subject)
+    match kind {
+        "recipe-id" | "resource-id" | "tag" => key
+            .object_id
+            .as_ref()
+            .is_some_and(|id| id.to_string() == value.trim_start_matches('#')),
+        "recipe-namespace" => key.namespace.as_deref() == Some(value),
+        "recipe-type" => store
+            .by_kind(kind::RESOURCE_AST_PARSED)
+            .any(|fact| fact.subject.as_ref() == path && fact.attr("recipe_type") == Some(value)),
+        "input-item" | "output-item" => {
+            let relation = if kind == "input-item" {
+                "uses_item"
+            } else {
+                "produces_item"
+            };
+            store.by_kind(kind::RESOURCE_REFERENCE).any(|fact| {
+                fact.subject.as_ref() == path
+                    && fact.attr("relation") == Some(relation)
+                    && fact.attr("to") == Some(value)
+            })
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -331,9 +379,21 @@ mod tests {
         let mut store = FactStore::new();
         // A script removes recipe id `create:crushing/tuff`.
         store
-            .fact("static-script-scanner", kind::RUNTIME_REMOVED_RECIPE)
-            .subject("create:crushing/tuff")
+            .fact("script-dynamics", kind::SCRIPT_MUTATION)
+            .subject("runtime:1")
+            .attr("domain", "recipe")
+            .attr("selector_kind", "recipe-id")
+            .attr("selector_value", "create:crushing/tuff")
+            .attr("origin", "runtime-observed")
+            .attr("session_relation", "current")
+            .attr("applicability", "runtime")
             .emit();
+        assert_eq!(store.by_kind(kind::SCRIPT_MUTATION).count(), 1);
+        let mutation = store.by_kind(kind::SCRIPT_MUTATION).next().unwrap();
+        assert_eq!(
+            mutation.attr("selector_value"),
+            Some("create:crushing/tuff")
+        );
         let mut findings = vec![
             Finding::builder(
                 "resource-semantics",
@@ -360,8 +420,14 @@ mod tests {
     fn mod_scoped_removal_downgrades_by_namespace() {
         let mut store = FactStore::new();
         store
-            .fact("static-script-scanner", kind::RUNTIME_REMOVED_RECIPE)
-            .subject("create")
+            .fact("static-script-scanner", kind::SCRIPT_MUTATION)
+            .subject("static:1")
+            .attr("domain", "recipe")
+            .attr("selector_kind", "recipe-namespace")
+            .attr("selector_value", "create")
+            .attr("origin", "static-declared")
+            .attr("session_relation", "not-applicable")
+            .attr("applicability", "server")
             .emit();
         let mut findings = vec![
             Finding::builder(
@@ -374,7 +440,7 @@ mod tests {
             .build(),
         ];
         assert_eq!(apply_runtime_caveats(&mut findings, &store), 1);
-        assert_eq!(findings[0].severity, Severity::Note);
+        assert_eq!(findings[0].severity, Severity::Warn);
     }
 
     #[test]
@@ -396,6 +462,53 @@ mod tests {
         ];
         assert_eq!(apply_runtime_caveats(&mut findings, &store), 0);
         assert_eq!(findings[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn client_script_does_not_suppress_server_recipe() {
+        let mut store = FactStore::new();
+        store
+            .fact("static-script-scanner", kind::SCRIPT_MUTATION)
+            .subject("client:1")
+            .attr("domain", "recipe")
+            .attr("selector_kind", "recipe-id")
+            .attr("selector_value", "create:x")
+            .attr("origin", "static-declared")
+            .attr("session_relation", "not-applicable")
+            .attr("applicability", "client")
+            .emit();
+        let mut findings = vec![
+            Finding::builder("resource-semantics", "recipe:x")
+                .family("recipe-output-override")
+                .affects("data/create/recipes/x.json")
+                .severity(Severity::Warn)
+                .build(),
+        ];
+        assert_eq!(apply_runtime_caveats(&mut findings, &store), 0);
+        assert_eq!(findings[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn historical_runtime_log_is_context_not_refutation() {
+        let mut store = FactStore::new();
+        store
+            .fact("script-dynamics", kind::SCRIPT_MUTATION)
+            .subject("old:1")
+            .attr("domain", "recipe")
+            .attr("selector_kind", "recipe-id")
+            .attr("selector_value", "create:x")
+            .attr("origin", "runtime-observed")
+            .attr("session_relation", "historical-or-unresolved")
+            .attr("applicability", "runtime")
+            .emit();
+        let mut findings = vec![
+            Finding::builder("resource-semantics", "recipe:x")
+                .family("recipe-output-override")
+                .affects("data/create/recipes/x.json")
+                .severity(Severity::Warn)
+                .build(),
+        ];
+        assert_eq!(apply_runtime_caveats(&mut findings, &store), 0);
     }
 
     #[test]

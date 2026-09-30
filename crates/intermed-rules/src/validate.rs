@@ -10,10 +10,13 @@ use crate::template::{parse_category, parse_severity};
 
 /// Validate pack schema, rule ids, and per-kind required fields.
 pub fn validate_rule_pack(pack: &RulePack) -> Result<(), RulePackError> {
-    if pack.schema != RULE_PACK_SCHEMA
-        && pack.schema != RULE_PACK_SCHEMA_V2
-        && pack.schema != RULE_PACK_SCHEMA_V3
-    {
+    if pack.schema == RULE_PACK_SCHEMA {
+        return Err(RulePackError(
+            "rule-pack schema v1 has been removed; migrate the pack to v2/v3 with an older InterMed release"
+                .into(),
+        ));
+    }
+    if pack.schema != RULE_PACK_SCHEMA_V2 && pack.schema != RULE_PACK_SCHEMA_V3 {
         return Err(RulePackError(format!(
             "unsupported rule-pack schema: {}",
             pack.schema
@@ -219,6 +222,23 @@ fn validate_rule_shape(rule: &crate::model::RuleSpec) -> Result<(), RulePackErro
                     rule.id
                 )));
             }
+            if rule.r#where.is_some() || rule.having.is_some() {
+                return Err(RulePackError(format!(
+                    "{}: group-distinct supports where_all/where_not only; `where`/`having` would be ignored",
+                    rule.id
+                )));
+            }
+            for (field, term) in [
+                ("group_by", rule.group_by.as_deref().unwrap_or_default()),
+                ("distinct", rule.distinct.as_deref().unwrap_or_default()),
+            ] {
+                if !valid_single_fact_term(term) {
+                    return Err(RulePackError(format!(
+                        "{}: invalid {field} term `{term}`",
+                        rule.id
+                    )));
+                }
+            }
         }
         RuleKind::FactFinding => {
             if rule.input_kinds.is_empty() {
@@ -282,6 +302,18 @@ fn validate_rule_shape(rule: &crate::model::RuleSpec) -> Result<(), RulePackErro
         }
     }
     Ok(())
+}
+
+fn valid_single_fact_term(term: &str) -> bool {
+    if matches!(term, "subject" | "kind") {
+        return true;
+    }
+    let attr = term.strip_prefix("attr:").unwrap_or(term);
+    !attr.is_empty()
+        && !attr.contains('.')
+        && attr
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn validate_fact_source(

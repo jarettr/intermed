@@ -11,16 +11,19 @@ schema_version = "intermed-fact-schema-v1"
 
 [kind.environment]
 subject = "environment"
+subject_entity = "environment"
 complete = false
 
 [kind.analysis_environment]
 subject = "analyzer host environment"
+subject_entity = "environment"
 complete = true
 attrs.os = "string"
 attrs.java = "string"
 
 [kind.java_runtime]
 subject = "java runtime"
+subject_entity = "java-runtime"
 complete = false
 
 [kind.target]
@@ -30,6 +33,7 @@ reserved = true
 
 [kind.mod]
 subject = "mod id"
+subject_entity = "mod-instance"
 complete = true
 attrs.version = "string"
 attrs.loader = "string"
@@ -42,6 +46,7 @@ attrs.descriptor_candidates = "string"
 
 [kind.plugin]
 subject = "plugin id"
+subject_entity = "mod-instance"
 complete = true
 attrs.version = "string"
 attrs.loader = "string"
@@ -62,14 +67,41 @@ attrs.active_for_instance = "bool"
 subject = "secondary identity"
 complete = false
 
+[kind.artifact_role]
+subject = "artifact locator"
+subject_entity = "artifact"
+complete = true
+attrs.declared_id = "string"
+attrs.version = "string"
+attrs.loader = "string"
+attrs.descriptor = "string"
+attrs.ordinal = "int"
+attrs.activation = "string"
+attrs.identity_certainty = "string"
+
 [kind.dependency]
 subject = "dependent mod id"
+subject_entity = "dependency"
 complete = true
 attrs.dep = "string"
 attrs.range = "string"
 attrs.mandatory = "bool"
 attrs.relation = "string"
 attrs.feature = "string"
+attrs.version_dialect = "string"
+attrs.identity_certainty = "string"
+attrs.lifecycle = "string"
+attrs.ordering = "string"
+attrs.join_classpath = "bool"
+attrs.condition = "string"
+attrs.side = "string"
+
+[kind.dependency_expression]
+subject = "dependent mod id"
+subject_entity = "dependency"
+complete = true
+attrs.relation = "string"
+attrs.expression = "string"
 attrs.version_dialect = "string"
 attrs.identity_certainty = "string"
 
@@ -211,16 +243,19 @@ complete = false
 
 [kind.runtime_event]
 subject = "physical runtime event occurrence id"
+subject_entity = "runtime-event"
 complete = false
 attrs.fuzzy_fingerprint = "string"
 
 [kind.throwable_node]
 subject = "runtime event occurrence id"
+subject_entity = "runtime-event"
 complete = false
 attrs.fuzzy_fingerprint = "string"
 
 [kind.stack_frame]
 subject = "runtime event occurrence id"
+subject_entity = "runtime-event"
 complete = false
 attrs.fuzzy_fingerprint = "string"
 attrs.owner_candidates = "string"
@@ -229,6 +264,7 @@ attrs.module = "string"
 
 [kind.crash_anchor]
 subject = "runtime event occurrence id"
+subject_entity = "runtime-event"
 complete = false
 attrs.fuzzy_fingerprint = "string"
 
@@ -246,11 +282,17 @@ subject = "mod id"
 complete = true
 attrs.path = "string"
 attrs.archive = "string"
+attrs.artifact_id = "string"
+attrs.source_kind = "string"
+attrs.source_locator = "string"
+attrs.ownership = "string"
+attrs.mod_instances = "string"
 attrs.size = "int"
 attrs.json = "bool"
 
 [kind.resource_collision]
 subject = "resource path"
+subject_entity = "resource"
 complete = true
 attrs.class = "string"
 attrs.domain = "string"
@@ -263,6 +305,7 @@ attrs.load_order_confidence = "string"
 attrs.writer_count = "int"
 attrs.language_merge_class = "string"
 attrs.coverage = "string"
+attrs.topology = "string"
 
 [kind.json_merge_candidate]
 subject = "json merge candidate"
@@ -306,18 +349,22 @@ complete = false
 
 [kind.resource_overlay_action]
 subject = "resource overlay action"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_ast_parsed]
 subject = "resource ast parsed"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_definition]
 subject = "resource definition"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_reference]
 subject = "resource reference"
+subject_entity = "resource"
 complete = false
 
 [kind.namespace_owner]
@@ -334,22 +381,27 @@ complete = false
 
 [kind.resource_resolve_result]
 subject = "resource resolve result"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_semantic_diff]
 subject = "resource semantic diff"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_semantic_conflict]
 subject = "resource semantic conflict"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_semantic_issue]
 subject = "resource semantic issue"
+subject_entity = "resource"
 complete = false
 
 [kind.resource_dangling_reference]
 subject = "resource dangling reference"
+subject_entity = "resource"
 complete = false
 
 [kind.runtime_removed_recipe]
@@ -371,6 +423,23 @@ complete = false
 [kind.runtime_removed_tag]
 subject = "runtime removed tag"
 complete = false
+
+[kind.script_mutation]
+subject = "script mutation occurrence"
+complete = false
+attrs.operation = "string"
+attrs.domain = "string"
+attrs.selector_kind = "string"
+attrs.selector_value = "string"
+attrs.selector_json = "string"
+attrs.origin = "string"
+attrs.applicability = "string"
+attrs.session_relation = "string"
+attrs.session_id = "string"
+attrs.engine = "string"
+attrs.via = "string"
+attrs.line = "int"
+attrs.excerpt = "string"
 
 [kind.mixin_config]
 subject = "mixin config"
@@ -402,6 +471,10 @@ complete = false
 subject = "mixin runtime resource mutation"
 complete = false
 
+[kind.mixin_resource_hook]
+subject = "mixin resource hook"
+complete = false
+
 [kind.mixin_security_surface]
 subject = "mixin security surface"
 complete = false
@@ -413,6 +486,16 @@ complete = false
 [kind.mixin_refmap_loaded]
 subject = "mixin refmap loaded"
 complete = false
+
+[kind.mixin_refmap_status]
+subject = "mixin config identity"
+complete = true
+attrs.mod = "string"
+attrs.archive = "string"
+attrs.config = "string"
+attrs.refmap = "string"
+attrs.status = "string"
+attrs.reason = "string"
 
 [kind.mixin_class]
 subject = "mixin class"
@@ -559,32 +642,45 @@ subject = "writes files"
 complete = false
 reserved = true
 
-[kind.security_suspect_modification]
-subject = "security suspect modification"
-complete = false
+[kind.resource_platform_observation]
+subject = "resource path"
+subject_entity = "resource"
+complete = true
+attrs.observation = "string"
+attrs.namespace = "string"
+attrs.writer = "string"
 
 [kind.checksum]
 subject = "checksum"
+subject_entity = "artifact"
 complete = false
 
 [kind.artifact_identity]
 subject = "artifact identity"
+subject_entity = "artifact"
 complete = false
 
 [kind.unknown_source]
-subject = "archive file name"
+subject = "artifact id"
+subject_entity = "artifact"
 complete = true
 attrs.reason = "string"
+attrs.archive = "string"
+attrs.source_locator = "string"
 
 [kind.signature_status]
-subject = "archive file name"
+subject = "artifact id"
+subject_entity = "artifact"
 complete = true
 attrs.status = "string"
 attrs.material = "string"
 attrs.jar_signed = "bool"
+attrs.archive = "string"
+attrs.source_locator = "string"
 
 [kind.sbom]
 subject = "sbom"
+subject_entity = "artifact"
 complete = false
 
 [kind.trust_score]

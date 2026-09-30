@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use intermed_vfs::{
-    ConflictClass, ResourceCollision, merge_lang_json, merge_lang_properties, merge_tag_values,
-    scan_mods_dir,
+    ConflictClass, ResourceCollision, merge_lang_json, merge_lang_properties,
+    merge_sound_definitions, merge_tag_values, scan_mods_dir,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -233,27 +233,32 @@ fn overlay_bytes(
     collision: &ResourceCollision,
     scan: &intermed_vfs::ResourceScan,
 ) -> Result<Vec<u8>, PackOpsError> {
-    if collision.class == ConflictClass::SafeCrdtMerge {
-        let blobs = scan.blobs_for_path(&collision.path);
-        if let Some(merged) = merge_tag_values(&blobs) {
-            return Ok(merged);
+    let blobs = scan
+        .blobs_for_path(&collision.path)
+        .map_err(|error| PackOpsError::new(error.to_string()))?;
+    let blob_refs = blobs.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let merged = match collision.class {
+        ConflictClass::SafeCrdtMerge => Some(merge_tag_values(&blob_refs)),
+        ConflictClass::SoundEventMerge => Some(merge_sound_definitions(&blob_refs)),
+        ConflictClass::LangJsonMerge if collision.is_safe_merge() => {
+            Some(merge_lang_json(&blob_refs))
         }
-    }
-    if collision.class == ConflictClass::LangJsonMerge {
-        let blobs = scan.blobs_for_path(&collision.path);
-        if let Some(merged) = merge_lang_json(&blobs) {
-            return Ok(merged);
+        ConflictClass::LangPropertiesMerge if collision.is_safe_merge() => {
+            Some(merge_lang_properties(&blob_refs))
         }
-    }
-    if collision.class == ConflictClass::LangPropertiesMerge {
-        let blobs = scan.blobs_for_path(&collision.path);
-        if let Some(merged) = merge_lang_properties(&blobs) {
-            return Ok(merged);
-        }
+        _ => None,
+    };
+    if let Some(result) = merged {
+        return result.ok_or_else(|| {
+            PackOpsError::new(format!(
+                "safe merge invariant failed for {} ({})",
+                collision.path,
+                collision.class.as_str()
+            ))
+        });
     }
     scan.winning_blob(&collision.path)
-        .map(|b| b.to_vec())
-        .ok_or_else(|| PackOpsError::new(format!("no resource bytes for {}", collision.path)))
+        .map_err(|error| PackOpsError::new(error.to_string()))
 }
 
 fn overlay_source(collision: &ResourceCollision) -> String {
@@ -267,11 +272,11 @@ fn overlay_source(collision: &ResourceCollision) -> String {
     };
     match collision.class {
         ConflictClass::SafeCrdtMerge => "merged tag values".to_string(),
+        ConflictClass::SoundEventMerge => "merged sound event definitions".to_string(),
         ConflictClass::LangJsonMerge => "merged lang json keys".to_string(),
         ConflictClass::LangPropertiesMerge => "merged lang properties".to_string(),
         ConflictClass::Identical => "identical".to_string(),
-        // Everything else (overrides, order-dependent classes, and the
-        // disjoint-object merge which has no generator yet) is a winner pick.
+        // Everything else (overrides, order-dependent classes) is a winner pick.
         _ => winner(),
     }
 }
@@ -290,6 +295,47 @@ fn temp_sibling(out_dir: &Path) -> PathBuf {
         .and_then(|n| n.to_str())
         .unwrap_or("overlay");
     out_dir.with_file_name(format!(".{name}.tmp-{}", std::process::id()))
+}
+
+#[cfg(test)]
+mod materializer_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_tag_jar(path: &Path, value: &str) {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        zip.start_file(
+            "data/c/tags/items/test.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        write!(zip, "{{\"values\":[\"{value}\"]}}").unwrap();
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn safe_materialization_failure_never_falls_back_to_a_winner() {
+        let root = std::env::temp_dir().join(format!(
+            "intermed-overlay-fail-closed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let a = root.join("a.jar");
+        let b = root.join("b.jar");
+        write_tag_jar(&a, "a:x");
+        write_tag_jar(&b, "b:y");
+        let scan = scan_mods_dir(&root).unwrap();
+        let collision = scan.collisions[0].clone();
+        assert!(collision.is_safe_merge());
+        std::fs::remove_file(b).unwrap();
+        let error = overlay_bytes(&collision, &scan).unwrap_err();
+        assert!(error.to_string().contains("materialization incomplete"));
+        std::fs::remove_dir_all(root).ok();
+    }
 }
 
 // ── Overlay plan v2 (semantic) ──────────────────────────────────────────────
@@ -354,7 +400,7 @@ pub fn build_overlay_plan_v2(mods_dir: &Path) -> Result<OverlayPlanV2, PackOpsEr
             reason: reason.to_string(),
         };
 
-        if c.class.is_safe_merge() {
+        if c.is_safe_merge() {
             safe_items.push(item("deterministic, order-independent merge"));
             continue;
         }

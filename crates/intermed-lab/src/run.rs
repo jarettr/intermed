@@ -9,22 +9,21 @@
 //! offline-testable evidence path is fully implemented here; a live runner is a
 //! later, optional plug-in behind the same trait.
 
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::FailureAttribution;
-use crate::attribution::extract_attributions;
-use crate::classify::{FailureCategory, classify_log, classify_log_all};
+use crate::classify::FailureCategory;
 use crate::corpus::{CorpusEnvironment, CorpusLock, read_lock};
 use crate::{LabError, read_json, write_json_atomic};
 
 /// Schema tag for a single raw captured smoke output.
 pub const SMOKE_OUTPUT_SCHEMA: &str = "intermed-smoke-output-v1";
 /// Schema tag for a classified lab run.
-pub const LAB_RUN_SCHEMA: &str = "intermed-lab-run-v1";
+pub const LAB_RUN_SCHEMA: &str = "intermed-lab-run-v2";
+pub const LAB_RUN_SCHEMA_V1: &str = "intermed-lab-run-v1";
 
 /// Default maximum length of a stored log excerpt (overridable via config / CLI).
 pub const DEFAULT_EXCERPT_MAX: usize = 280;
@@ -81,6 +80,10 @@ pub struct RawSmokeOutput {
     pub wall_time_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enforced_limits: Vec<String>,
+    /// Resource limits requested by the execution plan. A limit appearing here
+    /// but not in `enforced_limits` is an explicit coverage gap.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_limits: Vec<String>,
     #[serde(default)]
     pub isolation: String,
 }
@@ -99,6 +102,10 @@ pub enum SmokeStatus {
     Fail,
     Crash,
     Timeout,
+    Inconclusive,
+    HarnessFailure,
+    InfrastructureFailure,
+    Skipped,
 }
 
 impl SmokeStatus {
@@ -109,6 +116,10 @@ impl SmokeStatus {
             SmokeStatus::Fail => "fail",
             SmokeStatus::Crash => "crash",
             SmokeStatus::Timeout => "timeout",
+            SmokeStatus::Inconclusive => "inconclusive",
+            SmokeStatus::HarnessFailure => "harness-failure",
+            SmokeStatus::InfrastructureFailure => "infrastructure-failure",
+            SmokeStatus::Skipped => "skipped",
         }
     }
 
@@ -232,7 +243,7 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
             additional_failures: Vec::new(),
             attributions: Vec::new(),
             detail: detail.to_string(),
-            log_excerpt: excerpt(&raw.log, None, excerpt_max),
+            log_excerpt: excerpt_from_observation(&raw.log, &observation, None, excerpt_max),
             observation: Some(observation),
         };
     }
@@ -243,7 +254,11 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
     ) {
         return SmokeResult {
             environment: raw.environment.clone(),
-            status: SmokeStatus::Fail,
+            status: if raw.infrastructure_failure {
+                SmokeStatus::InfrastructureFailure
+            } else {
+                SmokeStatus::HarnessFailure
+            },
             failure: None,
             additional_failures: Vec::new(),
             attributions: Vec::new(),
@@ -252,7 +267,33 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
             } else {
                 "Lab harness failed; pack compatibility was not evaluated".to_string()
             },
-            log_excerpt: excerpt(&raw.log, None, excerpt_max),
+            log_excerpt: excerpt_from_observation(&raw.log, &observation, None, excerpt_max),
+            observation: Some(observation),
+        };
+    }
+    if observation.status == crate::observation::ObservationStatus::Skipped {
+        return SmokeResult {
+            environment: raw.environment.clone(),
+            status: SmokeStatus::Skipped,
+            failure: None,
+            additional_failures: Vec::new(),
+            attributions: Vec::new(),
+            detail: "Runtime execution was not attempted".to_string(),
+            log_excerpt: None,
+            observation: Some(observation),
+        };
+    }
+    if observation.status == crate::observation::ObservationStatus::Inconclusive {
+        return SmokeResult {
+            environment: raw.environment.clone(),
+            status: SmokeStatus::Inconclusive,
+            failure: None,
+            additional_failures: Vec::new(),
+            attributions: Vec::new(),
+            detail:
+                "Process exited cleanly before a recognized readiness milestone; result inconclusive"
+                    .to_string(),
+            log_excerpt: None,
             observation: Some(observation),
         };
     }
@@ -260,41 +301,27 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
         observation.status,
         crate::observation::ObservationStatus::Passed
             | crate::observation::ObservationStatus::Degraded
-            | crate::observation::ObservationStatus::Inconclusive
     ) {
-        let perf = classify_log_all(&raw.log)
-            .into_iter()
-            .find(|c| *c == FailureCategory::PerformanceRegression);
-        if let Some(category) = perf {
-            let attributions = extract_attributions(&raw.log);
-            return SmokeResult {
-                environment: raw.environment.clone(),
-                status: SmokeStatus::Degraded,
-                failure: Some(category),
-                additional_failures: Vec::new(),
-                attributions,
-                detail: category.title().to_string(),
-                log_excerpt: excerpt(&raw.log, Some(category), excerpt_max),
-                observation: Some(observation),
-            };
-        }
-        let conclusive = matches!(
-            observation.status,
-            crate::observation::ObservationStatus::Passed
-        );
+        let category = (observation.status == crate::observation::ObservationStatus::Degraded)
+            .then_some(FailureCategory::PerformanceRegression);
+        let status = if category.is_some() {
+            SmokeStatus::Degraded
+        } else {
+            SmokeStatus::Pass
+        };
         return SmokeResult {
             environment: raw.environment.clone(),
-            status: SmokeStatus::Pass,
-            failure: None,
+            status,
+            failure: category,
             additional_failures: Vec::new(),
-            attributions: Vec::new(),
-            detail: if conclusive {
-                "Readiness milestone reached without a terminal incident".to_string()
-            } else {
-                "Process exited cleanly before a recognized readiness milestone; result inconclusive"
-                    .to_string()
-            },
-            log_excerpt: None,
+            attributions: attributions_from_observation(&observation),
+            detail: category.map_or_else(
+                || "Readiness milestone reached without a terminal incident".to_string(),
+                |value| value.title().to_string(),
+            ),
+            log_excerpt: category.and_then(|value| {
+                excerpt_from_observation(&raw.log, &observation, Some(value), excerpt_max)
+            }),
             observation: Some(observation),
         };
     }
@@ -322,7 +349,7 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
             additional_failures.len()
         )
     };
-    let attributions = extract_attributions(&raw.log);
+    let attributions = attributions_from_observation(&observation);
     SmokeResult {
         environment: raw.environment.clone(),
         status,
@@ -330,22 +357,55 @@ pub fn classify_with_options(raw: &RawSmokeOutput, options: LabRunOptions) -> Sm
         additional_failures,
         attributions,
         detail,
-        log_excerpt: excerpt(&raw.log, Some(category), excerpt_max),
+        log_excerpt: excerpt_from_observation(&raw.log, &observation, Some(category), excerpt_max),
         observation: Some(observation),
     }
 }
 
+fn attributions_from_observation(
+    observation: &crate::observation::ExecutionObservation,
+) -> Vec<FailureAttribution> {
+    let mut out = observation
+        .incidents
+        .iter()
+        .filter_map(|incident| {
+            let category = incident.category?;
+            Some(
+                incident
+                    .attributed_subjects
+                    .iter()
+                    .map(move |subject| FailureAttribution {
+                        category,
+                        subject: subject.clone(),
+                        line_excerpt: incident.message.clone(),
+                    }),
+            )
+        })
+        .flatten()
+        .collect::<Vec<_>>();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Pick a short, relevant excerpt: the first line matching the failure pattern
 /// (so the user sees the smoking gun), else the last non-empty line.
-fn excerpt(log: &str, category: Option<FailureCategory>, excerpt_max: usize) -> Option<String> {
+fn excerpt_from_observation(
+    log: &str,
+    observation: &crate::observation::ExecutionObservation,
+    category: Option<FailureCategory>,
+    excerpt_max: usize,
+) -> Option<String> {
     if log.trim().is_empty() {
         return None;
     }
     let pick = category
-        .and_then(|cat| {
-            log.lines()
-                .find(|line| classify_log(line) == Some(cat))
-                .map(str::to_string)
+        .and_then(|category| {
+            observation
+                .incidents
+                .iter()
+                .find(|incident| incident.category == Some(category))
+                .and_then(|incident| incident.message.clone())
         })
         .or_else(|| {
             log.lines()
@@ -428,8 +488,12 @@ pub fn run_with(
 /// Load and validate a previously written lab run.
 pub fn read_run(path: &Path) -> Result<LabRun, LabError> {
     let run: LabRun = read_json(path)?;
-    if run.schema != LAB_RUN_SCHEMA {
-        return Err(LabError::schema(path, LAB_RUN_SCHEMA, &run.schema));
+    if !matches!(run.schema.as_str(), LAB_RUN_SCHEMA | LAB_RUN_SCHEMA_V1) {
+        return Err(LabError::schema(
+            path,
+            "intermed-lab-run-v1 or intermed-lab-run-v2",
+            &run.schema,
+        ));
     }
     Ok(run)
 }
@@ -445,31 +509,22 @@ pub fn capture_log(
     max_bytes: u64,
     out: &Path,
 ) -> Result<RawSmokeOutput, LabError> {
-    let mut file = std::fs::File::open(log_path)
-        .map_err(|error| LabError::new(format!("open {}: {error}", log_path.display())))?;
-    let len = file
-        .metadata()
-        .map_err(|error| LabError::new(format!("stat {}: {error}", log_path.display())))?
-        .len();
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|error| LabError::new(format!("seek {}: {error}", log_path.display())))?;
-    let mut bytes = Vec::with_capacity((len - start).min(usize::MAX as u64) as usize);
-    file.read_to_end(&mut bytes)
+    let bounded = intermed_doctor_core::bounded_text::read_text_tail(log_path, max_bytes)
         .map_err(|error| LabError::new(format!("read {}: {error}", log_path.display())))?;
     let raw = RawSmokeOutput {
         schema: SMOKE_OUTPUT_SCHEMA.to_string(),
         environment: environment.to_string(),
         exited_ok: exit_code == Some(0) && !timed_out,
         timed_out,
-        log: String::from_utf8_lossy(&bytes).into_owned(),
+        log: bounded.text,
         exit_code,
-        log_complete: start == 0,
+        log_complete: !bounded.truncated,
         infrastructure_failure: false,
         harness_failure: false,
         skipped: false,
         wall_time_ms: None,
         enforced_limits: Vec::new(),
+        requested_limits: Vec::new(),
         isolation: "external-capture".to_string(),
     };
     write_json_atomic(out, &raw)?;
@@ -494,6 +549,7 @@ mod tests {
             skipped: false,
             wall_time_ms: None,
             enforced_limits: Vec::new(),
+            requested_limits: Vec::new(),
             isolation: "test".into(),
         }
     }
@@ -503,10 +559,17 @@ mod tests {
         let r = classify(&raw(
             "fabric-server",
             true,
-            "[Server thread/WARN]: Can't keep up! Running 120ms behind",
+            "[Server thread/INFO]: Done (2.1s)!\n[Server thread/WARN]: Can't keep up! Running 120ms behind",
         ));
         assert_eq!(r.status, SmokeStatus::Degraded);
         assert_eq!(r.failure, Some(FailureCategory::PerformanceRegression));
+    }
+
+    #[test]
+    fn clean_exit_without_readiness_is_inconclusive_not_pass() {
+        let r = classify(&raw("fabric-server", true, "JVM started"));
+        assert_eq!(r.status, SmokeStatus::Inconclusive);
+        assert!(!r.status.is_pass());
     }
 
     #[test]
@@ -574,5 +637,25 @@ mod tests {
         let r = classify(&raw("fabric-server", false, "weird exit"));
         assert_eq!(r.failure, Some(FailureCategory::Unknown));
         assert_eq!(r.status, SmokeStatus::Fail);
+    }
+
+    #[test]
+    fn captured_tail_discards_the_first_partial_physical_line() {
+        let root = std::env::temp_dir().join(format!(
+            "intermed-lab-tail-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("latest.log");
+        let out = root.join("capture.json");
+        std::fs::write(&source, "first-line\nsecond-line\nthird-line\n").unwrap();
+        let capture = capture_log(&source, "test", Some(0), false, 18, &out).unwrap();
+        assert!(!capture.log_complete);
+        assert_eq!(capture.log, "third-line\n");
+        std::fs::remove_dir_all(root).ok();
     }
 }

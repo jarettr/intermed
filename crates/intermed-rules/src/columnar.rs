@@ -1,7 +1,8 @@
 //! In-process **columnar** backend — runs the declarative pack on the query engine.
 //!
-//! This is the default Layer-J backend (`--logic columnar`) and the only in-process
-//! one; Soufflé and DuckDB are the external alternatives. Facts are projected once
+//! This is the default production Layer-J backend (`--logic columnar`) and the only
+//! in-process one. DuckDB is the production SQL/reference backend; Soufflé and the
+//! other adapters are experimental. Facts are projected once
 //! into the Arrow [`ColumnarStore`]; every IR-lowerable rule (`FactFinding` / `Join`
 //! / `GroupDistinct`) is lowered via [`rule_to_ir`](crate::rule_to_ir) and executed
 //! by the optimizing columnar [`execute`](intermed_columnar::execute)
@@ -10,12 +11,13 @@
 //! ([`fact_finding_findings`](crate::fact_finding_findings),
 //! [`join_findings`](crate::join_findings),
 //! [`group_distinct_findings`](crate::group_distinct_findings)), so findings are
-//! identical across backends by construction. The relational IR cannot express
-//! `Correlation` / `Aggregate`; those rules keep their matching on the residual
-//! interpreter path ([`evaluate_pack`](crate::evaluate_pack)), so coverage stays
-//! complete.
+//! checked against the reference interpreter by the parity gate. The current rule
+//! frontend does not yet faithfully lower the declarative `Correlation` and
+//! `Aggregate` forms; those rules stay on the residual interpreter path
+//! ([`evaluate_pack`](crate::evaluate_pack)), so unsupported shapes are never
+//! approximated.
 //!
-//! Unlike Soufflé/DuckDB this backend needs no external tool and no extra build
+//! Unlike external backends this engine needs no external tool and no extra build
 //! feature — the engine is pure Rust — so it is always available.
 
 use intermed_columnar::{QueryEngine, RelExpr, Value};

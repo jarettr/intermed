@@ -15,6 +15,92 @@ type SignatureTranslationKey = (String, String, String, String, String);
 type SignatureTranslation = (String, String, String);
 type SignatureTranslations = BTreeMap<SignatureTranslationKey, BTreeSet<SignatureTranslation>>;
 
+/// Mapping file compatibility with the target environment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "status")]
+pub enum MappingCompatibility {
+    /// Mapping version matches target version.
+    Compatible,
+    /// Mapping version differs from target version — method absence or
+    /// descriptor mismatch after translation is unreliable.
+    Incompatible {
+        mapping_version: String,
+        target_version: String,
+    },
+    /// Mapping or target version is unknown — cannot verify compatibility.
+    /// Negative assertions (MissingMethod, DescriptorMismatch) after mapping
+    /// translation should be gated or downgraded.
+    VersionUnverified,
+}
+
+/// Refmap lifecycle state for a mixin config.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "status")]
+pub enum RefmapStatus {
+    /// Config does not declare a refmap — nothing to load.
+    #[default]
+    NotDeclared,
+    /// Refmap declared and successfully loaded + parsed.
+    DeclaredAndLoaded { path: String },
+    /// Refmap declared but ZIP entry missing.
+    DeclaredMissing { declared_path: String },
+    /// Refmap entry exists but could not be read.
+    DeclaredUnreadable { path: String, reason: String },
+    /// Refmap entry exceeds bounded read limit.
+    DeclaredTooLarge { path: String, cap_bytes: u64 },
+    /// Refmap read succeeded but JSON parse or schema validation failed.
+    DeclaredInvalid { path: String, reason: String },
+}
+
+impl RefmapStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotDeclared => "not-declared",
+            Self::DeclaredAndLoaded { .. } => "declared-and-loaded",
+            Self::DeclaredMissing { .. } => "declared-missing",
+            Self::DeclaredUnreadable { .. } => "declared-unreadable",
+            Self::DeclaredTooLarge { .. } => "declared-too-large",
+            Self::DeclaredInvalid { .. } => "declared-invalid",
+        }
+    }
+
+    pub fn reason(&self) -> Option<String> {
+        match self {
+            Self::DeclaredMissing { declared_path } => {
+                Some(format!("entry `{declared_path}` is missing"))
+            }
+            Self::DeclaredUnreadable { reason, .. } | Self::DeclaredInvalid { reason, .. } => {
+                Some(reason.clone())
+            }
+            Self::DeclaredTooLarge { cap_bytes, .. } => {
+                Some(format!("entry exceeds the {cap_bytes} byte read cap"))
+            }
+            Self::NotDeclared | Self::DeclaredAndLoaded { .. } => None,
+        }
+    }
+    /// Whether the refmap was successfully loaded and is available for resolution.
+    pub fn is_loaded(&self) -> bool {
+        matches!(self, RefmapStatus::DeclaredAndLoaded { .. })
+    }
+
+    /// Whether a refmap was declared (regardless of load success).
+    pub fn is_declared(&self) -> bool {
+        !matches!(self, RefmapStatus::NotDeclared)
+    }
+
+    /// Get the declared path if one exists.
+    pub fn declared_path(&self) -> Option<&str> {
+        match self {
+            RefmapStatus::DeclaredAndLoaded { path } => Some(path),
+            RefmapStatus::DeclaredMissing { declared_path } => Some(declared_path),
+            RefmapStatus::DeclaredUnreadable { path, .. } => Some(path),
+            RefmapStatus::DeclaredTooLarge { path, .. } => Some(path),
+            RefmapStatus::DeclaredInvalid { path, .. } => Some(path),
+            RefmapStatus::NotDeclared => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MappingIncompatibility {
@@ -470,15 +556,41 @@ impl TinyMappings {
         self
     }
 
+    /// Check mapping compatibility with the target Minecraft version.
+    ///
+    /// VersionUnverified means one or both versions are unknown — compatibility
+    /// cannot be verified. This state should NOT allow proving negative
+    /// assertions like MissingMethod or DescriptorMismatch after translation.
     #[must_use]
-    pub fn target_compatible(&self) -> bool {
+    pub fn mapping_compatibility(&self) -> MappingCompatibility {
         match (
             self.identity.minecraft_version.as_deref(),
             self.target_minecraft_version.as_deref(),
         ) {
-            (Some(mapping), Some(target)) => mapping == target,
-            _ => true,
+            (Some(mapping), Some(target)) => {
+                if mapping == target {
+                    MappingCompatibility::Compatible
+                } else {
+                    MappingCompatibility::Incompatible {
+                        mapping_version: mapping.to_string(),
+                        target_version: target.to_string(),
+                    }
+                }
+            }
+            _ => MappingCompatibility::VersionUnverified,
         }
+    }
+
+    /// Legacy boolean check — prefer `mapping_compatibility()` for new code.
+    /// Only a positively version-verified mapping is compatible. Unknown
+    /// mapping/target versions fail closed instead of authorizing absence proof.
+    #[must_use]
+    #[deprecated(note = "use mapping_compatibility() instead")]
+    pub fn target_compatible(&self) -> bool {
+        matches!(
+            self.mapping_compatibility(),
+            MappingCompatibility::Compatible
+        )
     }
 
     #[must_use]
@@ -1093,7 +1205,10 @@ mod tests {
         let map = TinyMappings::parse_with_identity(tiny, "/maps/minecraft-1.20.1.tiny", None)
             .unwrap()
             .with_target_minecraft_version(Some("1.21.1".to_string()));
-        assert!(!map.target_compatible());
+        assert!(matches!(
+            map.mapping_compatibility(),
+            MappingCompatibility::Incompatible { .. }
+        ));
         assert!(matches!(
             map.resolve_method_symbol(
                 "net/minecraft/Foo",
@@ -1105,6 +1220,17 @@ mod tests {
             ),
             MappingResolution::Incompatible { .. }
         ));
+    }
+
+    #[test]
+    fn missing_mapping_version_is_explicitly_unverified() {
+        let tiny = "tiny\t2\t0\tofficial\tintermediary\n\
+c\ta\tb\n";
+        let map = TinyMappings::parse(tiny).unwrap();
+        assert_eq!(
+            map.mapping_compatibility(),
+            MappingCompatibility::VersionUnverified
+        );
     }
 
     #[test]

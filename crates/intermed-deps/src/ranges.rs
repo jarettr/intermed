@@ -2,14 +2,16 @@
 
 use creeper_semver_pubgrub::{SemverPubgrub, SmallVersion};
 
+#[cfg(test)]
 use crate::semver;
 
 /// PubGrub version set used throughout Layer C.
 pub type ModRange = SemverPubgrub<SmallVersion>;
 
-/// Parse a mod dependency range into a PubGrub set. Returns `None` when the
-/// range cannot be expressed in semver (conservative skip, same as pairwise).
-pub fn parse_mod_range(range: &str) -> Option<ModRange> {
+/// Legacy generic-SemVer helper retained for local tests. The production solver
+/// lowers loader-specific predicates over a finite raw-version catalog instead.
+#[cfg(test)]
+fn parse_mod_range(range: &str) -> Option<ModRange> {
     let range = range.trim();
     if range.is_empty() || range == "*" {
         return Some(ModRange::full());

@@ -134,8 +134,8 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
             "fabric-1.20.1-double",
             false,
             format!(
-                "[ERROR] Mod „Höhlenausbau“ 🛑 org.spongepowered.asm.mixin.injection.throwables.InvalidMixinException: apply failed\n\
-                 [ERROR] Mod sicherheit requires fabric-api which is missing {}",
+                "[main/FATAL]: Mod „Höhlenausbau“ 🛑 org.spongepowered.asm.mixin.injection.throwables.InvalidMixinException: apply failed\n\
+                 [main/FATAL]: Mod sicherheit requires fabric-api which is missing {}",
                 "ä".repeat(120)
             ),
         ),
@@ -166,32 +166,24 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
     let run = intermed_lab::run_lab(&lock_path, &logs, &run_dir).unwrap();
     assert_eq!(run.results.len(), 4);
 
-    // The double-failure environment: dominant = mixin, secondary = missing-dep.
+    // The final loader abort is the incident. The earlier unconnected Mixin line
+    // remains background context rather than being promoted by the process exit.
     let double = run
         .results
         .iter()
         .find(|r| r.environment == "fabric-1.20.1-double")
         .unwrap();
     assert_eq!(double.status, SmokeStatus::Fail);
-    assert_eq!(double.failure, Some(FailureCategory::MixinApplyError));
-    assert_eq!(
-        double.additional_failures,
-        vec![FailureCategory::MissingDependency]
-    );
+    assert_eq!(double.failure, Some(FailureCategory::MissingDependency));
+    assert!(double.additional_failures.is_empty());
     assert!(!double.attributions.is_empty());
-    assert!(
-        double
-            .attributions
-            .iter()
-            .any(|a| a.category == FailureCategory::MixinApplyError)
-    );
     assert!(
         double
             .attributions
             .iter()
             .any(|a| a.category == FailureCategory::MissingDependency)
     );
-    assert!(double.detail.contains("+1 other failure"));
+    assert_eq!(double.detail, FailureCategory::MissingDependency.title());
     // Excerpt was produced without panicking on the multibyte boundary.
     assert!(double.log_excerpt.is_some());
 
@@ -202,19 +194,19 @@ fn realistic_multi_failure_run_classifies_and_aggregates() {
     assert_eq!(matrix.crashed, 1); // OOM
     assert_eq!(matrix.failed, 2); // double + port
 
-    // Histogram counts every independent failure across all environments.
-    assert_eq!(matrix.by_category.get("mixin-apply-error"), Some(&1));
+    // Histogram counts causally selected incidents, not every earlier error line.
+    assert_eq!(matrix.by_category.get("mixin-apply-error"), None);
     assert_eq!(matrix.by_category.get("missing-dependency"), Some(&1));
     assert_eq!(matrix.by_category.get("out-of-memory"), Some(&1));
     assert_eq!(matrix.by_category.get("port-in-use"), Some(&1));
     // Families roll the flat categories up.
-    assert_eq!(matrix.by_family.get("mod-integration"), Some(&2));
+    assert_eq!(matrix.by_family.get("mod-integration"), Some(&1));
     assert_eq!(matrix.by_family.get("resource-exhaustion"), Some(&1));
     assert_eq!(matrix.by_family.get("environment"), Some(&1));
 
     let html = fs::read_to_string(report_dir.join("index.html")).unwrap();
     assert!(html.contains("Failures by family"));
-    assert!(html.contains("mod-integration: 2"));
+    assert!(html.contains("mod-integration: 1"));
 
     fs::remove_dir_all(root).ok();
 }

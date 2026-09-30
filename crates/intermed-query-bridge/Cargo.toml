@@ -10,7 +10,5 @@ description = "Test-time equivalence guard: lowers declarative RuleSpecs to the 
 intermed-facts = { workspace = true }
 intermed-rules = { workspace = true }
 intermed-columnar = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
 intermed-doctor-core = { workspace = true }
+serde_json = { workspace = true }

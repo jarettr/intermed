@@ -80,8 +80,8 @@ pub enum PhysicalPlan {
         from: String,
         to: String,
     },
-    /// Pass-through for an external (WASM) call — the in-process engine yields its
-    /// input unchanged; the router dispatches the real call to the WASM backend.
+    /// Invoke a registered external transform. Missing modules are operational
+    /// errors; treating a missing transform as identity would change plan semantics.
     CallExternal {
         input: Box<PhysicalPlan>,
         module: String,
@@ -96,12 +96,13 @@ pub enum PhysicalPlan {
         right_alias: String,
         condition: Condition,
     },
-    /// Group facts of any of `kinds` by subject and keep groups whose distinct count of
-    /// `distinct_attr` is at least `min_count`. Output column: `group_col` (= subject).
+    /// Group facts of any of `kinds` by `group_col`, after applying `filters`, and
+    /// keep groups whose distinct count of `distinct_attr` is at least `min_count`.
     GroupCountDistinct {
         kinds: Vec<String>,
         group_col: String,
         distinct_attr: String,
+        filters: Vec<Predicate>,
         min_count: usize,
     },
 }
@@ -296,11 +297,13 @@ pub fn plan(expr: &RelExpr, stats: &Statistics) -> PhysicalPlan {
             kinds,
             group_col,
             distinct_attr,
+            filters,
             min_count,
         } => PhysicalPlan::GroupCountDistinct {
             kinds: kinds.clone(),
             group_col: group_col.clone(),
             distinct_attr: distinct_attr.clone(),
+            filters: filters.clone(),
             min_count: *min_count,
         },
     }

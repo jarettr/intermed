@@ -8,13 +8,12 @@
 //! of two of these because naive deep pointer extraction is false-positive-prone
 //! (much of the graph is inline objects and runtime-mutated). This module walks the
 //! graph **carefully**: it only follows the well-known *id-bearing* fields, only
-//! emits namespaced ids, and marks every edge `required: false`.
+//! emits namespaced ids, and marks only schema-mandatory edges as required.
 //!
-//! Why `required: false`: a worldgen id often resolves to an *inline* sibling, a
-//! datapack-merged entry, or a runtime registration, so its absence is not a load
-//! error. Soft edges still feed Layer C's cross-mod implicit-dependency model (a
-//! mod's biome that references another mod's placed feature *does* depend on it) but
-//! never the dangling-file check — exactly the "deep but quiet" goal.
+//! Exact schema links such as placed-feature → configured-feature and dimension →
+//! dimension-type are required. Extensible lists and positions that may contain
+//! inline/runtime-provided objects remain soft. Both feed Layer C, but only exact
+//! required links may participate in stronger dependency reasoning.
 
 use serde_json::Value;
 
@@ -40,9 +39,10 @@ pub fn is_worldgen_path(path: &str) -> bool {
     worldgen_subtype(path).is_some()
 }
 
-/// Push a soft `RegistryRef` for a namespaced worldgen id; bare strings and inline
-/// objects carry no resolution signal and are skipped.
-fn push_id(id: &str, out: &mut Vec<ResourceReference>) {
+/// Push a typed `RegistryRef` for a namespaced worldgen id; bare strings and
+/// inline objects carry no resolution signal and are skipped.
+fn push_id(id: &str, required: bool, out: &mut Vec<ResourceReference>) {
+    let is_tag = id.starts_with('#');
     let id = id.trim_start_matches('#');
     if !id.contains(':') {
         return;
@@ -52,16 +52,17 @@ fn push_id(id: &str, out: &mut Vec<ResourceReference>) {
         relation: RefRelation::RegistryRef,
         namespace: namespace_of(&target),
         target,
-        required: false,
+        required,
         conditions: Vec::new(),
-        is_tag: false,
+        is_tag,
+        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
     });
 }
 
 /// Push the id at a JSON pointer if it is a string.
-fn push_at(value: &Value, pointer: &str, out: &mut Vec<ResourceReference>) {
+fn push_at(value: &Value, pointer: &str, required: bool, out: &mut Vec<ResourceReference>) {
     if let Some(Value::String(s)) = value.pointer(pointer) {
-        push_id(s, out);
+        push_id(s, required, out);
     }
 }
 
@@ -75,7 +76,7 @@ pub fn extract_references(path: &str, value: &Value) -> Vec<ResourceReference> {
     let mut out = Vec::new();
     match sub {
         // A placed feature places exactly one configured feature.
-        "placed_feature" => push_at(value, "/feature", &mut out),
+        "placed_feature" => push_at(value, "/feature", true, &mut out),
 
         // A configured feature can embed *other* configured features by id in the
         // selector families (`random_selector`, `simple_random_selector`). We follow
@@ -90,11 +91,11 @@ pub fn extract_references(path: &str, value: &Value) -> Vec<ResourceReference> {
         "dimension" => collect_dimension(value, &mut out),
 
         // A structure's spawn biomes (a tag or list); a structure set's members.
-        "structure" => push_at(value, "/biomes", &mut out),
+        "structure" => push_at(value, "/biomes", false, &mut out),
         "structure_set" => {
             if let Some(Value::Array(arr)) = value.pointer("/structures") {
                 for s in arr {
-                    push_at(s, "/structure", &mut out);
+                    push_at(s, "/structure", true, &mut out);
                 }
             }
         }
@@ -110,14 +111,14 @@ fn collect_configured_feature(value: &Value, out: &mut Vec<ResourceReference>) {
         for entry in arr {
             // entry may be a bare id string or an object with a `feature` id.
             match entry {
-                Value::String(s) => push_id(s, out),
-                Value::Object(_) => push_at(entry, "/feature", out),
+                Value::String(s) => push_id(s, false, out),
+                Value::Object(_) => push_at(entry, "/feature", false, out),
                 _ => {}
             }
         }
     }
     // `default` placement target and `simple_random_selector` features list.
-    push_at(value, "/config/default", out);
+    push_at(value, "/config/default", false, out);
 }
 
 fn collect_biome(value: &Value, out: &mut Vec<ResourceReference>) {
@@ -127,7 +128,7 @@ fn collect_biome(value: &Value, out: &mut Vec<ResourceReference>) {
             if let Value::Array(list) = step {
                 for f in list {
                     if let Value::String(s) = f {
-                        push_id(s, out);
+                        push_id(s, false, out);
                     }
                 }
             }
@@ -135,11 +136,11 @@ fn collect_biome(value: &Value, out: &mut Vec<ResourceReference>) {
     }
     // /carvers: "ns:carver" | ["ns:carver", ...] | { air: ... } (object form is inline)
     match value.pointer("/carvers") {
-        Some(Value::String(s)) => push_id(s, out),
+        Some(Value::String(s)) => push_id(s, false, out),
         Some(Value::Array(arr)) => {
             for c in arr {
                 if let Value::String(s) = c {
-                    push_id(s, out);
+                    push_id(s, false, out);
                 }
             }
         }
@@ -148,16 +149,16 @@ fn collect_biome(value: &Value, out: &mut Vec<ResourceReference>) {
 }
 
 fn collect_dimension(value: &Value, out: &mut Vec<ResourceReference>) {
-    push_at(value, "/type", out);
-    push_at(value, "/generator/settings", out);
+    push_at(value, "/type", true, out);
+    push_at(value, "/generator/settings", true, out);
     // biome_source: fixed (`/biome`) or multi_noise (`/biomes[].biome`).
-    push_at(value, "/generator/biome_source/biome", out);
+    push_at(value, "/generator/biome_source/biome", false, out);
     if let Some(Value::Array(arr)) = value.pointer("/generator/biome_source/biomes") {
         for b in arr {
             // entry: { biome: "ns:id", parameters: {...} } or a bare id.
             match b {
-                Value::String(s) => push_id(s, out),
-                Value::Object(_) => push_at(b, "/biome", out),
+                Value::String(s) => push_id(s, false, out),
+                Value::Object(_) => push_at(b, "/biome", false, out),
                 _ => {}
             }
         }
@@ -191,7 +192,18 @@ mod tests {
         let r = extract_references("data/create/worldgen/placed_feature/p.json", &v);
         assert_eq!(targets(&r), vec!["create:my_ore"]);
         assert_eq!(r[0].relation, RefRelation::RegistryRef);
-        assert!(!r[0].required, "worldgen edges are soft (no dangling FP)");
+        assert!(
+            r[0].required,
+            "placed features require their configured feature"
+        );
+    }
+
+    #[test]
+    fn preserves_worldgen_tag_references() {
+        let v = json!({ "biomes": "#minecraft:is_overworld" });
+        let r = extract_references("data/create/worldgen/structure/s.json", &v);
+        assert_eq!(targets(&r), vec!["minecraft:is_overworld"]);
+        assert!(r[0].is_tag);
     }
 
     #[test]
@@ -226,6 +238,16 @@ mod tests {
             targets(&r),
             vec!["create:my_biome", "create:my_dim_type", "create:my_noise"]
         );
+        assert!(
+            r.iter()
+                .filter(|reference| reference.target != "create:my_biome")
+                .all(|reference| reference.required)
+        );
+        assert!(
+            r.iter()
+                .find(|reference| reference.target == "create:my_biome")
+                .is_some_and(|reference| !reference.required)
+        );
     }
 
     #[test]
@@ -252,8 +274,8 @@ mod tests {
                 .iter()
                 .any(|r| r.target == "botania:mystical_flowers"
                     && r.relation == RefRelation::RegistryRef
-                    && !r.required),
-            "parse_resource should surface the soft worldgen feature ref"
+                    && r.required),
+            "parse_resource should surface the required configured-feature ref"
         );
     }
 }

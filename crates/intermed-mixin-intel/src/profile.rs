@@ -123,6 +123,7 @@ mod tests {
             },
             at_ordinal: None,
             at_target_member: String::new(),
+            at_constraints: Default::default(),
         }
     }
 

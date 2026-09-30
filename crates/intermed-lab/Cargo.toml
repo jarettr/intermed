@@ -17,3 +17,6 @@ regex.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 zip.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

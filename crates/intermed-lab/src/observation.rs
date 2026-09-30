@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use intermed_log::runtime::RuntimeEvent;
+use intermed_log::runtime::{EventTerminality, RuntimeEvent};
 
 use crate::classify::FailureCategory;
 use crate::run::RawSmokeOutput;
@@ -66,6 +66,18 @@ pub enum ObservationStatus {
     Skipped,
 }
 
+/// Whether a finished execution attempt produced compatibility evidence that is
+/// safe to feed into accuracy/calibration.  Attempt completion and evidence
+/// completeness are intentionally separate concepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum EvidenceState {
+    Conclusive,
+    Partial,
+    #[default]
+    Unavailable,
+}
+
 impl ObservationStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -80,6 +92,26 @@ impl ObservationStatus {
             Self::Inconclusive => "inconclusive",
             Self::Skipped => "skipped",
         }
+    }
+
+    #[must_use]
+    pub fn evidence_state(self) -> EvidenceState {
+        match self {
+            Self::Passed | Self::Degraded | Self::Failed | Self::Crashed => {
+                EvidenceState::Conclusive
+            }
+            Self::TimedOutAfterReadiness | Self::TimedOutBeforeReadiness | Self::Inconclusive => {
+                EvidenceState::Partial
+            }
+            Self::HarnessFailure | Self::InfrastructureFailure | Self::Skipped => {
+                EvidenceState::Unavailable
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn eligible_for_accuracy(self) -> bool {
+        self.evidence_state() != EvidenceState::Unavailable
     }
 }
 
@@ -113,6 +145,8 @@ pub struct ExecutionObservation {
     pub schema: String,
     pub environment: String,
     pub status: ObservationStatus,
+    #[serde(default)]
+    pub evidence_state: EvidenceState,
     pub coverage: ExecutionCoverage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub incidents: Vec<IncidentObservation>,
@@ -127,6 +161,8 @@ pub struct ExecutionObservation {
     pub wall_time_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enforced_limits: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_limits: Vec<String>,
     #[serde(default)]
     pub isolation: String,
 }
@@ -142,6 +178,7 @@ pub fn observe_smoke(raw: &RawSmokeOutput) -> ExecutionObservation {
 
     let mut incidents = Vec::new();
     let mut background_events = Vec::new();
+    let mut nonterminal_candidates = Vec::new();
     for event in &events {
         let projected = project_event(event);
         let has_failure_shape = projected.category.is_some()
@@ -150,15 +187,29 @@ pub fn observe_smoke(raw: &RawSmokeOutput) -> ExecutionObservation {
         if !has_failure_shape {
             continue;
         }
-        // A non-zero process exit is terminal evidence supplied by the harness,
-        // even when the captured launcher dialect had no recognizable FATAL
-        // marker. Prefer the last classified event below by retaining all
-        // candidates here; evaluation still records the parser terminality.
-        if event.terminality.is_terminal() || (!raw.exited_ok && projected.category.is_some()) {
+        if event.terminality.is_terminal() {
             incidents.push(projected);
-        } else {
+        } else if matches!(
+            event.terminality,
+            EventTerminality::Recovered | EventTerminality::BackgroundError
+        ) {
             background_events.push(projected);
+        } else {
+            nonterminal_candidates.push(projected);
         }
+    }
+
+    // A non-zero exit can corroborate one otherwise-unmarked terminal event, but
+    // it must never promote every earlier warning/error in the process.  Use only
+    // the last structured failure candidate when no parser-confirmed terminal
+    // event exists; all earlier candidates remain background context.
+    if incidents.is_empty() && !raw.exited_ok && !raw.timed_out {
+        if let Some(last) = nonterminal_candidates.pop() {
+            background_events.append(&mut nonterminal_candidates);
+            incidents.push(last);
+        }
+    } else {
+        background_events.append(&mut nonterminal_candidates);
     }
 
     let mut failure_categories = incidents
@@ -188,7 +239,7 @@ pub fn observe_smoke(raw: &RawSmokeOutput) -> ExecutionObservation {
         raw.isolation.as_str(),
         "" | "external-capture" | "test" | "static-only"
     ) {
-        for limit in ["memory", "cpu", "process-count", "written-bytes"] {
+        for limit in &raw.requested_limits {
             if !raw.enforced_limits.iter().any(|value| value == limit) {
                 coverage.gaps.push(format!(
                     "execution backend did not attest the `{limit}` limit"
@@ -233,10 +284,12 @@ pub fn observe_smoke(raw: &RawSmokeOutput) -> ExecutionObservation {
         ObservationStatus::Failed
     };
 
+    let evidence_state = status.evidence_state();
     ExecutionObservation {
         schema: OBSERVATION_SCHEMA.to_string(),
         environment: raw.environment.clone(),
         status,
+        evidence_state,
         coverage,
         incidents,
         background_events,
@@ -245,6 +298,7 @@ pub fn observe_smoke(raw: &RawSmokeOutput) -> ExecutionObservation {
         timed_out: raw.timed_out,
         wall_time_ms: raw.wall_time_ms,
         enforced_limits: raw.enforced_limits.clone(),
+        requested_limits: raw.requested_limits.clone(),
         isolation: raw.isolation.clone(),
     }
 }
@@ -281,6 +335,11 @@ fn project_event(event: &RuntimeEvent) -> IncidentObservation {
                 .chain(std::iter::once(frame.class.clone()))
         })
         .collect::<Vec<_>>();
+    if category == Some(FailureCategory::MissingDependency)
+        && let Some(consumer) = dependency_consumer(&text)
+    {
+        attributed_subjects.push(consumer);
+    }
     attributed_subjects.sort();
     attributed_subjects.dedup();
     IncidentObservation {
@@ -297,6 +356,19 @@ fn project_event(event: &RuntimeEvent) -> IncidentObservation {
         source_line: event.source_line,
         source_fragment: event.source_fragment,
     }
+}
+
+fn dependency_consumer(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start = lower.find("mod ")? + "mod ".len();
+    let rest = text.get(start..)?.trim_start();
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let consumer = rest[..end]
+        .trim_matches(|character: char| {
+            character.is_ascii_punctuation() || matches!(character, '„' | '“' | '”' | '«' | '»')
+        })
+        .trim();
+    (!consumer.is_empty()).then(|| consumer.to_string())
 }
 
 fn classify_event(event: &RuntimeEvent, text: &str) -> Option<FailureCategory> {
@@ -320,7 +392,7 @@ fn classify_event(event: &RuntimeEvent, text: &str) -> Option<FailureCategory> {
         || deepest.ends_with("ClassNotFoundException")
     {
         Some(FailureCategory::ClassNotFound)
-    } else if lower.contains("requires") && lower.contains("missing") {
+    } else if is_loader_dependency_failure(event, &lower) {
         Some(FailureCategory::MissingDependency)
     } else if lower.contains("registry is already frozen") || lower.contains("registry freeze") {
         Some(FailureCategory::RegistryFreezeError)
@@ -342,13 +414,47 @@ fn classify_event(event: &RuntimeEvent, text: &str) -> Option<FailureCategory> {
     }
 }
 
+fn is_loader_dependency_failure(event: &RuntimeEvent, lower: &str) -> bool {
+    let logger = event.logger.as_deref().unwrap_or("").to_ascii_lowercase();
+    let loader_context = logger.contains("fabric")
+        || logger.contains("forge")
+        || logger.contains("neoforge")
+        || logger.contains("quilt")
+        || logger.contains("modlauncher")
+        || lower.contains("mod loading has failed")
+        || lower.contains("incompatible mod set")
+        || lower.contains("could not find required mod")
+        || lower.contains("requires version");
+    let loader_context = loader_context
+        || ((lower.trim_start().starts_with("mod ") || lower.contains(": mod "))
+            && lower.contains(" requires "));
+    let dependency_shape = lower.contains("could not find required mod")
+        || lower.contains("requires version")
+        || lower.contains("requires mod")
+        || (lower.contains("requires")
+            && (lower.contains("which is missing")
+                || lower.contains("but it is not installed")
+                || lower.contains("currently, it is not installed")));
+    loader_context && dependency_shape
+}
+
 fn coverage_from_log(log: &str, log_complete: bool) -> ExecutionCoverage {
     let lower = log.to_ascii_lowercase();
-    let mut reached = if log.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![RuntimeMilestone::LoaderResolution]
-    };
+    let mut reached = Vec::new();
+    let loader_markers = [
+        "fabric loader",
+        "quilt loader",
+        "forge mod loader",
+        "neoforge",
+        "modlauncher",
+        "loading minecraft ",
+        "loading mods",
+        "loading 1 mod",
+        "loading 2 mods",
+    ];
+    if loader_markers.iter().any(|marker| lower.contains(marker)) {
+        reached.push(RuntimeMilestone::LoaderResolution);
+    }
     let markers = [
         (
             RuntimeMilestone::CommonSetup,
@@ -364,7 +470,7 @@ fn coverage_from_log(log: &str, log_complete: bool) -> ExecutionCoverage {
         ),
         (
             RuntimeMilestone::WorldLoaded,
-            ["preparing spawn area", "loaded world"],
+            ["loaded world", "world load complete"],
         ),
         (
             RuntimeMilestone::PlayerJoined,
@@ -376,11 +482,11 @@ fn coverage_from_log(log: &str, log_complete: bool) -> ExecutionCoverage {
         ),
         (
             RuntimeMilestone::DatapackLoad,
-            ["loaded datapack", "data pack"],
+            ["loaded datapack", "loaded data pack"],
         ),
         (
             RuntimeMilestone::SteadyStateTicks,
-            ["can't keep up", "mspt"],
+            ["average tick time", "mean tick time"],
         ),
         (
             RuntimeMilestone::GracefulShutdown,
@@ -391,6 +497,14 @@ fn coverage_from_log(log: &str, log_complete: bool) -> ExecutionCoverage {
         if needles.iter().any(|needle| lower.contains(needle)) {
             reached.push(milestone);
         }
+    }
+    // A sampled MSPT value is steady-state evidence only after readiness; an
+    // early "can't keep up" line is not.
+    if (reached.contains(&RuntimeMilestone::ServerStarted)
+        || reached.contains(&RuntimeMilestone::ClientInit))
+        && (lower.contains(" mspt:") || lower.contains("mspt="))
+    {
+        reached.push(RuntimeMilestone::SteadyStateTicks);
     }
     let mut gaps = Vec::new();
     if !log_complete {
@@ -423,6 +537,7 @@ mod tests {
             skipped: false,
             wall_time_ms: None,
             enforced_limits: Vec::new(),
+            requested_limits: Vec::new(),
             isolation: "test".into(),
         }
     }
@@ -459,6 +574,108 @@ mod tests {
         assert_eq!(
             observation.incidents[0].throwable_type.as_deref(),
             Some("java.lang.OutOfMemoryError")
+        );
+    }
+
+    #[test]
+    fn arbitrary_nonempty_log_does_not_reach_loader_resolution() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "Error: Could not create the Java Virtual Machine",
+        ));
+        assert!(
+            !observation
+                .coverage
+                .reaches(RuntimeMilestone::LoaderResolution)
+        );
+    }
+
+    #[test]
+    fn negative_or_preparatory_markers_do_not_claim_runtime_coverage() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "Preparing spawn area: 10%\nFailed to load data pack\nCan't keep up!",
+        ));
+        assert!(!observation.coverage.reaches(RuntimeMilestone::WorldLoaded));
+        assert!(!observation.coverage.reaches(RuntimeMilestone::DatapackLoad));
+        assert!(
+            !observation
+                .coverage
+                .reaches(RuntimeMilestone::SteadyStateTicks)
+        );
+    }
+
+    #[test]
+    fn nonzero_exit_promotes_only_the_last_unmarked_failure() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "[main/ERROR]: Mixin apply failed optional probe\n[main/ERROR]: java.lang.OutOfMemoryError: heap",
+        ));
+        assert_eq!(observation.incidents.len(), 1);
+        assert_eq!(
+            observation.incidents[0].category,
+            Some(FailureCategory::OutOfMemory)
+        );
+        assert_eq!(observation.background_events.len(), 1);
+    }
+
+    #[test]
+    fn nonzero_exit_does_not_promote_known_background_error() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "[update-check/ERROR]: java.io.IOException: update check failed\nConnection reset",
+        ));
+        assert!(observation.incidents.is_empty());
+        assert_eq!(observation.background_events.len(), 1);
+        assert_eq!(observation.status, ObservationStatus::Failed);
+        assert!(observation.failure_categories.is_empty());
+    }
+
+    #[test]
+    fn generic_requires_missing_text_is_not_a_dependency_failure() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "[worker/ERROR]: Rendering requires missing texture state",
+        ));
+        assert!(
+            !observation
+                .failure_categories
+                .contains(&FailureCategory::MissingDependency)
+        );
+    }
+
+    #[test]
+    fn final_loader_abort_does_not_inherit_an_earlier_unconnected_category() {
+        let observation = observe_smoke(&raw(
+            false,
+            false,
+            "[main/FATAL]: InvalidMixinException: apply failed\n[main/FATAL]: Mod sicherheit requires fabric-api which is missing",
+        ));
+        assert_eq!(
+            observation.failure_categories,
+            vec![FailureCategory::MissingDependency]
+        );
+    }
+
+    #[test]
+    fn operational_failures_are_not_accuracy_labels() {
+        for status in [
+            ObservationStatus::HarnessFailure,
+            ObservationStatus::InfrastructureFailure,
+            ObservationStatus::Skipped,
+        ] {
+            assert!(!status.eligible_for_accuracy());
+            assert_eq!(status.evidence_state(), EvidenceState::Unavailable);
+        }
+        assert!(ObservationStatus::TimedOutAfterReadiness.eligible_for_accuracy());
+        assert_eq!(
+            ObservationStatus::TimedOutAfterReadiness.evidence_state(),
+            EvidenceState::Partial
         );
     }
 }

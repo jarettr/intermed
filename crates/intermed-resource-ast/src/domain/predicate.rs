@@ -79,5 +79,6 @@ fn push_ref(
         required: conditions.is_empty(),
         conditions: conditions.to_vec(),
         is_tag,
+        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
     });
 }

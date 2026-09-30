@@ -18,10 +18,11 @@
 //!   tags a plan with the engines it requires (in-process Datalog / DuckDB / Souffle
 //!   / WASM) for the query router.
 //!
-//! DataFusion, Polars, Ascent, and Wasmtime integrations are available behind
-//! additive crate features. DuckDB and Souffle execute the same IR through
-//! `intermed-duckdb` and `intermed-rules`. Collectors still project their row-oriented
-//! facts into Arrow rather than emitting Arrow builders directly.
+//! The production execution surfaces are the native columnar engine and DuckDB
+//! (which also serves as the SQL parity oracle). DataFusion, Polars, Ascent,
+//! Soufflé, and Wasmtime integrations are experimental and feature/tool gated.
+//! Collectors still project their row-oriented facts into Arrow rather than
+//! emitting Arrow builders directly.
 //!
 //! [`RecordBatch`]: arrow::record_batch::RecordBatch
 //! [`RelExpr`]: ir::RelExpr

@@ -11,12 +11,14 @@ For a mods directory these run as part of a normal `doctor` run:
 
 - **Signature status** — whether signing material is absent, incomplete, invalid,
   cryptographically verified, or could not be verified. File presence alone is
-  never reported as a valid signature.
+  never reported as a valid signature. Verification proves signed-entry integrity;
+  without a trusted signer association it does not establish publisher authenticity.
   Most Fabric and Forge mods ship unsigned; this is reported as informational
   context, not a problem.
-- **Trust score** — a 0–100 score per artifact from how well it is identified
-  (known id, version, platform, verified signature). The report includes the
-  points contributed by each signal. Lower is less certain.
+- **Trust score** — a derived 0–100 display summary. The report also carries the
+  independent identity, distribution, binary-integrity, exact-materialization,
+  and cryptographic-authenticity axes used for reasoning. Policy never infers
+  safety from the combined score.
 - **Coremods** — Forge bytecode transformers a mod ships, which run before mixins
   and outside their model.
 - **Dangerous-API surface** — a count of classes in a jar that reference
@@ -47,21 +49,20 @@ with `--explain` to see which classes carry the references.
 
 ## Low provenance meets a dangerous capability
 
-The trust score and the dangerous-API surface are weak on their own — most mods are
+Provenance metadata and the dangerous-API surface are weak on their own — most mods are
 unsigned, and large mods legitimately use reflection. They are far more telling
-*together*. InterMed correlates the two: when a jar that could **not** be
-confidently identified (trust below the `well_identified_trust` threshold) also
-statically references a high-risk capability — process spawning, `Unsafe` / native
-class definition, or a script engine — it raises a single
-`low-trust-capability:<jar>` finding (`warn`, security).
+*together*. InterMed correlates the two using typed provenance axes: unresolved
+identity, unknown distribution, and no exact binary pin. The numeric trust score
+is presentation only (the old threshold remains for legacy facts). When that weak
+provenance also accompanies a shared high-risk capability — process spawning,
+dynamic class definition, or script-engine evaluation — it raises one finding
+keyed by ArtifactId. `Unsafe` is elevated context, not a high-risk trigger by itself.
 
 The reasoning is explicit in the finding, including the score decomposition and
-identity status. A metadata parser failure is treated as incomplete analysis and
-does not independently amplify the security signal; genuinely absent identity
-metadata can. The fix it
-suggests is to establish the jar's provenance (a known platform, a signature or a
-real manifest) before trusting a jar that spawns processes, loads native code, or
-evaluates scripts. `--explain` shows both sides of the link — the SBOM trust fact
+identity status. Canonical Layer-B identity replaces an H-local parse failure and
+causes every provenance axis to be recomputed. Signature integrity alone does not
+identify a publisher. Establish a known project association or an exact binary pin
+before trusting an opaque artifact with high-risk capabilities. `--explain` shows both sides of the link — the SBOM trust fact
 and the capability fact — so you can judge it yourself.
 
 This is one correlation in a wider set; see

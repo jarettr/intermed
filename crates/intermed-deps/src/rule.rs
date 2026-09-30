@@ -33,9 +33,23 @@ impl Rule for DependencyRule {
                 kind::PROVIDED_DEPENDENCY,
                 kind::ARTIFACT_IDENTITY,
             ])
+            .optional_facts([
+                kind::DEPENDENCY_EXPRESSION,
+                kind::ENVIRONMENT,
+                kind::JAVA_RUNTIME,
+                kind::MOD_METADATA,
+                kind::IMPLICIT_DEPENDENCY_CANDIDATE,
+                kind::IMPLICIT_DEPENDENCY_EDGE,
+                kind::NAMESPACE_OWNER,
+                kind::RESOURCE_DEFINITION,
+                kind::PACKAGE_OWNER,
+                kind::BYTECODE_REFERENCE,
+            ])
+            .refutation_facts([kind::CHECKSUM, kind::SCAN_TRUNCATED])
             .layers([Layer::Metadata, Layer::Dependency, Layer::Sbom])
             .regions([TargetRegion::Artifacts, TargetRegion::Metadata])
             .coverage([
+                CoverageRequirement::LocalArtifact,
                 CoverageRequirement::CompletePack,
                 CoverageRequirement::CompleteProviderUniverse,
                 CoverageRequirement::ActiveDescriptor,
@@ -49,6 +63,7 @@ impl Rule for DependencyRule {
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
         let mut out = pairwise_findings(ctx, self.id());
+        out.extend(crate::quilt::expression_findings(ctx.store, self.id()));
         out.extend(ordering_findings(ctx, self.id()));
         out.extend(implicit_findings(ctx, self.id()));
         out.extend(effective_findings(ctx, self.id()));
@@ -96,6 +111,15 @@ fn should_emit_pubgrub_unsat(
 /// That case surfaces an informational `dependency-resolution-skipped` note so
 /// the result is not silently indistinguishable from "satisfiable".
 fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) -> Option<Finding> {
+    let dependency_model = crate::ResolvedDependencyModel::from_store(ctx.store);
+    let semantic_coverage_complete = dependency_model.coverage.package_catalog.is_complete()
+        && dependency_model.coverage.provider_universe.is_complete()
+        && dependency_model
+            .coverage
+            .descriptor_activation
+            .is_complete()
+        && dependency_model.coverage.version_semantics.is_complete()
+        && dependency_model.coverage.applicability.is_complete();
     let outcome = match resolve_store(ctx.store) {
         Ok(outcome) => outcome,
         // A genuine resolver error: surface it instead of dropping it.
@@ -108,6 +132,7 @@ fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) ->
             proof_packages,
             proof_dependencies,
         } if should_emit_pubgrub_unsat(pairwise, &proof_dependencies)
+            && semantic_coverage_complete
             && !explanation.trim().is_empty() =>
         {
             Some(pubgrub_unsat_finding(
@@ -120,6 +145,17 @@ fn resolution_finding(ctx: &RuleCtx<'_>, rule_id: &str, pairwise: &[Finding]) ->
         }
         // Pairwise checks already named a concrete missing dependency; the global
         // tree would be redundant. The graph *was* evaluated, so no skip note.
+        ResolutionOutcome::Unsatisfiable {
+            proof_dependencies, ..
+        } if !semantic_coverage_complete
+            && should_emit_pubgrub_unsat(pairwise, &proof_dependencies) =>
+        {
+            Some(resolution_skipped_finding(
+                ctx,
+                rule_id,
+                "dependency semantic coverage is partial (provider identity, descriptor activation, version language, or artifact coverage is unresolved)",
+            ))
+        }
         ResolutionOutcome::Unsatisfiable { .. } | ResolutionOutcome::Satisfied { .. } => None,
         // The resolver could not evaluate the graph. Only worth saying so when
         // there is actually a catalog to resolve — installed mods *and* declared
@@ -238,9 +274,9 @@ mod tests {
     }
 
     #[test]
-    fn unevaluable_graph_emits_resolution_skipped_note() {
-        // Dependencies exist, but no package carries a parseable version, so the
-        // resolver skips. The user must learn the graph was *not* checked.
+    fn arbitrary_package_version_does_not_make_catalog_partial() {
+        // Raw package versions are represented by surrogate finite-catalog
+        // tokens. Their syntax can no longer make an installed package vanish.
         let mut store = FactStore::new();
         store
             .fact("meta", kind::MOD)
@@ -261,9 +297,12 @@ mod tests {
         assert!(
             findings
                 .iter()
-                .any(|f| f.id == "dependency-resolution-skipped"),
-            "expected a resolution-skipped note, got: {:?}",
-            findings.iter().map(|f| &f.id).collect::<Vec<_>>()
+                .any(|f| f.id == "missing-dependency:alpha->beta")
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.id == "dependency-resolution-skipped")
         );
     }
 

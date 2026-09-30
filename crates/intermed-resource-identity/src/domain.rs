@@ -19,6 +19,10 @@ pub enum ResourceDomain {
     Blockstate,
     LootTable,
     Atlas,
+    Sounds,
+    Shader,
+    Font,
+    Particle,
     Advancement,
     Predicate,
     ItemModifier,
@@ -45,6 +49,10 @@ impl ResourceDomain {
             ResourceDomain::Blockstate => "blockstate",
             ResourceDomain::LootTable => "loot-table",
             ResourceDomain::Atlas => "atlas",
+            ResourceDomain::Sounds => "sounds",
+            ResourceDomain::Shader => "shader",
+            ResourceDomain::Font => "font",
+            ResourceDomain::Particle => "particle",
             ResourceDomain::Advancement => "advancement",
             ResourceDomain::Predicate => "predicate",
             ResourceDomain::ItemModifier => "item-modifier",
@@ -60,9 +68,20 @@ impl ResourceDomain {
     /// of by load order (an *override* on collision), as opposed to a mergeable
     /// document (tags / lang). Used by Layer E to classify collisions.
     pub fn is_single_document(self) -> bool {
-        !matches!(
+        matches!(
             self,
-            ResourceDomain::Tag | ResourceDomain::Lang | ResourceDomain::Properties
+            ResourceDomain::Recipe
+                | ResourceDomain::LootTable
+                | ResourceDomain::Advancement
+                | ResourceDomain::Predicate
+                | ResourceDomain::ItemModifier
+                | ResourceDomain::Model
+                | ResourceDomain::Blockstate
+                | ResourceDomain::Atlas
+                | ResourceDomain::Shader
+                | ResourceDomain::Font
+                | ResourceDomain::Particle
+                | ResourceDomain::PackMcmeta
         )
     }
 }
@@ -93,6 +112,15 @@ pub fn classify(path: &str) -> ResourceDomain {
         return ResourceDomain::BinaryAsset;
     }
     if !path.ends_with(".json") {
+        if path.contains("/shaders/") {
+            return ResourceDomain::Shader;
+        }
+        if path.contains("/font/") {
+            return ResourceDomain::Font;
+        }
+        if path.ends_with(".ogg") || path.contains("/sounds/") {
+            return ResourceDomain::Sounds;
+        }
         return ResourceDomain::BinaryAsset;
     }
     // JSON domains, keyed on the **registry directory** — the path segment
@@ -115,10 +143,16 @@ pub fn classify(path: &str) -> ResourceDomain {
             _ => {}
         }
     } else if path.starts_with("assets/") {
+        if path.ends_with("/sounds.json") {
+            return ResourceDomain::Sounds;
+        }
         match registry {
             "blockstate" | "blockstates" => return ResourceDomain::Blockstate,
             "model" | "models" => return ResourceDomain::Model,
             "atlas" | "atlases" => return ResourceDomain::Atlas,
+            "shader" | "shaders" => return ResourceDomain::Shader,
+            "font" | "fonts" => return ResourceDomain::Font,
+            "particle" | "particles" => return ResourceDomain::Particle,
             _ => {}
         }
     }

@@ -400,6 +400,7 @@ impl CampaignExecutor for FileCampaignExecutor {
                 skipped: true,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "static-only".to_string(),
             });
         };
@@ -618,7 +619,7 @@ fn execute_attempt(
     let observation_path = case_dir.join("observation.json");
     write_json_atomic(&observation_path, &observation)?;
     let accuracy_report = if let Some(report) = &doctor_report
-        && observation.status != crate::observation::ObservationStatus::Skipped
+        && observation.status.eligible_for_accuracy()
     {
         let accuracy_path = case_dir.join("accuracy.json");
         crate::eval::evaluate_observation_pair(
@@ -711,6 +712,7 @@ mod tests {
                 skipped: false,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "test".into(),
             })
         }
@@ -755,6 +757,7 @@ mod tests {
                 skipped: false,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "test".into(),
             })
         }
@@ -789,6 +792,7 @@ mod tests {
                 skipped: false,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "test".into(),
             })
         }
@@ -810,6 +814,7 @@ mod tests {
                 skipped: false,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "test".into(),
             })
         }
@@ -834,6 +839,7 @@ mod tests {
                 skipped: false,
                 wall_time_ms: None,
                 enforced_limits: Vec::new(),
+                requested_limits: Vec::new(),
                 isolation: "test".into(),
             })
         }
@@ -929,6 +935,7 @@ mod tests {
             schema: crate::observation::OBSERVATION_SCHEMA.to_string(),
             environment: "static-only".to_string(),
             status: crate::observation::ObservationStatus::Skipped,
+            evidence_state: crate::observation::EvidenceState::Unavailable,
             coverage: crate::observation::ExecutionCoverage::default(),
             incidents: Vec::new(),
             background_events: Vec::new(),
@@ -937,6 +944,7 @@ mod tests {
             timed_out: false,
             wall_time_ms: None,
             enforced_limits: Vec::new(),
+            requested_limits: Vec::new(),
             isolation: "not-executed".to_string(),
         };
         assert_eq!(

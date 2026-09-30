@@ -14,7 +14,7 @@ use arrow::array::{
     UInt64Array, UInt64Builder,
 };
 use arrow::record_batch::RecordBatch;
-use intermed_facts::{AttrValue, Fact, FactId, SourceRef};
+use intermed_facts::{AttrValue, Attributes, Fact, FactId, InternedString, SourceRef};
 
 use crate::error::ColumnarError;
 use crate::schema::{fact_attributes_schema, facts_schema};
@@ -175,7 +175,7 @@ pub fn batches_to_facts(
     let a_float = col::<Float64Array>(attributes, 6, "Float64Array")?;
     let a_bool = col::<BooleanArray>(attributes, 7, "BooleanArray")?;
 
-    let mut attrs_by_fact: BTreeMap<u64, BTreeMap<String, AttrValue>> = BTreeMap::new();
+    let mut attrs_by_fact: BTreeMap<u64, BTreeMap<InternedString, AttrValue>> = BTreeMap::new();
     for r in 0..attributes.num_rows() {
         let val = match a_type.value(r) {
             "str" => AttrValue::Str(a_str.value(r).to_string()),
@@ -187,7 +187,7 @@ pub fn batches_to_facts(
         attrs_by_fact
             .entry(a_id.value(r))
             .or_default()
-            .insert(a_key.value(r).to_string(), val);
+            .insert(a_key.value(r).into(), val);
     }
 
     let mut out = Vec::with_capacity(facts.num_rows());
@@ -195,11 +195,15 @@ pub fn batches_to_facts(
         let fid = id.value(r);
         out.push(Fact {
             id: FactId(fid),
-            kind: kind.value(r).to_string(),
-            subject: subject.value(r).to_string(),
-            attributes: attrs_by_fact.remove(&fid).unwrap_or_default(),
+            kind: kind.value(r).into(),
+            subject: subject.value(r).into(),
+            attributes: attrs_by_fact
+                .remove(&fid)
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<Attributes>(),
             source: SourceRef {
-                locator: locator.value(r).to_string(),
+                locator: locator.value(r).into(),
                 line: if line.is_null(r) {
                     None
                 } else {
@@ -212,7 +216,7 @@ pub fn batches_to_facts(
                 },
             },
             confidence: confidence.value(r),
-            extractor: extractor.value(r).to_string(),
+            extractor: extractor.value(r).into(),
         });
     }
     Ok(out)

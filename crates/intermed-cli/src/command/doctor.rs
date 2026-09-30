@@ -286,7 +286,7 @@ pub struct DoctorTuningArgs {
     #[arg(long = "security-min-note-signals", value_name = "N")]
     pub security_min_note_signals: Option<usize>,
 
-    /// SBOM trust score (0..=100) for well-identified jars (default: 60).
+    /// Legacy threshold for SBOM facts without typed provenance axes (default: 60).
     #[arg(long = "sbom-well-identified-trust", value_name = "SCORE")]
     pub sbom_well_identified_trust: Option<i64>,
 
@@ -343,7 +343,8 @@ pub enum LogicMode {
     /// in-process engine — optimizing logical/physical planner with hash join/aggregate.
     /// Pure Rust, always available.
     Columnar,
-    /// Soufflé Datalog backend (requires the `souffle` binary). Same IR, external engine.
+    /// Experimental Soufflé parity backend (requires the `souffle` binary). Not a
+    /// production-supported execution surface.
     Souffle,
     /// In-process DuckDB SQL rule backend (requires `--features duckdb`). Same IR.
     Duckdb,

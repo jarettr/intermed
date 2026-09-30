@@ -9,12 +9,29 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use intermed_doctor_core::evidence::Severity;
-
 use crate::apply_failure::ApplyFailure;
 use crate::composition::{CompositionClass, SiteComposition};
-use crate::severity::{ConfirmationLevel, SeverityInputs, recommended_severity};
 use crate::site::ApplicationSite;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MixinVerdictStrength {
+    StaticExact,
+    StaticDescriptorAware,
+    StaticNameOnly,
+    Heuristic,
+}
+
+impl MixinVerdictStrength {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StaticExact => "static-exact",
+            Self::StaticDescriptorAware => "static-descriptor-aware",
+            Self::StaticNameOnly => "static-name-only",
+            Self::Heuristic => "heuristic",
+        }
+    }
+}
 
 /// The dominant character of a cluster, which drives its headline and action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -60,9 +77,9 @@ pub struct RiskCluster {
     /// Aggregate confidence (the minimum site confidence — the weakest link).
     pub confidence: u8,
     /// How this cluster's verdict is backed (plan Phase 14).
-    pub confirmation_level: ConfirmationLevel,
-    /// Recommended severity under the unified model (plan Phase 14).
-    pub severity: Severity,
+    /// Evidence/verdict strength only. Final disposition and severity belong to
+    /// the core trust-contract assessment engine.
+    pub verdict_strength: MixinVerdictStrength,
     /// 0–100 how clear the fix is.
     pub actionability: u8,
     pub headline: String,
@@ -70,9 +87,9 @@ pub struct RiskCluster {
 }
 
 /// Strongest confirmation level backing this target's failures (plan Phase 14).
-fn cluster_confirmation(group: &[&ApplicationSite], any_failure: bool) -> ConfirmationLevel {
+fn cluster_confirmation(group: &[&ApplicationSite], any_failure: bool) -> MixinVerdictStrength {
     if !any_failure {
-        return ConfirmationLevel::HeuristicSite;
+        return MixinVerdictStrength::Heuristic;
     }
     // Bytecode-backed failure (selector / local capture / resolved-against-index).
     let bytecode_backed = group.iter().any(|s| {
@@ -85,7 +102,7 @@ fn cluster_confirmation(group: &[&ApplicationSite], any_failure: bool) -> Confir
             )
     });
     if bytecode_backed {
-        return ConfirmationLevel::StaticExact;
+        return MixinVerdictStrength::StaticExact;
     }
     let descriptor_backed = group.iter().any(|s| {
         s.signature_check.is_failure()
@@ -96,9 +113,9 @@ fn cluster_confirmation(group: &[&ApplicationSite], any_failure: bool) -> Confir
             )
     });
     if descriptor_backed {
-        return ConfirmationLevel::StaticDescriptorAware;
+        return MixinVerdictStrength::StaticDescriptorAware;
     }
-    ConfirmationLevel::StaticNameOnly
+    MixinVerdictStrength::StaticNameOnly
 }
 
 /// Severity ordering for composition classes (higher = worse).
@@ -119,7 +136,7 @@ pub fn build_clusters(
     sites: &[ApplicationSite],
     apply_failures: &[ApplyFailure],
     compositions: &[SiteComposition],
-    coverage_conclusive: bool,
+    _coverage_conclusive: bool,
 ) -> Vec<RiskCluster> {
     // Index sites + compositions by target class.
     let mut by_target: BTreeMap<&str, Vec<&ApplicationSite>> = BTreeMap::new();
@@ -136,9 +153,12 @@ pub fn build_clusters(
             .or_default()
             .push(c);
     }
-    let mut failures_by_target: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut failures_by_target: BTreeMap<&str, Vec<&ApplyFailure>> = BTreeMap::new();
     for f in apply_failures {
-        *failures_by_target.entry(f.target.as_str()).or_default() += 1;
+        failures_by_target
+            .entry(f.target.as_str())
+            .or_default()
+            .push(f);
     }
 
     let mut out = Vec::new();
@@ -156,12 +176,25 @@ pub fn build_clusters(
             .iter()
             .filter(|s| s.local_capture_status.is_failure())
             .count();
-        let resolution_failures = group
+        // The same failed target resolution is represented both on the site and
+        // as an ApplyFailure. Count semantic failing units, not evidence rows, so
+        // one condition cannot inflate a cluster twice.
+        let mut apply_failure_units = BTreeSet::new();
+        for site in group
             .iter()
-            .filter(|s| s.target_resolution.is_failure())
-            .count();
-        let apply_failures_n =
-            failures_by_target.get(target).copied().unwrap_or(0) + resolution_failures;
+            .filter(|site| site.target_resolution.is_failure())
+        {
+            apply_failure_units.insert((site.mixin_class.clone(), site.target_method.clone()));
+        }
+        for failure in failures_by_target.get(target).into_iter().flatten() {
+            let member = if failure.member.is_empty() {
+                "<target-class>".to_string()
+            } else {
+                failure.member.clone()
+            };
+            apply_failure_units.insert((failure.mixin.clone(), member));
+        }
+        let apply_failures_n = apply_failure_units.len();
 
         let worst_composition = comps_by_target.get(target).and_then(|cs| {
             cs.iter()
@@ -191,11 +224,17 @@ pub fn build_clusters(
             continue;
         };
 
-        let confidence = group.iter().map(|s| s.confidence).min().unwrap_or(0);
-        let confirmation_level = cluster_confirmation(&group, any_failure);
-        // Impact proxy: a real apply/conflict failure is high-impact, a crowded
-        // target is low. (Phase 12 perf impact can refine this later.)
-        let impact: u8 = if any_failure || high_conflict { 80 } else { 30 };
+        let confidence = group
+            .iter()
+            .map(|site| {
+                site.precision
+                    .identity
+                    .min(site.precision.activation)
+                    .min(site.precision.verification)
+            })
+            .min()
+            .unwrap_or(0);
+        let verdict_strength = cluster_confirmation(&group, any_failure);
         let (actionability, headline, recommended_action) = describe(
             kind,
             target,
@@ -205,14 +244,6 @@ pub fn build_clusters(
             signature_failures,
             local_failures,
         );
-        let severity = recommended_severity(&SeverityInputs {
-            confirmation: confirmation_level,
-            is_failure: any_failure || high_conflict,
-            coverage_conclusive,
-            impact,
-            actionability,
-        });
-
         out.push(RiskCluster {
             id: format!("cluster-{target}"),
             kind,
@@ -225,8 +256,7 @@ pub fn build_clusters(
             local_failures,
             worst_composition,
             confidence,
-            confirmation_level,
-            severity,
+            verdict_strength,
             actionability,
             headline,
             recommended_action,
@@ -293,6 +323,8 @@ mod tests {
         ApplicationSite {
             site_id: format!("{mod_id}::M::h->{target}#tick()V@HEAD"),
             mod_id: mod_id.into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: format!("{mod_id}.jar"),
             config_path: "m.json".into(),
             mixin_class: format!("{mod_id}.M"),
@@ -320,7 +352,8 @@ mod tests {
             } else {
                 crate::selector::SelectorVerification::Matched
             },
-            signature_check: crate::signature::SignatureCheck::Valid,
+            selector_offsets: Vec::new(),
+            signature_check: crate::signature::SignatureCheck::CompatibleShape,
             local_capture_status: crate::locals::LocalCaptureStatus::NoLocalCapture,
             side: crate::model::Side::Both,
             activation: crate::model::ActivationStatus::ActiveAssumed,
@@ -329,8 +362,10 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence: 90,
             imprecision_reasons: Vec::new(),
+            precision: Default::default(),
         }
     }
 
@@ -342,6 +377,23 @@ mod tests {
         assert_eq!(clusters[0].kind, ClusterKind::ApplyFailure);
         assert_eq!(clusters[0].selector_failures, 1);
         assert!(clusters[0].actionability >= 80);
+    }
+
+    #[test]
+    fn site_and_apply_fact_for_one_failure_count_once() {
+        let mut failed = site("a", "net.minecraft.Foo", false);
+        failed.target_resolution = crate::target_res::TargetResolution::MissingMethod;
+        let apply = ApplyFailure {
+            kind: crate::apply_failure::ApplyFailureKind::TargetMethodMissing,
+            mod_id: "a".into(),
+            mixin: failed.mixin_class.clone(),
+            target: failed.target_class.clone(),
+            member: failed.target_method.clone(),
+            detail: "missing".into(),
+            confirmed: true,
+        };
+        let clusters = build_clusters(&[failed], &[apply], &[], true);
+        assert_eq!(clusters[0].apply_failures, 1);
     }
 
     #[test]
@@ -360,6 +412,7 @@ mod tests {
             target_class: "net.minecraft.Baz".into(),
             site_key: "tick()V@INVOKE".into(),
             classification: CompositionClass::HighConflict,
+            co_application: crate::composition::CoApplication::Active,
             cross_mod: true,
             participants: vec![CompositionParticipant {
                 site_id: "x".into(),
@@ -368,6 +421,9 @@ mod tests {
                 role: HandlerRole::Replacement,
                 priority: 1000,
                 cancellable: false,
+                activation: crate::model::ActivationStatus::ActiveConfirmed,
+                effect_proven: true,
+                original_call_count: Some(0),
             }],
             detail: String::new(),
         };

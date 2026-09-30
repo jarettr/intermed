@@ -1,13 +1,15 @@
 //! [`OfflineDependencyProvider`] population from a [`ModpackGraph`].
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use creeper_semver_pubgrub::SmallVersion;
 use pubgrub::OfflineDependencyProvider;
+use semver::Version;
 use thiserror::Error;
 
 use crate::graph::{MODPACK_ROOT_ID, ModpackGraph, is_platform_dep};
 use crate::ranges::ModRange;
+use crate::relation::DependencyRelation;
 use crate::semver::{parse_mod_version, version_in_range_with_dialect};
 
 /// PubGrub provider type used for modpack resolution.
@@ -32,47 +34,13 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
         .ok_or_else(|| ProviderError::RootVersion(ROOT_VERSION.to_string()))?;
 
     let mut provider = ModpackProvider::new();
-    let mut versions_by_id: HashMap<String, BTreeMap<SmallVersion, String>> = HashMap::new();
-    let installed_ids: HashSet<&str> = graph
-        .packages
-        .iter()
-        .map(|package| package.id.as_str())
-        .collect();
-
-    for package in &graph.packages {
-        let Some(parsed) = parse_mod_version(&package.version) else {
-            continue;
-        };
-        versions_by_id
-            .entry(package.id.clone())
-            .or_default()
-            .insert(parsed, package.version.clone());
-    }
-
     let unknown_provider_ids = graph
         .provides
         .iter()
         .filter(|alias| alias.provider_version.is_none())
         .map(|alias| alias.alias_id.clone())
         .collect::<HashSet<_>>();
-    for alias in &graph.provides {
-        // A real installed package owns its id. Otherwise retain *every*
-        // provider candidate: the first bundled copy may be out of range while
-        // a later one satisfies the dependency (common with Fabric API modules).
-        if installed_ids.contains(alias.alias_id.as_str()) {
-            continue;
-        }
-        let Some(raw_version) = alias.provider_version.as_deref() else {
-            continue;
-        };
-        let Some(parsed) = parse_mod_version(raw_version) else {
-            continue;
-        };
-        versions_by_id
-            .entry(alias.alias_id.clone())
-            .or_default()
-            .insert(parsed, raw_version.to_string());
-    }
+    let versions_by_id = catalog_versions(graph);
 
     for (package_id, versions) in &versions_by_id {
         for parsed_version in versions.keys() {
@@ -87,13 +55,65 @@ pub fn build_provider(graph: &ModpackGraph) -> Result<ModpackProvider, ProviderE
         .iter()
         .filter(|p| p.id != MODPACK_ROOT_ID)
         .filter_map(|p| {
-            let parsed = parse_mod_version(&p.version)?;
+            let parsed = versions_by_id
+                .get(&p.id)?
+                .iter()
+                .find_map(|(token, raw)| (raw == &p.version).then(|| token.clone()))?;
             Some((p.id.clone(), ModRange::singleton(parsed)))
         })
         .collect();
 
     provider.add_dependencies(MODPACK_ROOT_ID.to_string(), root, root_deps);
     Ok(provider)
+}
+
+/// Assign stable, semantically opaque PubGrub versions to every raw installed
+/// version. Loader-specific predicates are evaluated against the raw strings;
+/// these tokens only identify members of that finite catalog.
+pub(crate) fn catalog_versions(
+    graph: &ModpackGraph,
+) -> HashMap<String, BTreeMap<SmallVersion, String>> {
+    let installed_ids = graph
+        .packages
+        .iter()
+        .map(|package| package.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut raw = BTreeMap::<String, BTreeSet<String>>::new();
+    for package in &graph.packages {
+        raw.entry(package.id.clone())
+            .or_default()
+            .insert(package.version.clone());
+    }
+    for alias in &graph.provides {
+        if installed_ids.contains(alias.alias_id.as_str()) {
+            continue;
+        }
+        if let Some(version) = &alias.provider_version {
+            raw.entry(alias.alias_id.clone())
+                .or_default()
+                .insert(version.clone());
+        }
+    }
+    surrogate_catalog(raw)
+}
+
+fn surrogate_catalog(
+    raw_versions: BTreeMap<String, BTreeSet<String>>,
+) -> HashMap<String, BTreeMap<SmallVersion, String>> {
+    raw_versions
+        .into_iter()
+        .map(|(id, versions)| {
+            let catalog = versions
+                .into_iter()
+                .enumerate()
+                .map(|(index, raw)| {
+                    let ordinal = u64::try_from(index + 1).unwrap_or(u64::MAX);
+                    (SmallVersion::from(Version::new(0, 0, ordinal)), raw)
+                })
+                .collect();
+            (id, catalog)
+        })
+        .collect()
 }
 
 fn dependency_constraints(
@@ -106,7 +126,7 @@ fn dependency_constraints(
     for edge in &graph.edges {
         if edge.from != from_id
             || !edge.mandatory
-            || edge.relation != "depends"
+            || !DependencyRelation::parse(&edge.relation).contributes_to_solver()
             || is_platform_dep(&edge.to)
         {
             continue;

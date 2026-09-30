@@ -173,6 +173,26 @@ fn doctor_rejects_log_telemetry_consent_without_destination_before_scan() {
 }
 
 #[test]
+fn invalid_config_analysis_depth_is_rejected_before_analysis() {
+    let fixture = Fixture::new("invalid-config-depth");
+    let config = fixture.root.join("intermed.toml");
+    std::fs::write(
+        &config,
+        "schema = \"intermed-config-v1\"\n[resource]\nlevel = \"ful\"\n",
+    )
+    .unwrap();
+
+    let output = run(["--config", config.to_str().unwrap(), "--dump-config"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("could not resolve configuration"));
+    assert!(stderr.contains("ful"));
+    assert!(stderr.contains("basic"));
+    assert!(stderr.contains("semantic"));
+    assert!(stderr.contains("full"));
+}
+
+#[test]
 fn doctor_rejects_two_stdout_report_formats() {
     let fixture = Fixture::new("doctor-double-stdout");
     fixture.write_safe_merge_mods();
@@ -223,7 +243,7 @@ fn doctor_explain_security_finding_matches_golden_output() {
     ]);
     assert_success_or_warnings(&output);
 
-    let actual = normalize_fact_ids(&String::from_utf8(output.stdout).unwrap());
+    let actual = normalize_fact_ids(&normalize_stdout(&output, &fixture.root));
     assert_eq!(actual, include_str!("golden/doctor_explain_security.txt"));
 }
 
@@ -584,12 +604,14 @@ fn lab_eval_scores_doctor_predictions_against_ground_truth() {
     let run_path = fixture.root.join("lab-run.json");
     std::fs::write(
         &run_path,
-        r#"{"schema":"intermed-lab-run-v1","corpus_digest":"x",
+        r#"{"schema":"intermed-lab-run-v2","corpus_digest":"x",
             "environment":{"loader":"fabric","mc_version":"1.20.1","side":"server"},
             "results":[{"environment":"fabric-server","status":"fail",
                         "failure":"mixin-apply-error","detail":"Mixin failed to apply",
                         "attributions":[{"category":"mixin-apply-error",
-                            "subject":"net.minecraft.client.render.WorldRenderer"}]}]}"#,
+                            "subject":"net.minecraft.client.render.WorldRenderer"}]},
+                       {"environment":"neoforge-server","status":"inconclusive",
+                        "detail":"Exited before loader readiness"}]}"#,
     )
     .unwrap();
 
@@ -610,7 +632,10 @@ fn lab_eval_scores_doctor_predictions_against_ground_truth() {
     assert_success(&eval);
 
     let acc: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
-    assert_eq!(acc["schema"], "intermed-rule-accuracy-v3");
+    assert_eq!(acc["schema"], "intermed-rule-accuracy-v4");
+    assert_eq!(acc["cases"], 2);
+    assert_eq!(acc["eligible_cases"], 1);
+    assert_eq!(acc["excluded_cases"], 1);
     let mixin = acc["by_category"]
         .as_array()
         .unwrap()
@@ -932,7 +957,7 @@ fn rules_check_rejects_invalid_rule_pack() {
     std::fs::create_dir_all(&rules).unwrap();
     std::fs::write(
         rules.join("bad.json"),
-        r#"{"schema":"intermed-rule-pack-v1","id":"bad","rules":[]}"#,
+        r#"{"schema":"intermed-rule-pack-v3","id":"bad","rules":[]}"#,
     )
     .unwrap();
 
@@ -1014,6 +1039,9 @@ fn vfs_m_regression_corpus_expected_policy() {
          br#"{"type":"create:crushing","ingredients":[{"item":"minecraft:tuff"}],"results":[{"item":"minecraft:gold_nugget"}]}"#),
         ("data/c/tags/items/ingots.json", br#"{"values":["alpha:ingot"]}"#),
         ("data/c/loot_tables/blocks/ore.json", br#"{"pools":[{"entries":[{"type":"minecraft:item","name":"alpha:gem"}]}]}"#),
+        ("data/c/loot_tables/chests/chance.json", br#"{"pools":[{"rolls":1,"entries":[{"type":"minecraft:item","name":"minecraft:diamond"}]}]}"#),
+        ("data/c/recipes/stack.json", br#"{"type":"minecraft:crafting_shapeless","ingredients":[{"item":"minecraft:coal"}],"result":{"id":"minecraft:diamond","count":1}}"#),
+        ("assets/c/models/item/widget.json", br#"{"parent":"minecraft:item/generated","textures":{"layer0":"alpha:item/widget"}}"#),
         ("assets/c/lang/en_us.json", br#"{"item.shared":"Alpha"}"#),
         ("pack.mcmeta", br#"{"pack":{"pack_format":15,"description":"alpha"}}"#),
     ];
@@ -1022,6 +1050,9 @@ fn vfs_m_regression_corpus_expected_policy() {
          br#"{"type":"create:crushing","ingredients":[{"item":"minecraft:tuff"}],"results":[{"item":"createaddition:electrum_nugget"}]}"#),
         ("data/c/tags/items/ingots.json", br#"{"values":["beta:ingot"]}"#),
         ("data/c/loot_tables/blocks/ore.json", br#"{"pools":[{"entries":[{"type":"minecraft:item","name":"beta:gem"}]}]}"#),
+        ("data/c/loot_tables/chests/chance.json", br#"{"pools":[{"rolls":10,"entries":[{"type":"minecraft:item","name":"minecraft:diamond"}]}]}"#),
+        ("data/c/recipes/stack.json", br#"{"type":"minecraft:crafting_shapeless","ingredients":[{"item":"minecraft:coal"}],"result":{"id":"minecraft:diamond","count":64}}"#),
+        ("assets/c/models/item/widget.json", br#"{"parent":"minecraft:item/generated","textures":{"layer0":"beta:item/widget"}}"#),
         ("assets/c/lang/en_us.json", br#"{"item.shared":"Beta"}"#),
         ("pack.mcmeta", br#"{"pack":{"pack_format":18,"description":"beta"}}"#),
     ];
@@ -1059,6 +1090,24 @@ fn vfs_m_regression_corpus_expected_policy() {
             .map(|(s, _)| s.as_str()),
         Some("warn"),
     );
+    assert_eq!(
+        idx.get("loot-table-structure-override:data/c/loot_tables/chests/chance.json")
+            .map(|(s, _)| s.as_str()),
+        Some("warn"),
+        "same drops with different rolls remain a semantic conflict",
+    );
+    assert_eq!(
+        idx.get("recipe-output-override:data/c/recipes/stack.json")
+            .map(|(s, _)| s.as_str()),
+        Some("warn"),
+        "output quantity participates in recipe semantics",
+    );
+    assert_eq!(
+        idx.get("model-texture-override:assets/c/models/item/widget.json")
+            .map(|(s, _)| s.as_str()),
+        Some("note"),
+        "same-parent texture changes use their precise finding family",
+    );
 
     // Lang key conflict → a single grouped note (Layer M owns it; Layer E stays quiet).
     assert_eq!(
@@ -1066,11 +1115,12 @@ fn vfs_m_regression_corpus_expected_policy() {
         Some("note")
     );
 
-    // Safe tag set-union merge → info + explain-only (hidden from default report).
+    // Safe tag set-union merge keeps its rule-level note semantics while the
+    // presentation policy makes it explain-only.
     let safe_tag = "resource-conflict:safe-crdt-merge:data/c/tags/items/ingots.json";
     assert_eq!(
         idx.get(safe_tag),
-        Some(&("info".to_string(), "explain-only".to_string()))
+        Some(&("note".to_string(), "explain-only".to_string()))
     );
 
     // pack.mcmeta override → overlay-only (expected; an overlay carries its own).

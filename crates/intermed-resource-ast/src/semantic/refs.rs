@@ -8,17 +8,78 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::domain::tag::TagEntrySummary;
 use crate::model::{CachedResourceAst, ParseStatus, RefRelation};
 use crate::semantic::namespace::{is_platform_namespace, path_namespace};
 
 /// One parsed resource attributed to the jar that shipped it.
 #[derive(Debug, Clone)]
 pub struct ResourceAstRecord {
-    /// Jar file name (e.g. `create-1.20.1.jar`).
+    /// Root-qualified artifact locator (e.g. `mods/create.jar`).
     pub archive: String,
+    /// Stable content identity when known, otherwise an explicit unresolved id.
+    pub artifact_id: String,
     /// Resolved writer/mod id (e.g. `create`).
     pub writer: String,
     pub ast: CachedResourceAst,
+}
+
+/// A physical resource path observed in the ZIP central directory, even when its
+/// body was too large or otherwise unavailable to the AST parser.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ResourcePresence {
+    pub archive: String,
+    pub artifact_id: String,
+    pub writer: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DefinitionState {
+    ValidDefinition,
+    InvalidDefinition,
+    PresentUnparsed,
+}
+
+/// Resolution of a resource path after separating physical presence from parse
+/// validity. Multiple competing states remain explicit instead of being treated
+/// as a normal valid definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionResolution {
+    ValidDefinition,
+    InvalidDefinition,
+    PresentUnparsed,
+    Absent,
+    Ambiguous(BTreeSet<DefinitionState>),
+}
+
+impl DefinitionState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ValidDefinition => "valid-definition",
+            Self::InvalidDefinition => "invalid-definition",
+            Self::PresentUnparsed => "present-unparsed",
+        }
+    }
+}
+
+/// One writer's contribution to a tag. Contributions stay separate until a
+/// resource-priority order is known; `replace:true` must never be guessed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagContribution {
+    pub writer: String,
+    pub artifact_id: String,
+    pub replace: bool,
+    pub entries: Vec<TagEntrySummary>,
+}
+
+/// Effective tag membership result. Append-only contributions are order
+/// independent; `replace:true` requires an authoritative low-to-high resource
+/// priority and otherwise remains explicitly unresolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectiveTagMembership {
+    Resolved(BTreeSet<TagEntrySummary>),
+    OrderDependent { writers: Vec<String> },
 }
 
 impl ResourceAstRecord {
@@ -43,6 +104,7 @@ pub struct RefEdge {
     pub required: bool,
     pub conditions: Vec<crate::model::ResourceCondition>,
     pub is_tag: bool,
+    pub certainty: crate::model::ReferenceCertainty,
 }
 
 /// The aggregated reference graph for a whole pack.
@@ -50,6 +112,7 @@ pub struct RefEdge {
 pub struct ResourceGraph {
     /// `resource_path → set of writers that define it`.
     pub definitions: BTreeMap<String, BTreeSet<String>>,
+    definition_states: BTreeMap<String, BTreeSet<DefinitionState>>,
     /// All outgoing reference edges.
     pub references: Vec<RefEdge>,
     /// `namespace → set of writers that ship resources under it`.
@@ -63,13 +126,15 @@ pub struct ResourceGraph {
     /// Minecraft jar, `--minecraft-jar`), if loaded. Lets `minecraft:` references
     /// resolve against real vanilla resources instead of being blanket-satisfied.
     external_definitions: BTreeSet<String>,
+    external_definition_states: BTreeMap<String, BTreeSet<DefinitionState>>,
     /// True only when the external vanilla artifact was scanned without a
     /// relevant gap. Partial records may satisfy observed references, but may
     /// never justify an absence conclusion.
-    vanilla_index_complete: bool,
-    /// `tag resource_path → entry ids` for every tag (pack + vanilla), the basis
-    /// for effective tag-membership expansion.
-    tag_entries: BTreeMap<String, Vec<String>>,
+    vanilla_coverage: BTreeMap<String, intermed_evidence::CoverageState>,
+    /// Pack and vanilla contributions are kept apart so reloading a baseline can
+    /// never erase a pack override under `data/minecraft/tags/...`.
+    pack_tags: BTreeMap<String, Vec<TagContribution>>,
+    vanilla_tags: BTreeMap<String, Vec<TagContribution>>,
 }
 
 /// MC 1.21 registry-folder renames (plural ≤1.20 ↔ singular 1.21+).
@@ -85,15 +150,39 @@ const REGISTRY_FOLDER_RENAMES: &[(&str, &str)] = &[
 
 /// Normalize a resource path's registry folder to its singular (1.21) form so the
 /// same logical resource compares equal regardless of MC version's folder naming.
+///
+/// Only the **registry-folder segment** (the third slash-delimited component of a
+/// MC path: `data/<ns>/<registry>/…` or `assets/<ns>/<registry>/…`) is touched.
+/// A whole-string `replace` would also mangle namespace names or sub-directory names
+/// that happen to share a word with a registry folder (e.g. a namespace called
+/// `advancements_mod`, or a nested path `loot_tables/loot_tables/foo.json`).
 fn canonical_registry_path(path: &str) -> String {
-    let mut p = path.to_string();
-    for (plural, singular) in REGISTRY_FOLDER_RENAMES {
-        let from = format!("/{plural}/");
-        if p.contains(&from) {
-            p = p.replace(&from, &format!("/{singular}/"));
-        }
+    // Split off the first two components (`data` or `assets`, then the namespace).
+    // The registry folder is the third component; everything after is kept verbatim.
+    let mut components = path.splitn(4, '/');
+    let root = components.next().unwrap_or("");
+    let ns = components.next().unwrap_or("");
+    let registry = components.next().unwrap_or("");
+    let rest = components.next().unwrap_or("");
+
+    // Map the registry folder to its canonical (singular) form if it matches.
+    let canonical_registry = REGISTRY_FOLDER_RENAMES
+        .iter()
+        .find_map(|(plural, singular)| {
+            if *plural == registry {
+                Some(*singular)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(registry);
+
+    if rest.is_empty() {
+        // Path has ≤ 3 components — nothing to normalise (no registry folder present).
+        path.to_string()
+    } else {
+        format!("{root}/{ns}/{canonical_registry}/{rest}")
     }
-    p
 }
 
 impl ResourceGraph {
@@ -113,18 +202,50 @@ impl ResourceGraph {
                 .canonical_definitions
                 .insert(canonical_registry_path(&path));
             graph
-                .namespace_owners
-                .entry(rec.definition_namespace())
+                .definition_states
+                .entry(canonical_registry_path(&path))
                 .or_default()
-                .insert(rec.writer.clone());
+                .insert(match rec.ast.parse_status {
+                    ParseStatus::Invalid => DefinitionState::InvalidDefinition,
+                    ParseStatus::Skipped => DefinitionState::PresentUnparsed,
+                    ParseStatus::Parsed | ParseStatus::PartiallyParsed => {
+                        DefinitionState::ValidDefinition
+                    }
+                });
 
-            if let crate::model::ResourceSummary::Tag(t) = &rec.ast.summary {
-                graph.tag_entries.insert(path.clone(), t.entries.clone());
+            // Regression: only record namespace ownership when the writer *actually*
+            // provides that namespace (not when a mod drops a file under
+            // `data/minecraft/…` to override vanilla). A pack writer that puts a
+            // file under a `minecraft` namespace does NOT make `minecraft` an
+            // installed/owned namespace — that would skip the vanilla-index gate and
+            // re-introduce dangling false-positives for every other minecraft ref.
+            let ns = rec.definition_namespace();
+            if ns != "minecraft" || rec.writer == "minecraft" {
+                graph
+                    .namespace_owners
+                    .entry(ns)
+                    .or_default()
+                    .insert(rec.writer.clone());
             }
 
+            // Invalid summaries are untrusted and cannot contribute membership.
             if matches!(rec.ast.parse_status, ParseStatus::Invalid) {
                 continue;
             }
+
+            if let crate::model::ResourceSummary::Tag(t) = &rec.ast.summary {
+                graph
+                    .pack_tags
+                    .entry(path.clone())
+                    .or_default()
+                    .push(TagContribution {
+                        writer: rec.writer.clone(),
+                        artifact_id: rec.artifact_id.clone(),
+                        replace: t.replace,
+                        entries: t.entries.clone(),
+                    });
+            }
+
             for r in &rec.ast.references {
                 graph.references.push(RefEdge {
                     from_path: path.clone(),
@@ -135,10 +256,28 @@ impl ResourceGraph {
                     required: r.required,
                     conditions: r.conditions.clone(),
                     is_tag: r.is_tag,
+                    certainty: r.certainty,
                 });
             }
         }
         graph
+    }
+
+    /// Add central-directory presence records. Parsed records replace the weaker
+    /// `present-unparsed` state; paths without ASTs still resolve as physically
+    /// present and therefore cannot become false dangling references.
+    pub fn add_presences(&mut self, presences: &[ResourcePresence]) {
+        for presence in presences {
+            self.definitions
+                .entry(presence.path.clone())
+                .or_default()
+                .insert(presence.writer.clone());
+            let canonical = canonical_registry_path(&presence.path);
+            self.canonical_definitions.insert(canonical.clone());
+            self.definition_states
+                .entry(canonical)
+                .or_insert_with(|| BTreeSet::from([DefinitionState::PresentUnparsed]));
+        }
     }
 
     /// Record that `writer` ships resources under `namespace` (used to seed
@@ -156,27 +295,72 @@ impl ResourceGraph {
     /// and index vanilla tags for membership expansion. The records themselves are
     /// **not** added as writers — vanilla is the baseline, not a competing writer,
     /// so it never produces collision/override diffs or per-resource facts.
-    pub fn add_vanilla_index(&mut self, records: &[ResourceAstRecord], complete: bool) {
-        self.vanilla_index_complete = complete;
+    ///
+    /// Calling this more than once replaces the previous vanilla index entirely —
+    /// the external definitions and any vanilla tag entries are cleared first so
+    /// that stale data from a prior load (different MC version, different jar) does
+    /// not bleed into the new index.
+    pub fn add_vanilla_index(
+        &mut self,
+        records: &[ResourceAstRecord],
+        presences: &[ResourcePresence],
+        coverage: BTreeMap<String, intermed_evidence::CoverageState>,
+    ) {
+        self.external_definitions.clear();
+        self.external_definition_states.clear();
+        self.vanilla_tags.clear();
+
+        self.vanilla_coverage = coverage;
         if !records.is_empty() {
             self.add_owner("minecraft".to_string(), "minecraft".to_string());
         }
         for rec in records {
             let path = &rec.ast.resource_path;
-            self.external_definitions
-                .insert(canonical_registry_path(path));
+            let canonical = canonical_registry_path(path);
+            self.external_definitions.insert(canonical.clone());
+            self.external_definition_states
+                .entry(canonical)
+                .or_default()
+                .insert(match rec.ast.parse_status {
+                    ParseStatus::Invalid => DefinitionState::InvalidDefinition,
+                    ParseStatus::Skipped => DefinitionState::PresentUnparsed,
+                    ParseStatus::Parsed | ParseStatus::PartiallyParsed => {
+                        DefinitionState::ValidDefinition
+                    }
+                });
             if let crate::model::ResourceSummary::Tag(t) = &rec.ast.summary {
-                self.tag_entries
+                self.vanilla_tags
                     .entry(path.clone())
-                    .or_insert_with(|| t.entries.clone());
+                    .or_default()
+                    .push(TagContribution {
+                        writer: "minecraft".to_string(),
+                        artifact_id: rec.artifact_id.clone(),
+                        replace: t.replace,
+                        entries: t.entries.clone(),
+                    });
             }
+        }
+        for presence in presences {
+            let canonical = canonical_registry_path(&presence.path);
+            self.external_definitions.insert(canonical.clone());
+            self.external_definition_states
+                .entry(canonical)
+                .or_insert_with(|| BTreeSet::from([DefinitionState::PresentUnparsed]));
         }
     }
 
     /// Whether a vanilla index has been loaded (`--minecraft-jar`).
     #[must_use]
     pub fn has_vanilla_index(&self) -> bool {
-        self.vanilla_index_complete
+        !self.external_definitions.is_empty()
+    }
+
+    #[must_use]
+    pub fn vanilla_coverage(
+        &self,
+        domain: crate::model::ResourceDomain,
+    ) -> Option<&intermed_evidence::CoverageState> {
+        self.vanilla_coverage.get(domain.as_str())
     }
 
     /// Whether the index has *any* definition in the same directory as `path` — i.e.
@@ -194,21 +378,118 @@ impl ResourceGraph {
         let Some(slash) = path.rfind('/') else {
             return false;
         };
-        let dir = path[..=slash].to_string(); // includes trailing '/'
+        // Regression: external_definitions stores *canonical* paths (registry folder
+        // already normalised to its singular 1.21 form). The incoming `path` may
+        // still use the plural form (e.g. `data/minecraft/loot_tables/blocks/foo`).
+        // We must canonicalize the directory prefix before the range scan, otherwise
+        // the BTreeMap range misses all entries and the FP gate is never triggered.
+        let raw_dir = &path[..=slash]; // includes trailing '/'
+        let canonical_dir = {
+            let canon = canonical_registry_path(path);
+            let end = canon.rfind('/').map_or(canon.len(), |i| i + 1);
+            canon[..end].to_string()
+        };
         // Only the *vanilla* index counts: a `minecraft:` resource's authoritative set
         // is vanilla, and mods routinely ADD files under `data/minecraft/...` (extending
         // a vanilla tag), which would otherwise make the directory look "covered" while
         // the vanilla set is absent — re-introducing the false positives.
+        let _ = raw_dir; // kept for documentation; canonical_dir is used below
         self.external_definitions
-            .range(dir.clone()..)
+            .range(canonical_dir.clone()..)
             .next()
-            .is_some_and(|k| k.starts_with(&dir))
+            .is_some_and(|k| k.starts_with(&canonical_dir))
     }
 
     /// All known tags' entries (pack + vanilla), keyed by resource path.
     #[must_use]
-    pub fn tag_entries(&self) -> &BTreeMap<String, Vec<String>> {
-        &self.tag_entries
+    pub fn pack_tag_contributions(&self) -> &BTreeMap<String, Vec<TagContribution>> {
+        &self.pack_tags
+    }
+
+    #[must_use]
+    pub fn vanilla_tag_contributions(&self) -> &BTreeMap<String, Vec<TagContribution>> {
+        &self.vanilla_tags
+    }
+
+    /// Resolve one tag using an optional authoritative low-to-high artifact
+    /// priority. Vanilla is always the baseline. Without priority, append-only
+    /// tags safely union; a replacing pack contribution is order-dependent.
+    #[must_use]
+    pub fn effective_tag_membership(
+        &self,
+        path: &str,
+        artifact_priority: Option<&[String]>,
+    ) -> EffectiveTagMembership {
+        let vanilla = self.vanilla_tags.get(path).cloned().unwrap_or_default();
+        let mut pack = self.pack_tags.get(path).cloned().unwrap_or_default();
+
+        if pack.iter().any(|contribution| contribution.replace) {
+            let Some(priority) = artifact_priority else {
+                let mut writers: Vec<_> = pack
+                    .iter()
+                    .map(|contribution| contribution.writer.clone())
+                    .collect();
+                writers.sort();
+                writers.dedup();
+                return EffectiveTagMembership::OrderDependent { writers };
+            };
+            let ranks: BTreeMap<_, _> = priority
+                .iter()
+                .enumerate()
+                .map(|(rank, artifact)| (artifact.as_str(), rank))
+                .collect();
+            if pack
+                .iter()
+                .any(|contribution| !ranks.contains_key(contribution.artifact_id.as_str()))
+            {
+                let mut writers: Vec<_> = pack
+                    .iter()
+                    .map(|contribution| contribution.writer.clone())
+                    .collect();
+                writers.sort();
+                writers.dedup();
+                return EffectiveTagMembership::OrderDependent { writers };
+            }
+            pack.sort_by_key(|contribution| ranks[contribution.artifact_id.as_str()]);
+        }
+
+        let mut entries = BTreeSet::new();
+        for contribution in vanilla.into_iter().chain(pack) {
+            if contribution.replace {
+                entries.clear();
+            }
+            entries.extend(contribution.entries);
+        }
+        EffectiveTagMembership::Resolved(entries)
+    }
+
+    /// Definition state for an expected path. Presence is distinct from validity.
+    #[must_use]
+    pub fn definition_states(&self, path: &str) -> BTreeSet<DefinitionState> {
+        let canonical = canonical_registry_path(path);
+        let mut states = self
+            .definition_states
+            .get(&canonical)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(external) = self.external_definition_states.get(&canonical) {
+            states.extend(external.iter().copied());
+        }
+        states
+    }
+
+    #[must_use]
+    pub fn resolve_definition(&self, path: &str) -> DefinitionResolution {
+        let states = self.definition_states(path);
+        if states.len() > 1 {
+            return DefinitionResolution::Ambiguous(states);
+        }
+        match states.iter().next().copied() {
+            Some(DefinitionState::ValidDefinition) => DefinitionResolution::ValidDefinition,
+            Some(DefinitionState::InvalidDefinition) => DefinitionResolution::InvalidDefinition,
+            Some(DefinitionState::PresentUnparsed) => DefinitionResolution::PresentUnparsed,
+            None => DefinitionResolution::Absent,
+        }
     }
 
     /// Whether the pack (or the vanilla index) defines a resource at `path`,
@@ -350,6 +631,13 @@ impl ResourceGraph {
     /// a missing-dependency concern, not a dangling file). So `minecraft:` refs are
     /// skipped *until* a vanilla index makes `minecraft` owned — then they resolve
     /// against real vanilla resources.
+    ///
+    /// **Model references (`ParentModel`, `UsesModel`) are intentionally excluded.**
+    /// Absence of a model JSON file is not proof of a broken reference — mods
+    /// frequently use runtime-generated/baked models, custom model loaders, or rely
+    /// on a resource pack. Those are surfaced separately by
+    /// [`Self::unresolved_model_references`] as informational only, and raising them
+    /// as findings here produced confirmed false positives on real packs.
     #[must_use]
     pub fn dangling_references(&self) -> Vec<UnresolvedRef<'_>> {
         let mut out = Vec::new();
@@ -361,12 +649,15 @@ impl ResourceGraph {
                 continue;
             }
 
+            // Regression: ParentModel / UsesModel were included here even though the
+            // doc comment of unresolved_model_references says "informational only —
+            // NOT a list of bugs" and warns of confirmed FPs. Remove them so that
+            // dangling_references never returns the same FP class.
             let expected = match e.relation {
-                RefRelation::ParentModel | RefRelation::UsesModel => {
-                    Some(model_resource_path(&e.target))
-                }
                 RefRelation::UsesTexture => Some(texture_resource_path(&e.target)),
                 RefRelation::LootEntry => Some(loot_table_resource_path(&e.target)),
+                RefRelation::ParentAdvancement => Some(advancement_resource_path(&e.target)),
+                #[allow(deprecated)]
                 RefRelation::AdvancementCriterion => Some(advancement_resource_path(&e.target)),
                 _ => None,
             };
@@ -469,6 +760,7 @@ mod tests {
     ) -> ResourceAstRecord {
         ResourceAstRecord {
             archive: archive.into(),
+            artifact_id: format!("unresolved:{archive}"),
             writer: writer.into(),
             ast: CachedResourceAst {
                 schema: "s".into(),
@@ -479,6 +771,8 @@ mod tests {
                 semantic_hash: "h".into(),
                 summary: ResourceSummary::Generic,
                 references: refs,
+                references_complete: true,
+                reference_gap: None,
                 diagnostics: vec![],
             },
         }
@@ -492,6 +786,7 @@ mod tests {
             required: true,
             conditions: Vec::new(),
             is_tag: false,
+            certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
         }
     }
 
@@ -514,6 +809,7 @@ mod tests {
                     required: true,
                     conditions: vec![],
                     is_tag,
+                    certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
                 }
             })
             .collect();
@@ -526,7 +822,11 @@ mod tests {
             has_required_flag: false,
             entries: entries
                 .iter()
-                .map(|s| s.trim_start_matches('#').to_string())
+                .map(|s| crate::domain::tag::TagEntrySummary {
+                    id: s.trim_start_matches('#').to_string(),
+                    is_tag: s.starts_with('#'),
+                    required: true,
+                })
                 .collect(),
         });
         r
@@ -555,7 +855,7 @@ mod tests {
             "data/minecraft/tags/items/logs.json",
             &[],
         )];
-        graph.add_vanilla_index(&vanilla, true);
+        graph.add_vanilla_index(&vanilla, &[], BTreeMap::new());
         assert!(graph.has_vanilla_index());
         assert!(graph.has_definition("data/minecraft/tags/items/logs.json"));
 
@@ -583,7 +883,7 @@ mod tests {
             "data/minecraft/loot_tables/blocks/stone.json",
             vec![],
         )];
-        graph.add_vanilla_index(&vanilla, true);
+        graph.add_vanilla_index(&vanilla, &[], BTreeMap::new());
         assert!(graph.has_vanilla_index());
         // No `data/minecraft/tags/...` in the index → tag directory not covered →
         // no minecraft tag is flagged (would otherwise be a flood of false positives).
@@ -631,6 +931,7 @@ mod tests {
     fn model_record(writer: &str, path: &str, parent: &str) -> ResourceAstRecord {
         ResourceAstRecord {
             archive: format!("{writer}.jar"),
+            artifact_id: format!("unresolved:{writer}.jar"),
             writer: writer.into(),
             ast: CachedResourceAst {
                 schema: "s".into(),
@@ -647,7 +948,10 @@ mod tests {
                     required: true,
                     conditions: Vec::new(),
                     is_tag: false,
+                    certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
                 }],
+                references_complete: true,
+                reference_gap: None,
                 diagnostics: vec![],
             },
         }
@@ -665,6 +969,7 @@ mod tests {
             // a real model that DOES exist in modb
             ResourceAstRecord {
                 archive: "modb.jar".into(),
+                artifact_id: "unresolved:modb.jar".into(),
                 writer: "modb".into(),
                 ast: CachedResourceAst {
                     schema: "s".into(),
@@ -675,6 +980,8 @@ mod tests {
                     semantic_hash: "h".into(),
                     summary: ResourceSummary::Generic,
                     references: vec![],
+                    references_complete: true,
+                    reference_gap: None,
                     diagnostics: vec![],
                 },
             },
@@ -707,6 +1014,7 @@ mod tests {
             ),
             ResourceAstRecord {
                 archive: "modb.jar".into(),
+                artifact_id: "unresolved:modb.jar".into(),
                 writer: "modb".into(),
                 ast: CachedResourceAst {
                     schema: "s".into(),
@@ -717,12 +1025,44 @@ mod tests {
                     semantic_hash: "h".into(),
                     summary: ResourceSummary::Generic,
                     references: vec![],
+                    references_complete: true,
+                    reference_gap: None,
                     diagnostics: vec![],
                 },
             },
         ];
         let graph = ResourceGraph::build(&records);
         assert!(graph.unresolved_model_references().is_empty());
+    }
+
+    #[test]
+    fn physically_present_unparsed_resource_is_not_dangling() {
+        let mut source_ref = rref("modb", "modb:item/huge");
+        source_ref.relation = RefRelation::UsesTexture;
+        let source = record(
+            "mods/modb.jar",
+            "modb",
+            "assets/modb/models/item/source.json",
+            vec![source_ref],
+        );
+        let target_path = "assets/modb/textures/item/huge.png";
+        let mut graph = ResourceGraph::build(&[source]);
+        graph.add_presences(&[ResourcePresence {
+            archive: "mods/modb.jar".into(),
+            artifact_id: "sha256:large".into(),
+            writer: "modb".into(),
+            path: target_path.into(),
+        }]);
+
+        assert!(graph.dangling_references().is_empty());
+        assert_eq!(
+            graph.definition_states(target_path),
+            BTreeSet::from([DefinitionState::PresentUnparsed])
+        );
+        assert_eq!(
+            graph.resolve_definition(target_path),
+            DefinitionResolution::PresentUnparsed
+        );
     }
 
     #[test]
@@ -738,5 +1078,259 @@ mod tests {
         )];
         let graph = ResourceGraph::build(&records);
         assert!(graph.implicit_dependency_candidates().is_empty());
+    }
+
+    // ── Regression tests for resource-graph invariants ─────────────────
+
+    /// Every tag writer remains a separate contribution until priority is known.
+    #[test]
+    fn tag_contributions_preserve_every_writer_and_entry_metadata() {
+        let path = "data/minecraft/tags/items/logs.json";
+        let first = tag_record("modA", path, &["minecraft:oak_log"]);
+        let second = tag_record("modB", path, &["minecraft:birch_log"]);
+        let graph = ResourceGraph::build(&[first, second]);
+        let entries = graph
+            .pack_tag_contributions()
+            .get(path)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entries[0].id, "minecraft:oak_log");
+        assert_eq!(entries[1].entries[0].id, "minecraft:birch_log");
+        assert!(entries.iter().all(|entry| entry.entries[0].required));
+    }
+
+    #[test]
+    fn append_only_tags_union_but_replace_requires_priority() {
+        let path = "data/minecraft/tags/items/logs.json";
+        let first = tag_record("modA", path, &["minecraft:oak_log"]);
+        let mut second = tag_record("modB", path, &["minecraft:birch_log"]);
+        if let ResourceSummary::Tag(tag) = &mut second.ast.summary {
+            tag.replace = true;
+        }
+        let graph = ResourceGraph::build(&[first.clone(), second.clone()]);
+        assert!(matches!(
+            graph.effective_tag_membership(path, None),
+            EffectiveTagMembership::OrderDependent { .. }
+        ));
+
+        let priority = vec![first.artifact_id.clone(), second.artifact_id.clone()];
+        let EffectiveTagMembership::Resolved(entries) =
+            graph.effective_tag_membership(path, Some(&priority))
+        else {
+            panic!("authoritative priority must resolve replacing tags");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.iter().next().unwrap().id, "minecraft:birch_log");
+    }
+
+    #[test]
+    fn replacing_vanilla_index_preserves_pack_minecraft_tag() {
+        let path = "data/minecraft/tags/items/logs.json";
+        let pack = tag_record("create", path, &["create:rubber_log"]);
+        let mut graph = ResourceGraph::build(&[pack]);
+        let vanilla = tag_record("minecraft", path, &["minecraft:oak_log"]);
+        graph.add_vanilla_index(&[vanilla], &[], BTreeMap::new());
+
+        assert_eq!(graph.pack_tag_contributions()[path].len(), 1);
+        let EffectiveTagMembership::Resolved(entries) = graph.effective_tag_membership(path, None)
+        else {
+            panic!("append-only pack and vanilla tags are order independent");
+        };
+        assert!(entries.iter().any(|entry| entry.id == "minecraft:oak_log"));
+        assert!(entries.iter().any(|entry| entry.id == "create:rubber_log"));
+    }
+
+    /// Regression: partial vanilla index (has external_definitions covering the dir
+    /// but NOT the specific tag) must still fire missing_tag_references.
+    /// Previously the FP-gate was correct, but this test pins the behaviour.
+    #[test]
+    fn missing_tag_references_fires_when_dir_is_covered_but_tag_absent() {
+        let pack = vec![tag_record(
+            "create",
+            "data/create/tags/items/woods.json",
+            &["#minecraft:absent_tag"],
+        )];
+        let mut graph = ResourceGraph::build(&pack);
+        // Vanilla index covers the tag directory but NOT the specific tag.
+        let vanilla = vec![tag_record(
+            "minecraft",
+            "data/minecraft/tags/items/logs.json",
+            &[],
+        )];
+        graph.add_vanilla_index(&vanilla, &[], BTreeMap::new());
+        let missing = graph.missing_tag_references();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].1, "#minecraft:absent_tag");
+    }
+
+    /// Regression: canonical_registry_path must only normalise the registry-folder
+    /// segment, not any occurrence elsewhere in the path.
+    #[test]
+    fn canonical_registry_path_only_touches_registry_segment() {
+        // Namespace `advancements_ns` must survive unmodified.
+        assert_eq!(
+            canonical_registry_path("data/advancements_ns/advancements/root.json"),
+            "data/advancements_ns/advancement/root.json",
+        );
+        // Nested sub-directory that happens to share the plural word must not be
+        // touched (only the third component is the registry folder).
+        assert_eq!(
+            canonical_registry_path("data/ns/loot_tables/loot_tables/chest.json"),
+            "data/ns/loot_table/loot_tables/chest.json",
+        );
+        // A path with fewer than 4 components is returned verbatim.
+        assert_eq!(
+            canonical_registry_path("data/ns/advancements"),
+            "data/ns/advancements",
+        );
+        // Normal case: singular form already — no change.
+        assert_eq!(
+            canonical_registry_path("data/ns/advancement/root.json"),
+            "data/ns/advancement/root.json",
+        );
+    }
+
+    /// Regression: has_indexed_dir must canonicalise the query path before searching
+    /// the (already-canonical) external_definitions BTreeMap.
+    #[test]
+    fn has_indexed_dir_plural_path_matches_canonical_external_defs() {
+        let mut graph = ResourceGraph::default();
+        // Vanilla index stores canonical (singular) paths.
+        let vanilla = vec![record(
+            "client.jar",
+            "minecraft",
+            "data/minecraft/loot_table/blocks/stone.json", // singular
+            vec![],
+        )];
+        graph.add_vanilla_index(&vanilla, &[], BTreeMap::new());
+        // Query with plural form must still find the directory.
+        assert!(
+            graph.has_indexed_dir("data/minecraft/loot_tables/blocks/missing.json"),
+            "plural query path must match canonical directory"
+        );
+        // Unrelated directory must not match.
+        assert!(
+            !graph.has_indexed_dir("data/minecraft/loot_tables/archaeology/missing.json"),
+            "uncovered directory must return false"
+        );
+    }
+
+    /// Regression: dangling_references must NOT return ParentModel / UsesModel edges;
+    /// those are FP-prone and covered by unresolved_model_references only.
+    #[test]
+    fn dangling_references_excludes_model_relations() {
+        let records = vec![model_record(
+            "modb",
+            "assets/modb/models/item/a.json",
+            "modb:item/definitely_missing",
+        )];
+        let graph = ResourceGraph::build(&records);
+        // unresolved_model_references sees it (informational).
+        assert!(!graph.unresolved_model_references().is_empty());
+        // dangling_references must NOT include it.
+        assert!(
+            graph.dangling_references().is_empty(),
+            "dangling_references must not surface ParentModel/UsesModel FP class"
+        );
+    }
+
+    /// Regression: a mod writing files under `data/minecraft/…` must NOT cause
+    /// `minecraft` to appear as an owned namespace (which would bypass the
+    /// vanilla-index gate and re-introduce dangling FPs for minecraft refs).
+    #[test]
+    fn minecraft_namespace_not_owned_by_overriding_mod() {
+        let records = vec![
+            // A mod overrides a vanilla tag — drops a file under data/minecraft.
+            tag_record(
+                "create",
+                "data/minecraft/tags/items/logs.json",
+                &["minecraft:oak_log", "create:oak_log"],
+            ),
+            // The mod also ships its own tag in its own namespace.
+            tag_record(
+                "create",
+                "data/create/tags/items/gears.json",
+                &["create:brass_gear"],
+            ),
+        ];
+        let graph = ResourceGraph::build(&records);
+        // `minecraft` must NOT appear as owned (no vanilla index loaded), even
+        // though `create` placed a file under data/minecraft/.
+        assert!(
+            !graph.namespace_is_owned("minecraft"),
+            "minecraft must not be owned merely because a mod overrides a vanilla file"
+        );
+        // create IS owned (it ships pack files under data/create/).
+        assert!(
+            graph.namespace_is_owned("create"),
+            "create must be owned via its own-namespace file"
+        );
+    }
+
+    /// Regression: an Invalid-status tag record must not pollute tag_entries.
+    #[test]
+    fn invalid_tag_not_added_to_tag_entries() {
+        let path = "data/create/tags/items/woods.json";
+        let mut rec = tag_record("create", path, &["create:oak_plank"]);
+        rec.ast.parse_status = ParseStatus::Invalid;
+        let graph = ResourceGraph::build(&[rec]);
+        assert!(
+            !graph.pack_tag_contributions().contains_key(path),
+            "Invalid-status tag must not appear in tag_entries"
+        );
+    }
+
+    #[test]
+    fn malformed_definition_is_present_but_not_valid() {
+        let mut invalid = tag_record("broken", "data/broken/tags/items/x.json", &[]);
+        invalid.ast.parse_status = ParseStatus::Invalid;
+        invalid.ast.summary = ResourceSummary::Generic;
+        let graph = ResourceGraph::build(&[invalid]);
+        let path = "data/broken/tags/items/x.json";
+        assert!(graph.has_definition(path));
+        assert_eq!(
+            graph.definition_states(path),
+            BTreeSet::from([DefinitionState::InvalidDefinition])
+        );
+        assert_eq!(
+            graph.resolve_definition(path),
+            DefinitionResolution::InvalidDefinition
+        );
+        assert!(!graph.pack_tag_contributions().contains_key(path));
+    }
+
+    /// Regression: repeated calls to add_vanilla_index must replace the previous
+    /// index entirely, not accumulate stale external definitions.
+    #[test]
+    fn add_vanilla_index_is_idempotent_and_replaces_previous() {
+        let pack = vec![];
+        let mut graph = ResourceGraph::build(&pack);
+
+        // First load: a 1.20 client jar with stone loot table.
+        let v1 = vec![record(
+            "client-1.20.jar",
+            "minecraft",
+            "data/minecraft/loot_table/blocks/stone.json",
+            vec![],
+        )];
+        graph.add_vanilla_index(&v1, &[], BTreeMap::new());
+        assert!(graph.has_definition("data/minecraft/loot_table/blocks/stone.json"));
+
+        // Second load (1.21 jar): stone loot table gone, only cobblestone present.
+        let v2 = vec![record(
+            "client-1.21.jar",
+            "minecraft",
+            "data/minecraft/loot_table/blocks/cobblestone.json",
+            vec![],
+        )];
+        graph.add_vanilla_index(&v2, &[], BTreeMap::new());
+        // Stale entry from the first load must be gone.
+        assert!(
+            !graph.has_definition("data/minecraft/loot_table/blocks/stone.json"),
+            "stale entry from previous vanilla index must be cleared"
+        );
+        // New entry must be present.
+        assert!(graph.has_definition("data/minecraft/loot_table/blocks/cobblestone.json"));
     }
 }

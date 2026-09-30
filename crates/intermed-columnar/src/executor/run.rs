@@ -234,9 +234,7 @@ pub(super) fn stream<'a>(
                 let out_rel = function.call(&input_rel)?;
                 Ok(relation_to_stream(out_rel))
             }
-            // No such module ⇒ pass tuples through unchanged (historical behavior; the
-            // router would dispatch a real call to the WASM backend).
-            None => stream(input, store, registry),
+            None => Err(ColumnarError::MissingExternalModule(module.clone())),
         },
         PhysicalPlan::JoinFilter {
             left_kind,
@@ -256,12 +254,14 @@ pub(super) fn stream<'a>(
             kinds,
             group_col,
             distinct_attr,
+            filters,
             min_count,
         } => Ok(group_count_distinct(
             store,
             kinds,
             group_col,
             distinct_attr,
+            filters,
             *min_count,
         )),
     }

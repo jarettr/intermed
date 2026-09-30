@@ -266,7 +266,15 @@ fn resolved_from_site(
         .map(|m| m.as_str().to_string())
         .unwrap_or_default();
     let at_detail = site.at.display();
-    let at_target = site.at.value;
+    let at_target = site.at.value.clone();
+    let at_constraints = crate::model::AtVerificationConstraints {
+        slice: site.at.slice.clone(),
+        shift: site.at.shift.clone(),
+        by: site.at.by,
+        opcode: site.at.opcode,
+        args: site.at.args.clone(),
+        id: site.at.id.clone(),
+    };
     ResolvedInjectionPoint {
         target: site.target,
         original: site.original_method,
@@ -286,6 +294,7 @@ fn resolved_from_site(
         local_capture,
         at_ordinal: site.at.ordinal,
         at_target_member: site.at.target.clone(),
+        at_constraints,
         meta: site.meta,
     }
 }

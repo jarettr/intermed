@@ -25,7 +25,7 @@ pub fn reconcile_findings(store: &FactStore, graph: &mut EvidenceGraph, findings
         .collect::<BTreeMap<_, _>>();
     let package_owners = store
         .by_kind(kind::PACKAGE_OWNER)
-        .filter_map(|fact| Some((fact.attr("package")?.to_string(), fact.subject.clone())))
+        .filter_map(|fact| Some((fact.attr("package")?.to_string(), fact.subject.to_string())))
         .collect::<Vec<_>>();
     let authoritative_environment = strongest_environment_fact(store);
 
@@ -150,40 +150,12 @@ pub fn reconcile_findings(store: &FactStore, graph: &mut EvidenceGraph, findings
 }
 
 fn strongest_environment_fact(store: &FactStore) -> Option<&Fact> {
-    fn priority(source: Option<&str>) -> u8 {
-        match source.unwrap_or("") {
-            "explicit-pack-manifest"
-            | "pack-manifest"
-            | "modrinth-manifest"
-            | "curseforge-manifest" => 100,
-            "instance-manifest" | "launcher-manifest" | "instance-metadata" => 90,
-            "runtime-log" => 80,
-            "artifact-consensus" => 50,
-            "filesystem-heuristic" => 10,
-            _ => 40,
-        }
-    }
-    let facts = store
-        .by_kind(kind::ENVIRONMENT)
-        .filter(|fact| fact.attr("loader").is_some())
-        .collect::<Vec<_>>();
-    let best = facts
-        .iter()
-        .map(|fact| priority(fact.attr("loader_source")))
-        .max()?;
-    let mut candidates = facts
-        .into_iter()
-        .filter(|fact| priority(fact.attr("loader_source")) == best)
-        .collect::<Vec<_>>();
-    let loaders = candidates
-        .iter()
-        .filter_map(|fact| fact.attr("loader"))
-        .collect::<BTreeSet<_>>();
-    if loaders.len() != 1 {
-        return None;
-    }
-    candidates.sort_by_key(|fact| fact.id);
-    candidates.into_iter().next()
+    crate::environment::resolve_environment_field(
+        store,
+        "loader",
+        &["loader_source", "evidence_source"],
+    )
+    .fact
 }
 fn invalidate(finding: &mut Finding, evidence: Vec<FactId>) {
     let prior_disposition = finding.assessment.disposition;
@@ -224,7 +196,7 @@ fn runtime_mods(store: &FactStore) -> BTreeMap<String, BTreeSet<String>> {
     let mut out = BTreeMap::new();
     for frame in store.by_kind(kind::STACK_FRAME) {
         if let Some(mod_id) = frame.attr("mod_id").filter(|id| !id.is_empty()) {
-            out.entry(frame.subject.clone())
+            out.entry(frame.subject.to_string())
                 .or_insert_with(BTreeSet::new)
                 .insert(mod_id.to_string());
         }

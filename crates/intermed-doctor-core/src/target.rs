@@ -12,8 +12,26 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::instance_layout::{
-    LayoutKind, ResolvedLayout, mods_dir_for_target, resolve_layout, target_kind_from_layout,
+    InstanceResolutionCertainty, LayoutKind, LayoutTopology, ResolvedLayout, mods_dir_for_target,
+    resolve_layout, target_kind_from_layout,
 };
+
+/// Stable, root-qualified locator for report evidence. The full physical path
+/// remains available as a fact attribute for exact joins, while this form keeps
+/// occurrence identities reproducible across machines and distinguishes common
+/// artifact roots such as `mods/foo.jar` and `plugins/foo.jar`.
+#[must_use]
+pub fn portable_artifact_locator(locator: &str, archive: &str) -> String {
+    let path = Path::new(locator);
+    let parent = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str());
+    match parent {
+        Some(root @ ("mods" | "plugins")) => format!("{root}/{archive}"),
+        _ => archive.to_string(),
+    }
+}
 
 /// The kind of thing a target path points at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +138,8 @@ pub enum InstanceType {
     Server,
     Client,
     Integrated,
+    /// Available evidence does not establish one runtime shape, or conflicts.
+    Unknown,
 }
 
 impl InstanceType {
@@ -129,16 +149,18 @@ impl InstanceType {
             InstanceType::Server => "server",
             InstanceType::Client => "client",
             InstanceType::Integrated => "integrated",
+            InstanceType::Unknown => "unknown",
         }
     }
 
     /// Map to the legacy [`Side`] vocabulary used by side-mismatch rules.
     #[must_use]
-    pub fn to_side(self) -> Side {
+    pub fn to_side(self) -> Option<Side> {
         match self {
-            InstanceType::Server => Side::Server,
-            InstanceType::Client => Side::Client,
-            InstanceType::Integrated => Side::Both,
+            InstanceType::Server => Some(Side::Server),
+            InstanceType::Client => Some(Side::Client),
+            InstanceType::Integrated => Some(Side::Both),
+            InstanceType::Unknown => None,
         }
     }
 }
@@ -150,6 +172,22 @@ pub enum Side {
     Client,
     Server,
     Both,
+}
+
+/// Semantic role of a directory containing runtime artifacts. A server may
+/// expose both mod-loader artifacts and Bukkit-family plugins; collectors must
+/// inspect both roots instead of independently guessing `mods/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactRootRole {
+    Mods,
+    Plugins,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRoot {
+    pub path: PathBuf,
+    pub role: ArtifactRootRole,
 }
 
 /// A classified target plus its root path.
@@ -193,6 +231,40 @@ impl Target {
     #[must_use]
     pub fn mods_dir(&self) -> Option<PathBuf> {
         mods_dir_for_target(self.kind, &self.path, self.mods_dir.as_deref())
+    }
+
+    /// Canonical Bukkit-family plugin directory under the normalized game root.
+    #[must_use]
+    pub fn plugins_dir(&self) -> Option<PathBuf> {
+        self.candidate_roots()
+            .into_iter()
+            .map(|root| root.join("plugins"))
+            .find(|path| path.is_dir())
+    }
+
+    /// Canonical runtime-artifact inventory roots, in deterministic order.
+    ///
+    /// This is the only root-discovery API artifact collectors should use. It
+    /// keeps normalized launcher game roots and Bukkit-family plugin roots
+    /// consistent across metadata, SBOM, security, VFS and resource analysis.
+    #[must_use]
+    pub fn artifact_roots(&self) -> Vec<ArtifactRoot> {
+        let mut roots = Vec::new();
+        if let Some(path) = self.mods_dir().filter(|path| path.is_dir()) {
+            roots.push(ArtifactRoot {
+                path,
+                role: ArtifactRootRole::Mods,
+            });
+        }
+        if let Some(path) = self.plugins_dir() {
+            roots.push(ArtifactRoot {
+                path,
+                role: ArtifactRootRole::Plugins,
+            });
+        }
+        roots.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.role.cmp(&b.role)));
+        roots.dedup();
+        roots
     }
 
     /// Directories under which runtime artifacts (`logs/`, `crash-reports/`,
@@ -240,8 +312,16 @@ pub struct Environment {
     pub side: Option<Side>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_type: Option<InstanceType>,
+    /// Confidence of the instance-type resolution, kept separate from the
+    /// legacy side projection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_type_certainty: Option<InstanceResolutionCertainty>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instance_type_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<LayoutKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout_topology: Option<LayoutTopology>,
     /// Host launcher application (`prism`, `multimc`, `curseforge`, `vanilla`, …).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_launcher: Option<String>,
@@ -362,5 +442,37 @@ mod tests {
         assert_eq!(target.kind, TargetKind::Instance);
         assert_eq!(target.layout, Some(LayoutKind::DotMinecraft));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn artifact_roots_include_normalized_mods_and_plugins_only_once() {
+        let surface = temp("artifact-roots");
+        let game_root = surface.join(".minecraft");
+        fs::create_dir_all(game_root.join("mods")).unwrap();
+        fs::create_dir_all(game_root.join("plugins")).unwrap();
+        let target = Target {
+            path: surface.clone(),
+            kind: TargetKind::Instance,
+            mods_dir: Some(game_root.join("mods")),
+            game_root: Some(game_root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+
+        assert_eq!(
+            target.artifact_roots(),
+            vec![
+                ArtifactRoot {
+                    path: game_root.join("mods"),
+                    role: ArtifactRootRole::Mods,
+                },
+                ArtifactRoot {
+                    path: game_root.join("plugins"),
+                    role: ArtifactRootRole::Plugins,
+                },
+            ]
+        );
+        fs::remove_dir_all(surface).ok();
     }
 }

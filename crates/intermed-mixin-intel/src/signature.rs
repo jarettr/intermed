@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case")]
 pub enum SignatureCheck {
     /// The signature is consistent with the operation's requirements.
-    Valid,
+    /// The limited operation-specific checks found no violation. This is not a
+    /// proof that the complete Mixin signature contract is valid.
+    #[serde(alias = "valid")]
+    CompatibleShape,
     /// An `@Inject` handler with no `CallbackInfo`/`CallbackInfoReturnable` parameter.
     MissingCallbackInfo,
     /// The handler's return type is wrong for the operation (e.g. a value-modifying
@@ -22,6 +25,8 @@ pub enum SignatureCheck {
     WrongReturnType,
     /// A MixinExtras wrapper (`@WrapOperation`) missing its `Operation` parameter.
     MissingOperationParam,
+    /// Handler descriptor contradicts the exact target/member descriptor.
+    TargetDescriptorMismatch,
     /// A selector kind / operation whose signature we do not statically check.
     Unsupported,
     /// No handler descriptor was available to check.
@@ -32,10 +37,11 @@ pub enum SignatureCheck {
 impl SignatureCheck {
     pub fn as_str(self) -> &'static str {
         match self {
-            SignatureCheck::Valid => "valid",
+            SignatureCheck::CompatibleShape => "compatible-shape",
             SignatureCheck::MissingCallbackInfo => "missing-callback-info",
             SignatureCheck::WrongReturnType => "wrong-return-type",
             SignatureCheck::MissingOperationParam => "missing-operation-param",
+            SignatureCheck::TargetDescriptorMismatch => "target-descriptor-mismatch",
             SignatureCheck::Unsupported => "unsupported",
             SignatureCheck::Unchecked => "unchecked",
         }
@@ -48,6 +54,7 @@ impl SignatureCheck {
             SignatureCheck::MissingCallbackInfo
                 | SignatureCheck::WrongReturnType
                 | SignatureCheck::MissingOperationParam
+                | SignatureCheck::TargetDescriptorMismatch
         )
     }
 }
@@ -141,7 +148,7 @@ pub fn check_handler_signature(
                         .to_string(),
                 );
             }
-            (SignatureCheck::Valid, String::new())
+            (SignatureCheck::CompatibleShape, String::new())
         }
         "modify-return-value"
         | "modify-arg"
@@ -154,7 +161,7 @@ pub fn check_handler_signature(
                     format!("@{operation} handler must return the modified value, not void"),
                 );
             }
-            (SignatureCheck::Valid, String::new())
+            (SignatureCheck::CompatibleShape, String::new())
         }
         "wrap-operation" => {
             if !params.iter().any(|p| is_operation_param(p)) {
@@ -163,7 +170,7 @@ pub fn check_handler_signature(
                     "@WrapOperation handler has no Operation<T> parameter".to_string(),
                 );
             }
-            (SignatureCheck::Valid, String::new())
+            (SignatureCheck::CompatibleShape, String::new())
         }
         "wrap-with-condition" => {
             if ret != "Z" {
@@ -172,11 +179,76 @@ pub fn check_handler_signature(
                     format!("@WrapWithCondition handler must return boolean, got `{ret}`"),
                 );
             }
-            (SignatureCheck::Valid, String::new())
+            (SignatureCheck::CompatibleShape, String::new())
         }
         // Redirect / modify-args / accessor / invoker / overwrite etc. need the
         // call/target signature to check soundly — left unsupported here.
         _ => (SignatureCheck::Unsupported, String::new()),
+    }
+}
+
+/// Target-aware signature checks. This deliberately reports
+/// `CompatibleShape`, not `Valid`: Mixin has operation-specific details that are
+/// not all representable without generic signatures and annotation context.
+pub fn check_handler_signature_with_target(
+    operation: &str,
+    handler_descriptor: &str,
+    target_descriptor: Option<&str>,
+    selected_member_descriptor: Option<&str>,
+) -> (SignatureCheck, String) {
+    let base = check_handler_signature(operation, handler_descriptor);
+    if base.0.is_failure() || matches!(base.0, SignatureCheck::Unchecked) {
+        return base;
+    }
+    let Some((params, ret)) = parse_descriptor(handler_descriptor) else {
+        return base;
+    };
+    match operation {
+        "modify-args" => {
+            if ret != "V" || !params.iter().any(|param| param.ends_with("/Args;")) {
+                return (
+                    SignatureCheck::TargetDescriptorMismatch,
+                    "@ModifyArgs handler must accept Args and return void".to_string(),
+                );
+            }
+        }
+        "overwrite" => {
+            if let Some(target) = target_descriptor
+                && handler_descriptor != target
+            {
+                return (
+                    SignatureCheck::TargetDescriptorMismatch,
+                    format!(
+                        "@Overwrite descriptor `{handler_descriptor}` differs from target `{target}`"
+                    ),
+                );
+            }
+        }
+        "redirect" => {
+            if let Some(member) = selected_member_descriptor
+                && let Some((_, member_return)) = parse_descriptor(member)
+                && ret != member_return
+            {
+                return (
+                    SignatureCheck::WrongReturnType,
+                    format!(
+                        "@Redirect returns `{ret}` but selected invocation returns `{member_return}`"
+                    ),
+                );
+            }
+        }
+        "modify-receiver" if ret == "V" => {
+            return (
+                SignatureCheck::WrongReturnType,
+                "@ModifyReceiver must return the receiver value".to_string(),
+            );
+        }
+        _ => {}
+    }
+    if matches!(base.0, SignatureCheck::Unsupported) {
+        (SignatureCheck::CompatibleShape, String::new())
+    } else {
+        base
     }
 }
 
@@ -202,7 +274,7 @@ mod tests {
     #[test]
     fn inject_needs_callback_info_and_void() {
         let (ok, _) = check_handler_signature("inject", &format!("({CI})V"));
-        assert_eq!(ok, SignatureCheck::Valid);
+        assert_eq!(ok, SignatureCheck::CompatibleShape);
 
         let (missing, _) = check_handler_signature("inject", "(I)V");
         assert_eq!(missing, SignatureCheck::MissingCallbackInfo);
@@ -216,7 +288,7 @@ mod tests {
         let (bad, _) = check_handler_signature("modify-return-value", "(I)V");
         assert_eq!(bad, SignatureCheck::WrongReturnType);
         let (ok, _) = check_handler_signature("modify-return-value", "(I)I");
-        assert_eq!(ok, SignatureCheck::Valid);
+        assert_eq!(ok, SignatureCheck::CompatibleShape);
     }
 
     #[test]
@@ -224,7 +296,7 @@ mod tests {
         let op = "Lcom/llamalad7/mixinextras/injector/wrapoperation/Operation;";
         let (ok, _) =
             check_handler_signature("wrap-operation", &format!("(I{op})Ljava/lang/Object;"));
-        assert_eq!(ok, SignatureCheck::Valid);
+        assert_eq!(ok, SignatureCheck::CompatibleShape);
         let (bad, _) = check_handler_signature("wrap-operation", "(I)Ljava/lang/Object;");
         assert_eq!(bad, SignatureCheck::MissingOperationParam);
     }

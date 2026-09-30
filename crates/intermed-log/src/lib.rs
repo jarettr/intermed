@@ -9,7 +9,7 @@
 //! Collector and rule live together because the failure-signature vocabulary is
 //! one body of knowledge.
 
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use intermed_doctor_core::evidence::{
@@ -252,8 +252,20 @@ impl Collector for LogCollector {
             kind::THROWABLE_NODE,
             kind::STACK_FRAME,
             kind::LOG_SIGNAL,
+            kind::LOG_CRASH,
+            kind::LOG_MOD_ERROR,
+            kind::LOG_MENTIONS_MOD,
+            kind::ENVIRONMENT,
+            kind::JAVA_RUNTIME,
+            kind::CHECKSUM,
+            kind::SCAN_TRUNCATED,
         ])
         .regions([intermed_doctor_core::TargetRegion::Logs])
+        .consumes([
+            kind::PACKAGE_OWNER,
+            kind::MOD_METADATA,
+            kind::MOD_CAPABILITY,
+        ])
     }
     fn applies(&self, target: &Target) -> bool {
         target.kind.is_log() || target_has_logs(target)
@@ -261,7 +273,7 @@ impl Collector for LogCollector {
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let files = log_files(ctx.target);
         if files.is_empty() {
-            return CollectorOutcome::skipped("no log files found");
+            return CollectorOutcome::not_applicable("no log files found");
         }
         let compiled: Vec<(Regex, &Pattern)> = patterns()
             .iter()
@@ -441,11 +453,11 @@ fn emit_runtime_events(
     compiled: &[(Regex, &Pattern)],
 ) -> usize {
     let owners = ctx
-        .store
+        .inputs
         .by_kind(kind::PACKAGE_OWNER)
         .filter_map(|fact| {
             fact.attr("package")
-                .map(|package| (package.to_string(), fact.subject.clone()))
+                .map(|package| (package.to_string(), fact.subject.to_string()))
         })
         .collect::<Vec<_>>();
     let mut emitted = 0usize;
@@ -687,17 +699,17 @@ fn emit_mod_mentions(
     use std::collections::BTreeMap;
 
     let metadata: BTreeMap<String, (String, String, Vec<String>)> = ctx
-        .store
+        .inputs
         .by_kind(kind::MOD_METADATA)
         .map(|f| {
             let capabilities = ctx
-                .store
+                .inputs
                 .by_kind(kind::MOD_CAPABILITY)
                 .filter(|cap| cap.subject == f.subject)
                 .filter_map(|cap| cap.attr("capability").map(str::to_string))
                 .collect();
             (
-                f.subject.clone(),
+                f.subject.to_string(),
                 (
                     f.attr("version_raw").unwrap_or("?").to_string(),
                     f.attr("environment").unwrap_or("both").to_string(),
@@ -1068,32 +1080,20 @@ fn modified_time(path: &Path) -> std::time::SystemTime {
 }
 
 fn read_log_bounded(path: &Path) -> std::io::Result<(String, bool, String)> {
+    let bounded = intermed_doctor_core::bounded_text::read_text_tail(path, MAX_LOG_BYTES)?;
     let mut file = std::fs::File::open(path)?;
-    let length = file.metadata()?.len();
-    let truncated = length > MAX_LOG_BYTES;
     let mut digest = Sha256::new();
-    let mut bytes = Vec::with_capacity(length.min(MAX_LOG_BYTES) as usize);
-    if truncated {
-        let mut hash_buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut hash_buffer)?;
-            if read == 0 {
-                break;
-            }
-            digest.update(&hash_buffer[..read]);
+    let mut hash_buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut hash_buffer)?;
+        if read == 0 {
+            break;
         }
-        file.seek(SeekFrom::Start(length - MAX_LOG_BYTES))?;
-        file.take(MAX_LOG_BYTES).read_to_end(&mut bytes)?;
-    } else {
-        file.read_to_end(&mut bytes)?;
-        digest.update(&bytes);
-    }
-    if truncated && let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-        bytes.drain(..=newline);
+        digest.update(&hash_buffer[..read]);
     }
     Ok((
-        String::from_utf8_lossy(&bytes).into_owned(),
-        truncated,
+        bounded.text,
+        bounded.truncated,
         format!("{:x}", digest.finalize()),
     ))
 }
@@ -1768,9 +1768,11 @@ mod tests {
             .attr("version_raw", "1.2.3")
             .attr("environment", "both")
             .emit();
+        let inputs = FactStore::from_snapshot(store.all().to_vec());
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: default_settings(),
         };
@@ -1821,9 +1823,11 @@ mod tests {
                 .attr("package", package)
                 .emit();
         }
+        let inputs = FactStore::from_snapshot(store.all().to_vec());
         let mut collect = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: default_settings(),
         };
@@ -1876,9 +1880,11 @@ mod tests {
         .unwrap();
         let target = Target::with_kind(&crash, TargetKind::LogFile);
         let mut store = FactStore::new();
+        let inputs = FactStore::new();
         let mut collect = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: default_settings(),
         };
@@ -1930,9 +1936,11 @@ mod tests {
         .unwrap();
         let target = Target::with_kind(log, TargetKind::LogFile);
         let mut store = FactStore::new();
+        let inputs = FactStore::new();
         let mut collect = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: default_settings(),
         };
@@ -1973,9 +1981,11 @@ mod tests {
         std::fs::write(crashes.join("crash-repeat.txt"), event).unwrap();
         let target = Target::with_kind(&dir, TargetKind::Instance);
         let mut store = FactStore::new();
+        let inputs = FactStore::new();
         let mut collect = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: default_settings(),
         };

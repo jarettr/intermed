@@ -16,7 +16,7 @@ use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary,
 use crate::semantic::namespace::{is_platform_namespace, namespace_of};
 
 /// Parser version — bump when recipe lowering changes (cache-invalidating).
-pub const RECIPE_AST_VERSION: &str = "recipe-r3";
+pub const RECIPE_AST_VERSION: &str = "recipe-r5";
 
 const OUTPUT_KEYS: &[&str] = &["result", "results", "output", "outputs"];
 
@@ -30,6 +30,12 @@ pub struct RecipeSummary {
     pub ingredient_count: usize,
     pub output_count: usize,
     pub has_conditions: bool,
+    /// Canonical fingerprint of the load conditions tree (sorted, deterministic).
+    /// `None` when there are no conditions. Used for precise condition comparison
+    /// so two recipes that both have conditions but with different mod gates
+    /// (`modloaded:create` vs `modloaded:thermal`) are not missed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition_fingerprint: Option<String>,
     /// Recipe `group` (recipe-book grouping), when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
@@ -46,6 +52,16 @@ pub struct RecipeSummary {
     /// summaries would otherwise collapse to the same empty outputs/ingredients).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_payload_hash: Option<String>,
+    /// Canonical whole-recipe structure, preserving shaped layout, counts,
+    /// multiplicity, and serializer-specific fields.
+    #[serde(default)]
+    pub structure_fingerprint: String,
+    /// Canonical output subtree, including item counts and output ordering.
+    #[serde(default)]
+    pub output_fingerprint: String,
+    /// Canonical non-output payload, preserving ingredient multiplicity/layout.
+    #[serde(default)]
+    pub input_fingerprint: String,
 }
 
 /// Parse a recipe resource.
@@ -73,6 +89,7 @@ pub fn parse(value: &Value) -> DomainParse {
             required: !has_conditions,
             conditions: conditions.clone(),
             is_tag: false,
+            certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
         });
     }
 
@@ -143,6 +160,43 @@ pub fn parse(value: &Value) -> DomainParse {
     } else {
         None
     };
+    // Condition fingerprint: a canonical hash of the sorted conditions tree so
+    // two conditioned recipes with *different* mod gates are not missed by the
+    // diff (has_conditions: bool alone cannot distinguish them).
+    let condition_fingerprint = if has_conditions {
+        // Serialize each condition to a canonical string, sort, then hash.
+        let mut parts: Vec<String> = conditions.iter().map(|c| format!("{c:?}")).collect();
+        parts.sort();
+        let digest = Sha256::digest(parts.join("|").as_bytes());
+        Some(format!("{digest:x}"))
+    } else {
+        None
+    };
+
+    let canonical_structure = canonical_recipe_structure(value, &recipe_type);
+    let structure_fingerprint = hash_value(&canonical_structure);
+    let canonical_obj = canonical_structure.as_object().cloned().unwrap_or_default();
+    let mut output_view = serde_json::Map::new();
+    for key in OUTPUT_KEYS {
+        if let Some(value) = canonical_obj.get(*key) {
+            output_view.insert((*key).to_string(), value.clone());
+        }
+    }
+    let output_fingerprint = hash_value(&Value::Object(output_view));
+    let mut input_view = canonical_obj;
+    for key in OUTPUT_KEYS {
+        input_view.remove(*key);
+    }
+    for key in [
+        "type",
+        "conditions",
+        "fabric:load_conditions",
+        "neoforge:conditions",
+        "group",
+    ] {
+        input_view.remove(key);
+    }
+    let input_fingerprint = hash_value(&Value::Object(input_view));
 
     let summary = RecipeSummary {
         recipe_type,
@@ -150,11 +204,15 @@ pub fn parse(value: &Value) -> DomainParse {
         ingredient_count: ingredients.len(),
         output_count: outputs.len(),
         has_conditions,
+        condition_fingerprint,
         group: obj.get("group").and_then(Value::as_str).map(str::to_string),
         opacity,
         outputs,
         ingredients,
         custom_payload_hash,
+        structure_fingerprint,
+        output_fingerprint,
+        input_fingerprint,
     };
 
     DomainParse {
@@ -210,13 +268,28 @@ fn collect_refs(
             if let Some(tag) = map.get("tag").and_then(Value::as_str) {
                 push_ref(tag, RefRelation::UsesTag, true, conditions, refs, ids);
             }
-            // A bare `"id"` is used by some result schemas.
+            // A bare `"id"` is exact only inside a known output subtree. In an
+            // arbitrary custom payload its registry role is unknown and must not
+            // masquerade as an item dependency.
             if !map.contains_key("item")
                 && !map.contains_key("tag")
                 && let Some(id) = map.get("id").and_then(Value::as_str)
                 && looks_like_resource_id(id)
             {
-                push_ref(id, default_relation, false, conditions, refs, ids);
+                if default_relation == RefRelation::ProducesItem {
+                    push_ref(id, default_relation, false, conditions, refs, ids);
+                } else {
+                    let target = id.trim_start_matches('#').to_string();
+                    refs.push(ResourceReference {
+                        relation: RefRelation::UnknownRegistryRef,
+                        namespace: namespace_of(&target),
+                        target,
+                        required: false,
+                        conditions: conditions.to_vec(),
+                        is_tag: id.starts_with('#'),
+                        certainty: crate::model::ReferenceCertainty::OpaqueCustomReference,
+                    });
+                }
             }
             for v in map.values() {
                 collect_refs(v, default_relation, conditions, refs, ids);
@@ -248,7 +321,38 @@ fn push_ref(
         required: conditions.is_empty(),
         conditions: conditions.to_vec(),
         is_tag,
+        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
     });
+}
+
+fn hash_value(value: &Value) -> String {
+    let bytes = serde_json::to_vec(value).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Canonicalize only arrays whose order is non-semantic while retaining every
+/// element. Shaped patterns, custom serializer payloads, counts, and duplicate
+/// ingredients remain intact.
+fn canonical_recipe_structure(value: &Value, recipe_type: &str) -> Value {
+    let mut canonical = value.clone();
+    let Some(object) = canonical.as_object_mut() else {
+        return canonical;
+    };
+    for key in ["results", "outputs"] {
+        if let Some(Value::Array(values)) = object.get_mut(key) {
+            sort_json_values(values);
+        }
+    }
+    if recipe_type == "minecraft:crafting_shapeless"
+        && let Some(Value::Array(values)) = object.get_mut("ingredients")
+    {
+        sort_json_values(values);
+    }
+    canonical
+}
+
+fn sort_json_values(values: &mut [Value]) {
+    values.sort_by_cached_key(|value| serde_json::to_vec(value).unwrap_or_default());
 }
 
 fn looks_like_resource_id(s: &str) -> bool {
@@ -401,5 +505,55 @@ mod tests {
     #[test]
     fn malformed_recipe_is_invalid() {
         assert_eq!(parse(&json("[]")).status, ParseStatus::Invalid);
+    }
+
+    #[test]
+    fn fingerprints_preserve_output_count_and_shaped_layout() {
+        let count_one = parse(&json(
+            r###"{"type":"minecraft:crafting_shaped","pattern":["AA"," B"],
+                "key":{"A":{"item":"minecraft:stick"},"B":{"item":"minecraft:stone"}},
+                "result":{"id":"minecraft:diamond","count":1}}"###,
+        ));
+        let count_sixty_four = parse(&json(
+            r###"{"type":"minecraft:crafting_shaped","pattern":["AA"," B"],
+                "key":{"A":{"item":"minecraft:stick"},"B":{"item":"minecraft:stone"}},
+                "result":{"id":"minecraft:diamond","count":64}}"###,
+        ));
+        let different_layout = parse(&json(
+            r###"{"type":"minecraft:crafting_shaped","pattern":["A ","AB"],
+                "key":{"A":{"item":"minecraft:stick"},"B":{"item":"minecraft:stone"}},
+                "result":{"id":"minecraft:diamond","count":1}}"###,
+        ));
+        assert_ne!(
+            summary(&count_one).output_fingerprint,
+            summary(&count_sixty_four).output_fingerprint
+        );
+        assert_ne!(
+            summary(&count_one).input_fingerprint,
+            summary(&different_layout).input_fingerprint
+        );
+    }
+
+    #[test]
+    fn arbitrary_custom_id_is_not_treated_as_an_item_dependency() {
+        let parsed = parse(&json(
+            r#"{"type":"custom:machine","machine":{"id":"custom:fast_mode"}}"#,
+        ));
+        let reference = parsed
+            .references
+            .iter()
+            .find(|reference| reference.target == "custom:fast_mode")
+            .expect("opaque id remains explainable");
+        assert_eq!(reference.relation, RefRelation::UnknownRegistryRef);
+        assert!(!reference.required);
+        assert_eq!(
+            reference.certainty,
+            crate::model::ReferenceCertainty::OpaqueCustomReference
+        );
+        assert!(
+            !summary(&parsed)
+                .ingredients
+                .contains(&"custom:fast_mode".into())
+        );
     }
 }

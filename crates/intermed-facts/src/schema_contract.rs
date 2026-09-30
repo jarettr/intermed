@@ -19,8 +19,24 @@
 //! consumes it.
 
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use serde::Deserialize;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubjectEntity {
+    Artifact,
+    ModInstance,
+    Dependency,
+    Resource,
+    RuntimeEvent,
+    Throwable,
+    Environment,
+    JavaRuntime,
+    #[default]
+    Unknown,
+}
 
 /// The embedded contract source.
 pub const SCHEMA_TOML: &str = include_str!("../schema.toml");
@@ -65,6 +81,8 @@ impl AttrType {
 pub struct KindSchema {
     /// Human description of what the fact's `subject` identifies.
     pub subject: String,
+    /// Canonical evidence-graph entity represented by the subject.
+    pub subject_entity: SubjectEntity,
     /// Whether the attribute set is exhaustive (and thus enforceable).
     pub complete: bool,
     /// Intentionally inactive predicate retained for schema compatibility.
@@ -91,8 +109,10 @@ impl FactSchema {
 /// Parse and validate the embedded schema contract. Panics on a malformed
 /// contract — it is compiled into the binary and a parse failure is a build bug.
 #[must_use]
-pub fn contract() -> FactSchema {
-    parse_schema(SCHEMA_TOML).expect("embedded fact schema is valid")
+pub fn contract() -> &'static FactSchema {
+    static CONTRACT: LazyLock<FactSchema> =
+        LazyLock::new(|| parse_schema(SCHEMA_TOML).expect("embedded fact schema is valid"));
+    &CONTRACT
 }
 
 /// Parse a schema document into a structured [`FactSchema`] or an error.
@@ -110,6 +130,7 @@ pub fn parse_schema(toml_src: &str) -> Result<FactSchema, String> {
             name,
             KindSchema {
                 subject: raw_kind.subject,
+                subject_entity: raw_kind.subject_entity,
                 complete: raw_kind.complete,
                 reserved: raw_kind.reserved,
                 attrs,
@@ -132,6 +153,8 @@ struct RawSchema {
 #[derive(Deserialize)]
 struct RawKind {
     subject: String,
+    #[serde(default)]
+    subject_entity: SubjectEntity,
     #[serde(default)]
     complete: bool,
     #[serde(default)]
@@ -162,6 +185,7 @@ mod tests {
         let mod_kind = s.kind("mod").expect("mod kind");
         assert!(mod_kind.complete);
         assert!(!mod_kind.reserved);
+        assert_eq!(mod_kind.subject_entity, SubjectEntity::ModInstance);
         assert_eq!(mod_kind.attrs.get("version"), Some(&AttrType::String));
     }
 
@@ -195,5 +219,23 @@ mod tests {
         )
         .expect("parse");
         assert!(s.kind("legacy").unwrap().reserved);
+    }
+
+    #[test]
+    fn subject_entity_semantics_parse() {
+        let s = parse_schema(
+            r#"
+            schema_version = "t"
+            [kind.environment]
+            subject = "target"
+            subject_entity = "environment"
+            complete = true
+            "#,
+        )
+        .expect("parse");
+        assert_eq!(
+            s.kind("environment").unwrap().subject_entity,
+            SubjectEntity::Environment
+        );
     }
 }

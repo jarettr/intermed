@@ -10,6 +10,46 @@ use sha2::{Digest, Sha256};
 use crate::model::{MixinOperation, MixinScan};
 use crate::scan::extractor_id;
 
+fn source_for_mod(scan: &MixinScan, mod_id: &str) -> SourceRef {
+    scan.classes
+        .iter()
+        .find(|class| class.mod_id == mod_id)
+        .map_or_else(
+            || SourceRef::file(scan.target.clone()),
+            |class| SourceRef::inside(class.archive.clone(), class.class_path.clone()),
+        )
+}
+
+fn source_for_mixin(scan: &MixinScan, mixin: &str) -> SourceRef {
+    scan.classes
+        .iter()
+        .find(|class| class.class_name == mixin)
+        .map_or_else(
+            || SourceRef::file(scan.target.clone()),
+            |class| SourceRef::inside(class.archive.clone(), class.class_path.clone()),
+        )
+}
+
+fn source_for_site(scan: &MixinScan, site_id: &str) -> SourceRef {
+    scan.application_sites
+        .iter()
+        .find(|site| site.site_id == site_id)
+        .map_or_else(
+            || SourceRef::file(scan.target.clone()),
+            |site| source_for_mixin(scan, &site.mixin_class),
+        )
+}
+
+fn source_for_target(scan: &MixinScan, target: &str) -> SourceRef {
+    scan.classes
+        .iter()
+        .find(|class| class.targets.iter().any(|candidate| candidate == target))
+        .map_or_else(
+            || SourceRef::file(scan.target.clone()),
+            |class| SourceRef::inside(class.archive.clone(), class.class_path.clone()),
+        )
+}
+
 pub fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &MixinScan) -> usize {
     emit_scan_with_settings(ctx, scan, ctx.settings.mixin)
 }
@@ -136,7 +176,10 @@ pub fn emit_scan_with_settings(
         }
         ctx.store
             .fact(extractor, kind::MIXIN_CONFIG)
-            .subject(c.mod_id.clone())
+            .subject(format!("{}::{}", c.artifact_id, c.path))
+            .attr("mod", c.mod_id.clone())
+            .attr("artifact_id", c.artifact_id.clone())
+            .attr("identity_certainty", c.identity_certainty.clone())
             .attr("archive", c.archive.clone())
             .attr("path", c.path.clone())
             .attr("package", c.package.clone())
@@ -158,7 +201,23 @@ pub fn emit_scan_with_settings(
             emitted += 1;
         }
 
-        if let Some(refmap) = &c.refmap {
+        let status_subject = format!("{}::{}", c.artifact_id, c.path);
+        ctx.store
+            .fact(extractor, kind::MIXIN_REFMAP_STATUS)
+            .subject(status_subject)
+            .attr("mod", c.mod_id.clone())
+            .attr("archive", c.archive.clone())
+            .attr("config", c.path.clone())
+            .attr("refmap", c.refmap.clone().unwrap_or_default())
+            .attr("status", c.refmap_status.as_str())
+            .attr("reason", c.refmap_status.reason().unwrap_or_default())
+            .source(SourceRef::inside(c.archive.clone(), c.path.clone()))
+            .emit();
+        emitted += 1;
+
+        if c.refmap_status.is_loaded()
+            && let Some(refmap) = &c.refmap
+        {
             // Records that name resolution is available for this config, so the
             // analyzer's site keys for it are higher-confidence (vs. a config
             // with no refmap whose injection points may stay in named form).
@@ -167,6 +226,7 @@ pub fn emit_scan_with_settings(
                 .subject(c.mod_id.clone())
                 .attr("refmap", refmap.clone())
                 .attr("config", c.path.clone())
+                .attr("artifact_id", c.artifact_id.clone())
                 .source(SourceRef::inside(c.archive.clone(), c.path.clone()))
                 .emit();
             emitted += 1;
@@ -178,6 +238,8 @@ pub fn emit_scan_with_settings(
             .fact(extractor, kind::MIXIN_CLASS)
             .subject(class.class_name.clone())
             .attr("mod", class.mod_id.clone())
+            .attr("artifact_id", class.artifact_id.clone())
+            .attr("identity_certainty", class.identity_certainty.clone())
             .attr("archive", class.archive.clone())
             .attr("config", class.config.clone())
             .attr("class_path", class.class_path.clone())
@@ -379,6 +441,7 @@ pub fn emit_scan_with_settings(
                 .subject(class.mod_id.clone())
                 .attr("mixin", class.class_name.clone())
                 .attr("handler_method", body.handler_method.clone())
+                .attr("artifact_id", class.artifact_id.clone())
                 .attr("instruction_count", i64::from(body.instruction_count))
                 .attr("branch_count", i64::from(body.branch_count))
                 .attr("return_count", i64::from(body.return_count))
@@ -417,6 +480,8 @@ pub fn emit_scan_with_settings(
                     .subject(class.mod_id.clone())
                     .attr("mixin", class.class_name.clone())
                     .attr("handler_method", handler_effect.handler_method.clone())
+                    .attr("handler_descriptor", body.handler_descriptor.clone())
+                    .attr("bytecode_observed", handler_effect.bytecode_observed)
                     .attr("handler_local_store", handler_effect.handler_local_store)
                     .attr("modifies_return", handler_effect.modifies_return)
                     .attr("early_return", handler_effect.early_return)
@@ -486,6 +551,7 @@ pub fn emit_scan_with_settings(
                 .attr("target", effect.target.clone())
                 .attr("method", effect.method.clone())
                 .attr("handler_method", effect.handler_method.clone())
+                .attr("handler_descriptor", effect.handler_descriptor.clone())
                 .attr("operation", effect.operation.as_str())
                 .attr("site_key", effect.site_key.clone())
                 .attr("at_target", effect.at_target.clone())
@@ -545,7 +611,7 @@ pub fn emit_scan_with_settings(
             .attr("method_conflict", overlap.method_conflict)
             .attr("shared_methods", overlap.shared_methods.join(","))
             .attr("effect_summaries", overlap.effect_summaries.join(" | "))
-            .source(SourceRef::file(overlap.target.clone()))
+            .source(source_for_target(scan, &overlap.target))
             .emit();
         emitted += 1;
     }
@@ -560,7 +626,7 @@ pub fn emit_scan_with_settings(
             .attr("site_key", overwrite.site_key.clone())
             .attr("hot_path", overwrite.hot_path)
             .attr("effect_description", overwrite.effect_description.clone())
-            .source(SourceRef::file(overwrite.target.clone()))
+            .source(source_for_target(scan, &overwrite.target))
             .emit();
         emitted += 1;
     }
@@ -578,7 +644,7 @@ pub fn emit_scan_with_settings(
             .attr("detail", interaction.detail.clone())
             .attr("strength", i64::from(interaction.strength))
             .attr("cross_mod", interaction.cross_mod)
-            .source(SourceRef::file(interaction.target.clone()))
+            .source(source_for_target(scan, &interaction.target))
             .emit();
         emitted += 1;
     }
@@ -595,7 +661,7 @@ pub fn emit_scan_with_settings(
             .attr("target_class", edge.target_class.clone())
             .attr("site", edge.site.clone())
             .attr("strength", i64::from(edge.strength))
-            .source(SourceRef::file(edge.target_class.clone()))
+            .source(source_for_target(scan, &edge.target_class))
             .emit();
         emitted += 1;
     }
@@ -611,7 +677,7 @@ pub fn emit_scan_with_settings(
             .attr("priority_a", conflict.priority_a)
             .attr("priority_b", conflict.priority_b)
             .attr("detail", conflict.detail.clone())
-            .source(SourceRef::file(conflict.target.clone()))
+            .source(source_for_target(scan, &conflict.target))
             .emit();
         emitted += 1;
     }
@@ -636,7 +702,9 @@ pub fn emit_scan_with_settings(
             if let Some(url) = &rec.recommendation.doc_url {
                 builder = builder.attr("doc_url", url.clone());
             }
-            builder.source(SourceRef::file(rec.target.clone())).emit();
+            builder
+                .source(source_for_mixin(scan, &rec.mixin_class))
+                .emit();
             emitted += 1;
         }
     }
@@ -660,7 +728,7 @@ pub fn emit_scan_with_settings(
                 "unresolved_points",
                 i64::try_from(risk.unresolved_points).unwrap_or(i64::MAX),
             )
-            .source(SourceRef::file(risk.subject.clone()))
+            .source(source_for_target(scan, &risk.subject))
             .emit();
         emitted += 1;
     }
@@ -678,7 +746,7 @@ pub fn emit_scan_with_settings(
                 i64::from(cc.peak_handler_complexity),
             )
             .attr("components", format_components(&cc.components))
-            .source(SourceRef::file(cc.mixin_class.clone()))
+            .source(source_for_mixin(scan, &cc.mixin_class))
             .emit();
         emitted += 1;
     }
@@ -694,7 +762,7 @@ pub fn emit_scan_with_settings(
             .attr("conflict_edges", i64::from(mc.conflict_edges))
             .attr("peak_class_score", i64::from(mc.peak_class_score))
             .attr("components", format_components(&mc.components))
-            .source(SourceRef::file(mc.mod_id.clone()))
+            .source(source_for_mod(scan, &mc.mod_id))
             .emit();
         emitted += 1;
     }
@@ -713,7 +781,7 @@ pub fn emit_scan_with_settings(
                 i64::from(b.total_handler_instructions),
             )
             .attr("components", format_components(&b.components))
-            .source(SourceRef::file(b.mod_id.clone()))
+            .source(source_for_mod(scan, &b.mod_id))
             .emit();
         emitted += 1;
     }
@@ -732,6 +800,8 @@ pub fn emit_scan_with_settings(
                 mixin_site_occurrence_id(&site.site_id, &site.archive, &site.config_path),
             )
             .attr("mod", site.mod_id.clone())
+            .attr("artifact_id", site.artifact_id.clone())
+            .attr("identity_certainty", site.identity_certainty.clone())
             .attr("mixin", site.mixin_class.clone())
             .attr("config", site.config_path.clone())
             .attr("handler_method", site.handler_method.clone())
@@ -749,6 +819,14 @@ pub fn emit_scan_with_settings(
             .attr("name_confidence", i64::from(site.target_name.confidence))
             .attr("target_resolution", site.target_resolution.as_str())
             .attr("selector_verification", site.selector_verification.as_str())
+            .attr(
+                "selector_offsets",
+                site.selector_offsets
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .attr("signature_check", site.signature_check.as_str())
             .attr("local_capture_status", site.local_capture_status.as_str())
             .attr("side", site.side.as_str())
@@ -758,13 +836,17 @@ pub fn emit_scan_with_settings(
             .attr("expect", site.expect.map(i64::from).unwrap_or(-1))
             .attr("allow", site.allow.map(i64::from).unwrap_or(-1))
             .attr("confidence", i64::from(site.confidence))
+            .attr("identity_precision", i64::from(site.precision.identity))
+            .attr("activation_precision", i64::from(site.precision.activation))
+            .attr(
+                "verification_precision",
+                i64::from(site.precision.verification),
+            )
+            .attr("effect_precision", i64::from(site.precision.effect))
             .attr("imprecision_reasons", site.imprecision_reasons.join("; "))
             .attr("checked", trace.checked.join(","))
             .attr("not_checked", trace.not_checked.join(","))
-            .source(SourceRef::inside(
-                site.archive.clone(),
-                site.config_path.clone(),
-            ))
+            .source(source_for_mixin(scan, &site.mixin_class))
             .emit();
         emitted += 1;
     }
@@ -777,8 +859,24 @@ pub fn emit_scan_with_settings(
             .attr("target_class", comp.target_class.clone())
             .attr("site_key", comp.site_key.clone())
             .attr("classification", comp.classification.as_str())
+            .attr(
+                "co_application",
+                match comp.co_application {
+                    crate::composition::CoApplication::Active => "active",
+                    crate::composition::CoApplication::Conditional => "conditional",
+                    crate::composition::CoApplication::Impossible => "impossible",
+                },
+            )
             .attr("cross_mod", comp.cross_mod)
             .attr("participant_count", comp.participants.len() as i64)
+            .attr(
+                "site_ids",
+                comp.participants
+                    .iter()
+                    .map(|participant| participant.site_id.clone())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .attr(
                 "order",
                 comp.participants
@@ -798,7 +896,10 @@ pub fn emit_scan_with_settings(
                     .join(","),
             )
             .attr("detail", comp.detail.clone())
-            .source(SourceRef::file(comp.target_class.clone()))
+            .source(comp.participants.first().map_or_else(
+                || source_for_target(scan, &comp.target_class),
+                |participant| source_for_site(scan, &participant.site_id),
+            ))
             .emit();
         emitted += 1;
     }
@@ -808,7 +909,9 @@ pub fn emit_scan_with_settings(
     // modifying mod — feed that as a Layer-B capability, deduped per (mod, domain).
     let mut resource_caps_seen = std::collections::BTreeSet::new();
     for m in &scan.resource_mutations {
-        if resource_caps_seen.insert((m.mod_id.clone(), m.domain.clone())) {
+        if m.evidence_kind.is_mutation()
+            && resource_caps_seen.insert((m.mod_id.clone(), m.domain.clone()))
+        {
             ctx.store
                 .fact(extractor, kind::MOD_CAPABILITY)
                 .subject(m.mod_id.clone())
@@ -819,7 +922,7 @@ pub fn emit_scan_with_settings(
                 )
                 .attr("subsystem", m.subsystem.as_str())
                 .attr("source", "mixin")
-                .source(SourceRef::file(m.mod_id.clone()))
+                .source(source_for_site(scan, &m.site_id))
                 .confidence(f32::from(m.confidence) / 100.0)
                 .emit();
             emitted += 1;
@@ -827,7 +930,14 @@ pub fn emit_scan_with_settings(
     }
     for m in &scan.resource_mutations {
         ctx.store
-            .fact(extractor, kind::MIXIN_RUNTIME_RESOURCE_MUTATION)
+            .fact(
+                extractor,
+                if m.evidence_kind.is_mutation() {
+                    kind::MIXIN_RUNTIME_RESOURCE_MUTATION
+                } else {
+                    kind::MIXIN_RESOURCE_HOOK
+                },
+            )
             .subject(m.domain.clone())
             .attr("mod", m.mod_id.clone())
             .attr("mixin", m.mixin_class.clone())
@@ -838,7 +948,8 @@ pub fn emit_scan_with_settings(
             .attr("operation", m.operation.clone())
             .attr("effect", m.effect.clone())
             .attr("confidence", i64::from(m.confidence))
-            .source(SourceRef::file(m.mixin_class.clone()))
+            .attr("evidence_kind", m.evidence_kind.as_str())
+            .source(source_for_site(scan, &m.site_id))
             .confidence(f32::from(m.confidence) / 100.0)
             .emit();
         emitted += 1;
@@ -855,7 +966,7 @@ pub fn emit_scan_with_settings(
             .attr("reason", cap.reason.clone())
             .attr("subsystem", cap.subsystem.as_str())
             .attr("source", "mixin")
-            .source(SourceRef::file(cap.mod_id.clone()))
+            .source(source_for_mod(scan, &cap.mod_id))
             .confidence(f32::from(cap.confidence) / 100.0)
             .emit();
         emitted += 1;
@@ -868,12 +979,14 @@ pub fn emit_scan_with_settings(
             .subject(s.mod_id.clone())
             .attr("mixin", s.mixin_class.clone())
             .attr("site_id", s.site_id.clone())
+            .attr("handler_method", s.handler_method.clone())
+            .attr("handler_descriptor", s.handler_descriptor.clone())
             .attr("target_class", s.target_class.clone())
             .attr("subsystem", s.subsystem.as_str())
             .attr("operation", s.operation.clone())
             .attr("reason", s.reason.clone())
             .attr("confidence", i64::from(s.confidence))
-            .source(SourceRef::file(s.mixin_class.clone()))
+            .source(source_for_site(scan, &s.site_id))
             .confidence(f32::from(s.confidence) / 100.0)
             .emit();
         emitted += 1;
@@ -900,12 +1013,11 @@ pub fn emit_scan_with_settings(
                     .unwrap_or("none"),
             )
             .attr("confidence", i64::from(cluster.confidence))
-            .attr("confirmation_level", cluster.confirmation_level.as_str())
-            .attr("severity", cluster.severity.as_str())
+            .attr("verdict_strength", cluster.verdict_strength.as_str())
             .attr("actionability", i64::from(cluster.actionability))
             .attr("headline", cluster.headline.clone())
             .attr("recommended_action", cluster.recommended_action.clone())
-            .source(SourceRef::file(cluster.target_class.clone()))
+            .source(source_for_target(scan, &cluster.target_class))
             .emit();
         emitted += 1;
     }
@@ -930,12 +1042,17 @@ pub fn emit_scan_with_settings(
     }
 
     for af in &scan.apply_failures {
-        let activation = scan
+        let owner = scan
             .classes
             .iter()
-            .find(|class| class.class_name == af.mixin && class.mod_id == af.mod_id)
+            .find(|class| class.class_name == af.mixin && class.mod_id == af.mod_id);
+        let activation = owner
             .map(|class| class.activation.as_str())
             .unwrap_or("unknown");
+        let source = owner.map_or_else(
+            || SourceRef::file(scan.target.clone()),
+            |class| SourceRef::inside(class.archive.clone(), class.class_path.clone()),
+        );
         ctx.store
             .fact(extractor, af.kind.as_str())
             .subject(af.mod_id.clone())
@@ -946,10 +1063,18 @@ pub fn emit_scan_with_settings(
             .attr("confirmed", af.confirmed)
             .attr("activation", activation)
             .attr(
+                "proof_requirements",
+                af.proof_requirements()
+                    .iter()
+                    .map(|requirement| requirement.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
+            .attr(
                 "activation_applicable",
                 matches!(activation, "active-confirmed" | "active-assumed"),
             )
-            .source(SourceRef::file(af.mixin.clone()))
+            .source(source)
             .confidence(if af.confirmed { 0.95 } else { 0.6 })
             .emit();
         emitted += 1;

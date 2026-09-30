@@ -20,8 +20,10 @@ pub const DEFAULT_SECURITY_MIN_NOTE_SIGNALS: usize = 2;
 /// Confidence attached to reflection-corroborated security facts.
 pub const DEFAULT_SECURITY_CORROBORATED_CONFIDENCE: f32 = 0.4;
 
-/// SBOM trust score (0..=100) at or above which a jar is well-identified.
+/// Compatibility threshold for legacy SBOM facts without typed provenance.
 pub const DEFAULT_SBOM_WELL_IDENTIFIED_TRUST: i64 = 60;
+/// Per-artifact wall-clock limit for JDK signature verification.
+pub const DEFAULT_SBOM_SIGNATURE_VERIFY_TIMEOUT_SECS: u64 = 20;
 
 /// Line count above which log scanning fans out in parallel.
 pub const DEFAULT_LOG_PARALLEL_LINE_THRESHOLD: usize = 4_096;
@@ -33,12 +35,96 @@ pub const DEFAULT_LAB_CAMPAIGN_MAX_PARALLEL: usize = 1;
 pub const DEFAULT_LAB_MAX_LOG_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Default mixin analysis preset (`standard` — overlaps + recommendations, no per-handler spam).
-pub const DEFAULT_MIXIN_LEVEL: &str = "standard";
-pub const DEFAULT_METADATA_LEVEL: &str = "enriched";
-pub const DEFAULT_RESOURCE_LEVEL: &str = "semantic";
+pub const DEFAULT_MIXIN_LEVEL: MixinLevelConfig = MixinLevelConfig::Standard;
+pub const DEFAULT_METADATA_LEVEL: MetadataLevelConfig = MetadataLevelConfig::Enriched;
+pub const DEFAULT_RESOURCE_LEVEL: ResourceLevelConfig = ResourceLevelConfig::Semantic;
 pub const DEFAULT_RESOURCE_MAX_JSON_BYTES: u64 = 1_048_576;
 pub const DEFAULT_RESOURCE_MAX_LANG_JSON_BYTES: u64 = 4 * 1_048_576;
 pub const DEFAULT_RESOURCE_MAX_AST_FACTS: usize = 256;
+
+/// Canonical Layer-F analysis depth accepted by config files and environment
+/// overrides. Legacy names remain input-only aliases and are never serialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MixinLevelConfig {
+    #[serde(rename = "basic", alias = "normal")]
+    Basic,
+    #[serde(rename = "standard", alias = "detailed")]
+    Standard,
+    #[serde(rename = "full")]
+    Full,
+}
+
+impl MixinLevelConfig {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "basic" | "normal" => Some(Self::Basic),
+            "standard" | "detailed" => Some(Self::Standard),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+impl Default for MixinLevelConfig {
+    fn default() -> Self {
+        DEFAULT_MIXIN_LEVEL
+    }
+}
+
+/// Canonical Layer-B metadata analysis depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetadataLevelConfig {
+    Basic,
+    Enriched,
+    Full,
+}
+
+impl MetadataLevelConfig {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "basic" => Some(Self::Basic),
+            "enriched" => Some(Self::Enriched),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+impl Default for MetadataLevelConfig {
+    fn default() -> Self {
+        DEFAULT_METADATA_LEVEL
+    }
+}
+
+/// Canonical Layer-M resource-analysis depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ResourceLevelConfig {
+    Basic,
+    Semantic,
+    Full,
+}
+
+impl ResourceLevelConfig {
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "basic" => Some(Self::Basic),
+            "semantic" => Some(Self::Semantic),
+            "full" => Some(Self::Full),
+            _ => None,
+        }
+    }
+}
+
+impl Default for ResourceLevelConfig {
+    fn default() -> Self {
+        DEFAULT_RESOURCE_LEVEL
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheSection {
@@ -115,12 +201,15 @@ impl Default for SecuritySection {
 pub struct SbomSection {
     #[serde(default = "default_well_identified_trust")]
     pub well_identified_trust: i64,
+    #[serde(default = "default_signature_verify_timeout_secs")]
+    pub signature_verify_timeout_secs: u64,
 }
 
 impl Default for SbomSection {
     fn default() -> Self {
         Self {
             well_identified_trust: DEFAULT_SBOM_WELL_IDENTIFIED_TRUST,
+            signature_verify_timeout_secs: DEFAULT_SBOM_SIGNATURE_VERIFY_TIMEOUT_SECS,
         }
     }
 }
@@ -170,7 +259,7 @@ pub struct MixinSection {
     pub enabled: bool,
     /// Preset: `basic` | `standard` | `full` (default: `standard`).
     #[serde(default = "default_mixin_level")]
-    pub level: String,
+    pub level: MixinLevelConfig,
     /// Emit per-handler bytecode intelligence facts (default: derived from `level`).
     #[serde(default)]
     pub handler_effects: Option<bool>,
@@ -183,7 +272,7 @@ pub struct MixinSection {
 pub struct MetadataSection {
     /// Preset: `basic` | `enriched` | `full` (default: `enriched`).
     #[serde(default = "default_metadata_level")]
-    pub level: String,
+    pub level: MetadataLevelConfig,
 }
 
 /// Layer-M resource / data-semantics (typed AST) controls.
@@ -191,7 +280,7 @@ pub struct MetadataSection {
 pub struct ResourceSection {
     /// Depth: `basic` (AST off) | `semantic` | `full` (default: `semantic`).
     #[serde(default = "default_resource_level")]
-    pub level: String,
+    pub level: ResourceLevelConfig,
     /// Per-resource JSON size cap in bytes; larger resources are skipped.
     #[serde(default = "default_resource_max_json_bytes")]
     pub max_json_bytes: u64,
@@ -294,6 +383,9 @@ fn default_corroborated_confidence() -> f32 {
 fn default_well_identified_trust() -> i64 {
     DEFAULT_SBOM_WELL_IDENTIFIED_TRUST
 }
+fn default_signature_verify_timeout_secs() -> u64 {
+    DEFAULT_SBOM_SIGNATURE_VERIFY_TIMEOUT_SECS
+}
 fn default_parallel_line_threshold() -> usize {
     DEFAULT_LOG_PARALLEL_LINE_THRESHOLD
 }
@@ -309,14 +401,14 @@ fn default_lab_campaign_max_parallel() -> usize {
 fn default_lab_max_log_bytes() -> u64 {
     DEFAULT_LAB_MAX_LOG_BYTES
 }
-fn default_mixin_level() -> String {
-    DEFAULT_MIXIN_LEVEL.to_string()
+fn default_mixin_level() -> MixinLevelConfig {
+    MixinLevelConfig::default()
 }
-fn default_metadata_level() -> String {
-    DEFAULT_METADATA_LEVEL.to_string()
+fn default_metadata_level() -> MetadataLevelConfig {
+    MetadataLevelConfig::default()
 }
-fn default_resource_level() -> String {
-    DEFAULT_RESOURCE_LEVEL.to_string()
+fn default_resource_level() -> ResourceLevelConfig {
+    ResourceLevelConfig::default()
 }
 fn default_resource_max_json_bytes() -> u64 {
     DEFAULT_RESOURCE_MAX_JSON_BYTES

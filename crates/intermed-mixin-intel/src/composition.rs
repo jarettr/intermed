@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::BTreeMap;
 
+use crate::model::ActivationStatus;
 use crate::site::ApplicationSite;
 
 /// The semantic role a handler plays at a site (plan Phase 10).
@@ -111,10 +112,21 @@ pub struct CompositionParticipant {
     pub operation: String,
     pub role: HandlerRole,
     pub priority: i64,
-    /// `true` when this is an `@Inject` with `cancellable = true`: the handler
-    /// may call `CallbackInfo.cancel()` to suppress the rest of the target method,
-    /// making its effective role `Suppressor` rather than `Observer`.
+    /// Whether the annotation permits cancellation. This is context only: the
+    /// role becomes `Suppressor` solely when handler-effect analysis proves a
+    /// cancellation or return-value mutation.
     pub cancellable: bool,
+    pub activation: ActivationStatus,
+    pub effect_proven: bool,
+    pub original_call_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoApplication {
+    Active,
+    Conditional,
+    Impossible,
 }
 
 /// A set of handlers applied at one exact injection point, ordered and classified.
@@ -123,6 +135,7 @@ pub struct SiteComposition {
     pub target_class: String,
     pub site_key: String,
     pub classification: CompositionClass,
+    pub co_application: CoApplication,
     /// `true` when more than one distinct mod participates (a real cross-mod case).
     pub cross_mod: bool,
     /// Participants in effective-priority order (higher priority first).
@@ -144,9 +157,9 @@ fn group_key(site: &ApplicationSite) -> (String, String) {
 /// the caller's grouping). Pure function of the participants' roles + sides.
 fn classify(
     participants: &[CompositionParticipant],
-    all_compatible: bool,
+    co_application: CoApplication,
 ) -> (CompositionClass, String) {
-    if !all_compatible {
+    if co_application == CoApplication::Impossible {
         return (
             CompositionClass::ImpossibleIntersection,
             "participants are on disjoint strict sides and can never co-apply".to_string(),
@@ -163,7 +176,9 @@ fn classify(
     let guards = participants
         .iter()
         .any(|p| matches!(p.role, HandlerRole::Guard | HandlerRole::Suppressor));
-    let non_observer = participants.iter().any(|p| p.role != HandlerRole::Observer);
+    let other_behavioural_with_replacement = participants
+        .iter()
+        .any(|p| !matches!(p.role, HandlerRole::Observer | HandlerRole::Replacement));
 
     if replacements >= 2 {
         return (
@@ -173,11 +188,20 @@ fn classify(
             ),
         );
     }
-    if replacements == 1 && non_observer {
+    if replacements == 1 && other_behavioural_with_replacement {
         return (
             CompositionClass::HighConflict,
             "a replacement co-located with other behavioural handlers — it drops the others"
                 .to_string(),
+        );
+    }
+    if participants
+        .iter()
+        .any(|p| p.role == HandlerRole::Multiplier)
+    {
+        return (
+            CompositionClass::OrderSensitiveChain,
+            "a proven multiplier invokes the wrapped operation more than once; order changes side effects".to_string(),
         );
     }
     if wrappers >= 2 {
@@ -186,10 +210,15 @@ fn classify(
             format!("{wrappers} @WrapOperation handlers chain — order changes the result"),
         );
     }
-    if guards {
+    if guards || co_application == CoApplication::Conditional {
         return (
             CompositionClass::ConditionalRisk,
-            "a guard/suppressor may drop the co-located handlers under its condition".to_string(),
+            if guards {
+                "a proven guard/suppressor may drop co-located handlers under its condition"
+                    .to_string()
+            } else {
+                "participants can co-apply only under plugin/constraint activation that static analysis cannot prove".to_string()
+            },
         );
     }
     // Same-kind transformers on the same point are order-sensitive; otherwise the
@@ -228,15 +257,25 @@ pub fn analyze_compositions(sites: &[ApplicationSite]) -> Vec<SiteComposition> {
         let mut participants: Vec<CompositionParticipant> = group
             .iter()
             .map(|s| {
-                // `@Inject(cancellable = true)` can call `CallbackInfo.cancel()`,
-                // suppressing everything downstream in the target method. The
-                // initial role from the operation name alone misses this: inject
-                // maps to Observer, but a cancellable inject is a Suppressor.
-                let base_role = role_for_operation(&s.operation);
-                let role = if base_role == HandlerRole::Observer && s.cancellable {
-                    HandlerRole::Suppressor
-                } else {
-                    base_role
+                // Annotation permission is not an effect. A cancellable inject is
+                // a suppressor only when bytecode/dataflow proves cancellation or
+                // return mutation; otherwise it remains an observer.
+                let effect = s
+                    .handler_effect
+                    .as_ref()
+                    .filter(|effect| effect.bytecode_observed);
+                let role = match s.operation.as_str() {
+                    "inject" if effect.is_some_and(|e| e.cancels || e.sets_return_value) => {
+                        HandlerRole::Suppressor
+                    }
+                    "inject" => HandlerRole::Observer,
+                    "wrap-operation" => match effect.map(|e| e.original_call_count) {
+                        Some(0) => HandlerRole::Replacement,
+                        Some(1) => HandlerRole::Wrapper,
+                        Some(2..) => HandlerRole::Multiplier,
+                        None => HandlerRole::Unknown,
+                    },
+                    _ => role_for_operation(&s.operation),
                 };
                 CompositionParticipant {
                     site_id: s.site_id.clone(),
@@ -245,6 +284,9 @@ pub fn analyze_compositions(sites: &[ApplicationSite]) -> Vec<SiteComposition> {
                     role,
                     priority: s.priority,
                     cancellable: s.cancellable,
+                    activation: s.activation,
+                    effect_proven: effect.is_some(),
+                    original_call_count: effect.map(|e| e.original_call_count),
                 }
             })
             .collect();
@@ -263,18 +305,38 @@ pub fn analyze_compositions(sites: &[ApplicationSite]) -> Vec<SiteComposition> {
 
         // All sides pairwise compatible? (Side-suppression already drops conflicts,
         // but composition runs on raw sites, so re-check here.)
-        let all_compatible = group.iter().enumerate().all(|(i, a)| {
+        let all_sides_compatible = group.iter().enumerate().all(|(i, a)| {
             group
                 .iter()
                 .skip(i + 1)
                 .all(|b| a.side.compatible_with(b.side))
         });
 
-        let (classification, detail) = classify(&participants, all_compatible);
+        let co_application = if !all_sides_compatible
+            || group
+                .iter()
+                .any(|site| site.activation == ActivationStatus::InactiveBySide)
+        {
+            CoApplication::Impossible
+        } else if group.iter().any(|site| {
+            matches!(
+                site.activation,
+                ActivationStatus::ConditionalByPlugin
+                    | ActivationStatus::ConditionalByConstraint
+                    | ActivationStatus::Unknown
+            )
+        }) {
+            CoApplication::Conditional
+        } else {
+            CoApplication::Active
+        };
+
+        let (classification, detail) = classify(&participants, co_application);
         out.push(SiteComposition {
             target_class,
             site_key,
             classification,
+            co_application,
             cross_mod,
             participants,
             detail,
@@ -302,6 +364,8 @@ mod tests {
         ApplicationSite {
             site_id: format!("{mod_id}::M::h->T#tick()V@HEAD"),
             mod_id: mod_id.into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: format!("{mod_id}.jar"),
             config_path: "m.json".into(),
             mixin_class: format!("{mod_id}.M"),
@@ -325,6 +389,7 @@ mod tests {
             },
             target_resolution: TargetResolution::Unchecked,
             selector_verification: SelectorVerification::Unchecked,
+            selector_offsets: Vec::new(),
             signature_check: SignatureCheck::Unchecked,
             local_capture_status: LocalCaptureStatus::NoLocalCapture,
             side,
@@ -334,8 +399,10 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence: 100,
             imprecision_reasons: Vec::new(),
+            precision: Default::default(),
         }
     }
 
@@ -359,10 +426,27 @@ mod tests {
 
     #[test]
     fn two_wrap_operations_are_an_order_sensitive_chain() {
-        let sites = vec![
+        let mut sites = vec![
             site("a", "wrap-operation", 1100, Side::Both),
             site("b", "wrap-operation", 1000, Side::Both),
         ];
+        for site in &mut sites {
+            site.handler_effect = Some(crate::model::HandlerEffect {
+                handler_method: "h".into(),
+                bytecode_observed: true,
+                handler_local_store: false,
+                modifies_return: false,
+                early_return: false,
+                side_effects: Vec::new(),
+                complexity_score: 1,
+                cancels: false,
+                sets_return_value: false,
+                conditional_control: false,
+                return_value_source: Default::default(),
+                writes_target_state: false,
+                original_call_count: 1,
+            });
+        }
         let comps = analyze_compositions(&sites);
         assert_eq!(
             comps[0].classification,
@@ -370,6 +454,29 @@ mod tests {
         );
         // Higher priority orders first.
         assert_eq!(comps[0].participants[0].mod_id, "a");
+    }
+
+    #[test]
+    fn unreadable_wrap_body_is_unknown_not_a_proven_replacement() {
+        let mut first = site("a", "wrap-operation", 1000, Side::Both);
+        first.handler_effect = Some(crate::model::HandlerEffect {
+            handler_method: "h".into(),
+            bytecode_observed: false,
+            handler_local_store: false,
+            modifies_return: false,
+            early_return: false,
+            side_effects: Vec::new(),
+            complexity_score: 0,
+            cancels: false,
+            sets_return_value: false,
+            conditional_control: false,
+            return_value_source: Default::default(),
+            writes_target_state: false,
+            original_call_count: 0,
+        });
+        let comps = analyze_compositions(&[first, site("b", "inject", 1000, Side::Both)]);
+        assert_eq!(comps[0].participants[0].role, HandlerRole::Unknown);
+        assert_ne!(comps[0].classification, CompositionClass::HighConflict);
     }
 
     #[test]
@@ -402,14 +509,24 @@ mod tests {
     }
 
     #[test]
-    fn cancellable_inject_is_a_suppressor_causing_conditional_risk() {
-        // A plain `@Inject` is Observer (safe). An `@Inject(cancellable = true)`
-        // can call `cancel()` and suppress downstream handlers, so it must be
-        // classified as Suppressor and drive a ConditionalRisk classification.
-        let sites = vec![
-            cancellable_site("a", 1000),
-            site("b", "inject", 1000, Side::Both),
-        ];
+    fn proven_cancel_is_a_suppressor_causing_conditional_risk() {
+        let mut cancelling = cancellable_site("a", 1000);
+        cancelling.handler_effect = Some(crate::model::HandlerEffect {
+            handler_method: "h".into(),
+            bytecode_observed: true,
+            handler_local_store: false,
+            modifies_return: false,
+            early_return: true,
+            side_effects: Vec::new(),
+            complexity_score: 1,
+            cancels: true,
+            sets_return_value: false,
+            conditional_control: true,
+            return_value_source: Default::default(),
+            writes_target_state: false,
+            original_call_count: 0,
+        });
+        let sites = vec![cancelling, site("b", "inject", 1000, Side::Both)];
         let comps = analyze_compositions(&sites);
         assert_eq!(comps.len(), 1);
         // At least one participant must be a Suppressor.

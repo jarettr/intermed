@@ -63,7 +63,8 @@ Flags: `--security-min-note-signals`, `--security-corroborated-confidence`.
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `well_identified_trust` | 60 | Trust score for a well-identified jar. |
+| `well_identified_trust` | 60 | Compatibility threshold for legacy SBOM facts without typed provenance axes. |
+| `signature_verify_timeout_secs` | 20 | Wall-clock timeout for one external `jarsigner` verification. |
 
 Flag: `--sbom-well-identified-trust`.
 
@@ -127,3 +128,9 @@ Flags: `--mixin-level`, `--mixin-handler-effects`, `--mixin-recommendations`.
 | `max_ast_facts_per_resource` | 256 | Cap on facts emitted per resource. |
 
 Flag: `--resource-level`.
+
+Analysis-depth values are strict in both TOML and `INTERMED_*_LEVEL`
+environment overrides. An unknown value such as `ful` is a configuration error;
+InterMed never silently substitutes the default analysis depth. Legacy Mixin
+aliases `normal` and `detailed` remain accepted as input and serialize as
+`basic` and `standard` respectively.

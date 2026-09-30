@@ -24,7 +24,7 @@ pub(super) fn eval_condition(cond: &Condition, resolve: &impl Fn(&str) -> Value)
 
 pub(super) fn term_for_alias<'a>(term: &'a str, alias: &str) -> Option<&'a str> {
     let (term_alias, col) = term.split_once('.')?;
-    (term_alias == alias).then_some(col)
+    (term_alias == alias).then_some(col.strip_prefix("attr:").unwrap_or(col))
 }
 
 pub(super) fn mandatory_join_filter_keys(
@@ -80,6 +80,7 @@ pub(super) fn join_filter_pair_matches(
     };
     let resolve = |name: &str| -> Value {
         let (alias, col) = name.split_once('.').unwrap_or(("", name));
+        let col = col.strip_prefix("attr:").unwrap_or(col);
         if alias == left_alias {
             pick(l_schema, lt, col)
         } else if alias == right_alias {
@@ -225,13 +226,14 @@ pub(super) fn join_filter<'a>(
     }
 }
 
-/// Group facts of any of `kinds` by subject; keep subjects whose distinct count of
-/// `distinct_attr` is at least `min_count`. Output column `group_col` (= subject).
+/// Group facts of any of `kinds` by `group_col`; keep non-null groups whose
+/// distinct, non-null `distinct_attr` count is at least `min_count`.
 pub(super) fn group_count_distinct<'a>(
     store: &'a ColumnarStore,
     kinds: &[String],
     group_col: &str,
     distinct_attr: &str,
+    filters: &[Predicate],
     min_count: usize,
 ) -> RowStream<'a> {
     let mut index: AHashMap<String, usize> = AHashMap::new();
@@ -242,23 +244,33 @@ pub(super) fn group_count_distinct<'a>(
         let Some(batch) = store.by_kind.get(kind) else {
             continue;
         };
-        let subj_pos = batch.schema.pos("subject");
+        let group_pos = batch.schema.pos(group_col);
         let attr_pos = batch.schema.pos(distinct_attr);
         for t in &batch.rows {
-            let subject = subj_pos
-                .and_then(|i| t.get(i))
-                .map(Value::to_display)
-                .unwrap_or_default();
-            let slot = *index.entry(subject.clone()).or_insert_with(|| {
-                order.push(subject.clone());
+            let matches_filters = filters.iter().all(|filter| {
+                let actual = batch
+                    .schema
+                    .pos(&filter.column)
+                    .and_then(|i| t.get(i))
+                    .unwrap_or(&Value::Null);
+                eval_cmp(actual, filter.op, &scalar_to_value(&filter.value))
+            });
+            if !matches_filters {
+                continue;
+            }
+            let Some(group) = group_pos.and_then(|i| t.get(i)).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let Some(value) = attr_pos.and_then(|i| t.get(i)).filter(|v| !v.is_null()) else {
+                continue;
+            };
+            let group = group.to_display();
+            let slot = *index.entry(group.clone()).or_insert_with(|| {
+                order.push(group.clone());
                 distinct.push(AHashSet::new());
                 order.len() - 1
             });
-            if let Some(v) = attr_pos.and_then(|i| t.get(i))
-                && !v.is_null()
-            {
-                distinct[slot].insert(v.to_display());
-            }
+            distinct[slot].insert(value.to_display());
         }
     }
 
@@ -267,7 +279,7 @@ pub(super) fn group_count_distinct<'a>(
         .into_iter()
         .zip(distinct)
         .filter(|(_, set)| set.len() >= min_count)
-        .map(|(subject, _)| vec![Value::Str(subject)])
+        .map(|(group, _)| vec![Value::Str(group)])
         .collect();
     RowStream {
         schema,

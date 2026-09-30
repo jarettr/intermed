@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "quilt_loader": {
+    "group": "example",
+    "id": "sanitized_quilt",
+    "version": "1.0.0",
+    "depends": [
+      { "id": "always_required", "versions": ">=1.0.0" },
+      [
+          { "id": "provider_a", "versions": ">=2.0.0" },
+          { "id": "provider_b", "versions": ">=3.0.0" }
+      ],
+      {
+        "id": "bounded_provider",
+        "versions": { "all": [">=1.0.0", "<2.0.0"] }
+      },
+      {
+        "id": "conditional_provider",
+        "versions": ">=4.0.0",
+        "unless": "replacement_provider"
+      },
+      { "id": "client_helper", "environment": "client" },
+      { "id": "optional_helper", "optional": true }
+    ]
+  },
+  "minecraft": { "environment": "dedicated_server" }
+}

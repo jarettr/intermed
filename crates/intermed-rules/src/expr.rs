@@ -159,7 +159,7 @@ pub fn resolve_term(term: &str, ctx: &ExprCtx<'_>) -> Option<String> {
         return Some(v.clone());
     }
     if term == "subject" {
-        return ctx.bindings.values().next().map(|f| f.subject.clone());
+        return ctx.bindings.values().next().map(|f| f.subject.to_string());
     }
     if let Some(attr) = term.strip_prefix("attr:") {
         return ctx
@@ -173,10 +173,10 @@ pub fn resolve_term(term: &str, ctx: &ExprCtx<'_>) -> Option<String> {
             return term_value(fact, attr);
         }
         if rest == "subject" {
-            return Some(fact.subject.clone());
+            return Some(fact.subject.to_string());
         }
         if rest == "kind" {
-            return Some(fact.kind.clone());
+            return Some(fact.kind.to_string());
         }
         return term_value(fact, rest);
     }
@@ -186,10 +186,10 @@ pub fn resolve_term(term: &str, ctx: &ExprCtx<'_>) -> Option<String> {
 /// Resolve a term from a single fact (v1 `where_all` compatibility).
 pub fn term_value(fact: &Fact, term: &str) -> Option<String> {
     if term == "subject" {
-        return Some(fact.subject.clone());
+        return Some(fact.subject.to_string());
     }
     if term == "kind" {
-        return Some(fact.kind.clone());
+        return Some(fact.kind.to_string());
     }
     let key = term.strip_prefix("attr:").unwrap_or(term);
     if let Some(value) = fact.attributes.get(key) {
@@ -211,7 +211,7 @@ fn term_value_alias(fact: &Fact, key: &str) -> Option<String> {
     for (canonical, alts) in ALIASES {
         if key == *canonical {
             for alt in *alts {
-                if let Some(value) = fact.attributes.get(*alt) {
+                if let Some(value) = fact.attributes.get(alt) {
                     return Some(attr_value_string(value));
                 }
             }

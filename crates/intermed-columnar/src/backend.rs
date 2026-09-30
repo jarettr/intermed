@@ -30,6 +30,13 @@ pub trait QueryBackend {
     /// A stable identifier (matches the router's engine label where applicable).
     fn name(&self) -> &str;
 
+    /// Experimental backends are parity/research surfaces, not selectable
+    /// production defaults. Production status requires the semantic conformance
+    /// gate, not merely a working adapter.
+    fn is_experimental(&self) -> bool {
+        true
+    }
+
     /// Whether this backend can execute `plan`.
     fn supports(&self, plan: &RelExpr) -> bool;
 
@@ -37,8 +44,10 @@ pub trait QueryBackend {
     fn run(&self, plan: &RelExpr, facts: &[Fact]) -> Result<Relation, ColumnarError>;
 }
 
-/// The in-process columnar engine as a [`QueryBackend`]. It executes every [`RelExpr`]
-/// node, including `JoinFilter` and `GroupCountDistinct`.
+/// The in-process columnar engine as a [`QueryBackend`]. It executes every relational
+/// node, including `JoinFilter` and `GroupCountDistinct`. `CallExternal` requires an
+/// explicitly provisioned function registry and is therefore not advertised by this
+/// zero-configuration backend.
 pub struct InProcessBackend;
 
 impl QueryBackend for InProcessBackend {
@@ -46,16 +55,35 @@ impl QueryBackend for InProcessBackend {
         "in-process"
     }
 
-    fn supports(&self, _plan: &RelExpr) -> bool {
-        // The in-process engine is relationally complete — it runs every `RelExpr`
-        // node (including JoinFilter / GroupCountDistinct), so it supports any plan.
-        true
+    fn is_experimental(&self) -> bool {
+        false
+    }
+
+    fn supports(&self, plan: &RelExpr) -> bool {
+        !contains_external_call(plan)
     }
 
     fn run(&self, plan: &RelExpr, facts: &[Fact]) -> Result<Relation, ColumnarError> {
         let batches = facts_to_batches(facts, "backend")?;
         let store = ColumnarStore::from_batches(&batches)?;
         execute(plan, &store)
+    }
+}
+
+fn contains_external_call(plan: &RelExpr) -> bool {
+    match plan {
+        RelExpr::CallExternal { .. } => true,
+        RelExpr::Filter { input, .. }
+        | RelExpr::Project { input, .. }
+        | RelExpr::Aggregate { input, .. }
+        | RelExpr::Window { input, .. }
+        | RelExpr::TransitiveClosure { input, .. } => contains_external_call(input),
+        RelExpr::Join { left, right, .. } => {
+            contains_external_call(left) || contains_external_call(right)
+        }
+        RelExpr::Scan { .. } | RelExpr::JoinFilter { .. } | RelExpr::GroupCountDistinct { .. } => {
+            false
+        }
     }
 }
 
@@ -66,8 +94,9 @@ mod tests {
     use intermed_facts::FactStore;
 
     #[test]
-    fn in_process_backend_supports_every_plan() {
+    fn in_process_backend_supports_the_relational_surface_only() {
         let b = InProcessBackend;
+        assert!(!b.is_experimental());
         let scan_filter = RelExpr::scan("k").filter(Predicate {
             column: "a".into(),
             op: CmpOp::Eq,
@@ -79,9 +108,11 @@ mod tests {
             kinds: vec!["mod".into()],
             group_col: "subject".into(),
             distinct_attr: "file".into(),
+            filters: vec![],
             min_count: 2,
         };
         assert!(b.supports(&group_distinct));
+        assert!(!b.supports(&RelExpr::scan("mod").call_external("missing")));
     }
 
     #[test]

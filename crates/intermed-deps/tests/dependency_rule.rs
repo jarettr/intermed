@@ -38,6 +38,43 @@ fn wrong_mc_version_for_two_component_instance() {
 }
 
 #[test]
+fn client_only_dependency_is_inactive_on_a_server_target() {
+    let mut store = FactStore::new();
+    store
+        .fact("env", kind::ENVIRONMENT)
+        .subject("instance")
+        .attr("mc_version", "1.20")
+        .attr("side", "server")
+        .emit();
+    store
+        .fact("meta", kind::MOD)
+        .subject("alpha")
+        .attr("version", "1.0.0")
+        .attr("loader", "forge")
+        .emit();
+    store
+        .fact("meta", kind::DEPENDENCY)
+        .subject("alpha")
+        .attr("dep", "minecraft")
+        .attr("range", "[1.21,)")
+        .attr("mandatory", true)
+        .attr("side", "client")
+        .attr("version_dialect", "maven-range")
+        .emit();
+
+    let target = Target::with_kind(".", TargetKind::ModsDir);
+    let findings = DependencyRule
+        .evaluate(&RuleCtx::for_test(&store, &target))
+        .unwrap();
+    assert!(
+        findings
+            .iter()
+            .all(|finding| finding.id != "wrong-mc-version:alpha")
+    );
+    assert!(intermed_deps::build_graph(&store).edges.is_empty());
+}
+
+#[test]
 fn missing_dependency_is_error() {
     let mut store = FactStore::new();
     store

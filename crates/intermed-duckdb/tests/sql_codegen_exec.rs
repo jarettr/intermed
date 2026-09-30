@@ -2,6 +2,7 @@
 //! DuckDB store — verifies the unified IR→to_sql backend emits valid DuckDB SQL for
 //! FactFinding / Join / GroupDistinct shapes.
 
+use intermed_columnar::ir::{CmpOp, Predicate, RelExpr, ScalarValue};
 use intermed_columnar::to_sql;
 use intermed_doctor_core::facts::{FactStore, kind};
 use intermed_duckdb::{DuckStore, EVAL_RUN_ID};
@@ -63,4 +64,43 @@ fn generated_core_pack_sql_executes() {
         }
     }
     assert!(executed > 0, "no IR-generated SQL was executed");
+}
+
+#[test]
+fn group_distinct_sql_honors_group_filter_and_typed_distinct_values() {
+    let mut store = FactStore::new();
+    for (subject, loader, number, side) in [
+        ("a", "fabric", 1_i64, "client"),
+        ("b", "fabric", 2_i64, "client"),
+        ("c", "forge", 3_i64, "client"),
+        ("ignored", "forge", 4_i64, "server"),
+    ] {
+        store
+            .fact("t", kind::MOD)
+            .subject(subject)
+            .attr("loader", loader)
+            .attr("number", number)
+            .attr("side", side)
+            .emit();
+    }
+    let duck = DuckStore::open_in_memory().expect("memory store");
+    duck.materialize_facts(EVAL_RUN_ID, store.all())
+        .expect("materialize");
+    let plan = RelExpr::GroupCountDistinct {
+        kinds: vec![kind::MOD.to_string()],
+        group_col: "loader".into(),
+        distinct_attr: "number".into(),
+        filters: vec![Predicate {
+            column: "side".into(),
+            op: CmpOp::Eq,
+            value: ScalarValue::Str("client".into()),
+        }],
+        min_count: 2,
+    };
+    let sql = to_sql(&plan).expect("group SQL");
+    let result = duck
+        .query(&sql)
+        .unwrap_or_else(|error| panic!("{error}\n{sql}"));
+    assert_eq!(result.columns, vec!["loader"]);
+    assert_eq!(result.rows, vec![vec!["fabric".to_string()]]);
 }

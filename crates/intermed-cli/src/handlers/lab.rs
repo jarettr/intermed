@@ -340,15 +340,16 @@ fn run_lab_eval(args: LabEvalArgs) -> ExitCode {
                 report.cases, report.min_severity
             );
             println!(
-                "Category co-occurrence — macro precision: {:.2} | recall: {:.2}",
-                report.macro_precision_category, report.macro_recall_category
+                "Category co-occurrence — macro precision: {} | recall: {}",
+                metric(report.macro_precision_category),
+                metric(report.macro_recall_category)
             );
             for c in &report.by_category {
                 println!(
-                    "  {:<24} precision {:.2} recall {:.2} (tp {} fp {} fn {}, n={}) → suggest {}",
+                    "  {:<24} precision {} recall {} (tp {} fp {} fn {}, n={}) → suggest {}",
                     c.category,
-                    c.precision,
-                    c.recall,
+                    metric(c.precision),
+                    metric(c.recall),
                     c.true_positive,
                     c.false_positive,
                     c.false_negative,
@@ -359,9 +360,9 @@ fn run_lab_eval(args: LabEvalArgs) -> ExitCode {
             let fl = &report.finding_level;
             if fl.attributed || fl.coverage_aware {
                 println!(
-                    "Finding-level (attributed/coverage-aware) — precision: {:.2} | recall: {:.2} (tp {} fp {} fn {}, {} inconclusive, {} abstained; {} predictions / {} attributions)",
-                    fl.precision,
-                    fl.recall,
+                    "Finding-level (attributed/coverage-aware) — precision: {} | recall: {} (tp {} fp {} fn {}, {} inconclusive, {} abstained; {} predictions / {} attributions)",
+                    metric(fl.precision),
+                    metric(fl.recall),
                     fl.true_positive,
                     fl.false_positive,
                     fl.false_negative,
@@ -372,15 +373,16 @@ fn run_lab_eval(args: LabEvalArgs) -> ExitCode {
                 );
                 if !report.by_rule.is_empty() {
                     println!(
-                        "Per-rule — macro precision: {:.2} | recall: {:.2}",
-                        report.macro_precision_rule, report.macro_recall_rule
+                        "Per-rule — macro precision: {} | recall: {}",
+                        metric(report.macro_precision_rule),
+                        metric(report.macro_recall_rule)
                     );
                     for r in &report.by_rule {
                         println!(
-                            "  {:<24} precision {:.2} recall {:.2} (tp {} fp {} fn {}, n={}) → suggest {}",
+                            "  {:<24} precision {} recall {} (tp {} fp {} fn {}, n={}) → suggest {}",
                             r.rule_id,
-                            r.precision,
-                            r.recall,
+                            metric(r.precision),
+                            metric(r.recall),
                             r.true_positive,
                             r.false_positive,
                             r.false_negative,
@@ -402,4 +404,8 @@ fn run_lab_eval(args: LabEvalArgs) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn metric(value: Option<f64>) -> String {
+    value.map_or_else(|| "N/A".to_string(), |value| format!("{value:.2}"))
 }

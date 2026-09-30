@@ -22,9 +22,9 @@ jobs:
           toolchain: 1.94.0
           components: rustfmt, clippy
       - name: Format
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build and regenerate CLI docs
         run: INTERMED_GENERATE_CLI_DOCS=1 cargo build
       - name: Generated CLI docs are current
@@ -40,8 +40,10 @@ jobs:
           cargo test -p intermed-doctor-core --test trust_contract
           cargo test -p intermed-rules legacy_pack_cannot_emit_an_uncontracted_hard_finding
           cargo test -p intermed-rules columnar_backend_cannot_bypass_legacy_hard_severity_cap
+      - name: Query semantic oracle
+        run: cargo test -p intermed-columnar --test semantic_oracle
       - name: Test
-        run: cargo test
+        run: cargo test --workspace --locked
       - name: Mod-scale benchmarks (50/100/200 mods)
         run: cargo test -p intermed-cli --test mod_scale_bench -- --nocapture
         env:
@@ -54,10 +56,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.94.0
-      - name: DuckDB crate tests
-        run: cargo test -p intermed-duckdb --features duckdb
+      - name: DuckDB backend and parity tests
+        run: cargo test --locked -p intermed-duckdb --features duckdb --jobs 1
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CMAKE_BUILD_PARALLEL_LEVEL: "1"
       - name: CLI duckdb e2e
-        run: cargo test -p intermed-cli --features duckdb --test duckdb_e2e
+        run: cargo test --locked -p intermed-cli --features duckdb --test duckdb_e2e --jobs 1
+        env:
+          CARGO_BUILD_JOBS: "1"
+          CMAKE_BUILD_PARALLEL_LEVEL: "1"
 
   optional-backends:
     runs-on: ubuntu-latest
@@ -67,13 +75,13 @@ jobs:
         with:
           toolchain: 1.94.0
       - name: DataFusion backend compiles
-        run: cargo check -p intermed-columnar --features datafusion-backend
+        run: cargo check --locked -p intermed-columnar --features datafusion-backend
       - name: Polars backend compiles
-        run: cargo check -p intermed-columnar --features polars-backend
+        run: cargo check --locked -p intermed-columnar --features polars-backend
       - name: Ascent backend compiles
-        run: cargo check -p intermed-columnar --features ascent-backend
+        run: cargo check --locked -p intermed-columnar --features ascent-backend
       - name: WASM backend tests
-        run: cargo test -p intermed-columnar --features wasm
+        run: cargo test --locked -p intermed-columnar --features wasm
 
   # Dependency security audit (RustSec advisory DB). Fails the build on a known
   # vulnerability; accepted unmaintained-only advisories are listed in
@@ -91,7 +99,6 @@ jobs:
         run: cargo audit
 
   fuzz-smoke:
-    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +109,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          seconds=15
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            seconds=45
+          fi
           for target in class_parser deps_semver log_runtime_event log_stacktrace resource_ast resource_json runtime_log tiny_mappings; do
-            cargo fuzz run "$target" -- -max_total_time=45
+            args=("-max_total_time=${seconds}")
+            # cafebabe 0.9.0 retains cyclic Rc entries for some malformed
+            # constant pools. Keep ASan/OOB/panic coverage for the class parser,
+            # but leave LeakSanitizer enabled for every other target.
+            if [ "$target" = class_parser ]; then
+              ASAN_OPTIONS=detect_leaks=0 cargo fuzz run "$target" -- "${args[@]}"
+              continue
+            fi
+            cargo fuzz run "$target" -- "${args[@]}"
           done

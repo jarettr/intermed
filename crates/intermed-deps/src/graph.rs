@@ -1,11 +1,10 @@
 //! Build a modpack dependency graph from doctor facts.
 
-use std::collections::HashMap;
-
 use creeper_semver_pubgrub::SmallVersion;
 use intermed_doctor_core::facts::{FactId, FactStore, kind};
 use serde::{Deserialize, Serialize};
 
+use crate::model::{ConstraintApplicability, ResolvedDependencyModel};
 use crate::semver::{self, VersionDialect};
 
 /// Pseudo-dependencies that name the platform, not an installable mod.
@@ -37,7 +36,8 @@ pub(crate) fn platform_loader_family(dep_id: &str) -> Option<&'static str> {
     }
 }
 
-/// One installed mod or plugin with optional parsed semver.
+/// One installed mod or plugin. `parsed_version` is diagnostic/display metadata;
+/// solver eligibility never depends on it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModPackage {
     pub id: String,
@@ -73,7 +73,8 @@ pub struct ProvidedAlias {
     pub fact_id: FactId,
 }
 
-/// Why a package could not participate in PubGrub (conservative skip).
+/// Why a raw version could not be represented as generic SemVer. These records
+/// still participate in PubGrub through surrogate finite-catalog tokens.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkippedPackage {
     pub id: String,
@@ -99,9 +100,10 @@ pub struct ModpackGraph {
 }
 
 impl ModpackGraph {
-    /// True when at least one package has a parseable version for PubGrub.
+    /// True when at least one installed package can enter the finite catalog.
+    /// Raw versions do not need to be SemVer: PubGrub receives surrogate tokens.
     pub fn has_resolvable_packages(&self) -> bool {
-        self.packages.iter().any(|p| p.parsed_version.is_some())
+        !self.packages.is_empty()
     }
 
     /// Lookup parsed version for a package id (first matching entry).
@@ -116,57 +118,38 @@ impl ModpackGraph {
 
 /// Materialize a [`ModpackGraph`] from a collected [`FactStore`].
 pub fn build_graph(store: &FactStore) -> ModpackGraph {
+    let model = ResolvedDependencyModel::from_store(store);
     let mut packages = Vec::new();
     let mut skipped = Vec::new();
     let ambiguous_versions: std::collections::HashSet<String> = store
         .by_kind(kind::MOD_METADATA)
         .filter(|fact| fact.attr_bool("version_ambiguous").unwrap_or(false))
-        .map(|fact| fact.subject.clone())
+        .map(|fact| fact.subject.to_string())
         .collect();
-    let loader_by_mod: HashMap<String, String> = store
-        .by_kind(kind::MOD)
-        .chain(store.by_kind(kind::PLUGIN))
-        .filter(|fact| {
-            fact.attr("identity_certainty")
-                .is_none_or(|certainty| certainty == "confirmed")
-        })
-        .filter_map(|fact| {
-            fact.attr("loader")
-                .map(|loader| (fact.subject.clone(), loader.to_string()))
-        })
-        .collect();
-
-    for f in store
-        .by_kind(kind::MOD)
-        .chain(store.by_kind(kind::PLUGIN))
-        .filter(|fact| {
-            fact.attr("identity_certainty")
-                .is_none_or(|certainty| certainty == "confirmed")
-        })
-    {
-        let version = f.attr("version").unwrap_or("0").to_string();
+    for package in model.confirmed_packages() {
+        let version = package.version.clone().unwrap_or_else(|| "0".to_string());
         // `version_ambiguous` describes the generic display normalizer, not the
         // loader's comparison language. Fabric/Quilt order valid raw extended
         // versions directly, so strings such as `1.20-Fabric-4.0.6` must remain
         // in the finite PubGrub catalog.
-        let dialect = f
-            .attr("loader")
+        let dialect = package
+            .loader
+            .as_deref()
             .map(VersionDialect::from_loader)
             .unwrap_or_default();
-        let ambiguous =
-            ambiguous_versions.contains(&f.subject) && !dialect.orders_raw_extended_versions();
+        let ambiguous = ambiguous_versions.contains(package.id.as_str())
+            && !dialect.orders_raw_extended_versions();
         let parsed = (!ambiguous)
             .then(|| semver::parse_mod_version(&version).map(|v| v.to_string()))
             .flatten();
-        if parsed.is_some() {
-            packages.push(ModPackage {
-                id: f.subject.clone(),
-                version: version.clone(),
-                parsed_version: parsed,
-            });
-        } else {
+        packages.push(ModPackage {
+            id: package.id.clone(),
+            version: version.clone(),
+            parsed_version: parsed.clone(),
+        });
+        if parsed.is_none() {
             skipped.push(SkippedPackage {
-                id: f.subject.clone(),
+                id: package.id.clone(),
                 version,
                 reason: if ambiguous {
                     SkipReason::AmbiguousVersion
@@ -177,10 +160,7 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
         }
     }
 
-    let mc_version = store
-        .by_kind(kind::ENVIRONMENT)
-        .next()
-        .and_then(|f| f.attr("mc_version").map(str::to_string));
+    let mc_version = model.environment.minecraft_version.clone();
 
     if let Some(mc) = &mc_version
         && semver::parse_mod_version(mc).is_some()
@@ -196,59 +176,37 @@ pub fn build_graph(store: &FactStore) -> ModpackGraph {
     }
 
     let mut edges = Vec::new();
-    for dep in store.by_kind(kind::DEPENDENCY).filter(|fact| {
-        fact.attr("identity_certainty")
-            .is_none_or(|certainty| certainty == "confirmed")
-    }) {
-        let dep_id = dep.attr("dep").unwrap_or("").to_string();
-        if dep_id.is_empty() {
+    for dependency in model
+        .constraints
+        .iter()
+        .filter(|constraint| constraint.applicability == ConstraintApplicability::Active)
+    {
+        if dependency.to.is_empty() {
             continue;
         }
         edges.push(ModDependencyEdge {
-            from: dep.subject.clone(),
-            to: dep_id,
-            range: dep.attr("range").unwrap_or("*").to_string(),
-            mandatory: dep.attr_bool("mandatory").unwrap_or(true),
-            relation: dep.attr("relation").unwrap_or("depends").to_string(),
-            version_dialect: dep
-                .attr("version_dialect")
-                .and_then(VersionDialect::parse)
-                .or_else(|| {
-                    loader_by_mod
-                        .get(&dep.subject)
-                        .map(|loader| VersionDialect::from_loader(loader))
-                })
-                .unwrap_or_default(),
-            fact_id: dep.id,
+            from: dependency.from.clone(),
+            to: dependency.to.clone(),
+            range: dependency.range.clone(),
+            mandatory: dependency.mandatory,
+            relation: dependency.relation.canonical_token().to_string(),
+            version_dialect: dependency.dialect,
+            fact_id: dependency.fact_id,
         });
     }
 
     let mut provides = Vec::new();
-    for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
-        if let Some(alias) = f.attr("provides") {
-            let provider_dialect = loader_by_mod
-                .get(&f.subject)
-                .map(|loader| VersionDialect::from_loader(loader))
-                .unwrap_or_default();
-            if f.attr("version").is_none()
-                && ambiguous_versions.contains(&f.subject)
-                && !provider_dialect.orders_raw_extended_versions()
-            {
-                continue;
-            }
-            // A bundled (Jar-in-Jar) module carries its own version on the fact;
-            // a plain `provides` alias inherits the provider mod's version.
-            let provider_version = f.attr("version").map(str::to_string).or_else(|| {
-                packages
-                    .iter()
-                    .find(|p| p.id == f.subject)
-                    .map(|p| p.version.clone())
-            });
+    for provider in model.providers.values().flatten() {
+        if provider.activation != ConstraintApplicability::Inactive {
+            let provider_version = (provider.identity.is_confirmed()
+                && provider.activation == ConstraintApplicability::Active)
+                .then(|| provider.version.clone())
+                .flatten();
             provides.push(ProvidedAlias {
-                alias_id: alias.to_string(),
-                provider_mod: f.subject.clone(),
+                alias_id: provider.id.clone(),
+                provider_mod: provider.owner.clone(),
                 provider_version,
-                fact_id: f.id,
+                fact_id: provider.fact_id,
             });
         }
     }

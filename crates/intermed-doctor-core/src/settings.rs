@@ -233,14 +233,18 @@ impl Default for SecuritySettings {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SbomSettings {
-    /// Trust score (0..=100) at or above which SBOM×security correlation skips.
+    /// Compatibility threshold for legacy SBOM facts that predate typed
+    /// provenance axes. New facts never use the display score as policy.
     pub well_identified_trust: i64,
+    /// Maximum wall-clock time allowed for one external `jarsigner` process.
+    pub signature_verify_timeout_secs: u64,
 }
 
 impl Default for SbomSettings {
     fn default() -> Self {
         Self {
             well_identified_trust: 60,
+            signature_verify_timeout_secs: 20,
         }
     }
 }

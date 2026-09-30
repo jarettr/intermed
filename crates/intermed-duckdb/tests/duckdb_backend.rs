@@ -502,28 +502,38 @@ fn core_sql_rule_catalog_is_stable() {
 #[test]
 fn sbom_correlation_flags_only_low_trust_capability() {
     let mut store = FactStore::new();
+    let shady_artifact_id = format!("sha256:{}", "a".repeat(64));
+    let trusted_artifact_id = format!("sha256:{}", "b".repeat(64));
     // Low-provenance archive (trust 10 < 60) that also spawns processes: the
     // exact "unknown source + dangerous capability" pair the rule exists for.
+    // Cross-layer identity is the content-derived ArtifactId; archive names are
+    // display locators and must never become join keys.
     store
         .fact("sbom", kind::SBOM)
-        .subject("shady.jar")
+        .subject(shady_artifact_id.clone())
+        .attr("archive", "shady.jar")
         .attr("trust_score", 10_i64)
+        .attr("provenance_correlation_eligible", true)
         .emit();
     store
         .fact("security", kind::USES_PROCESS_SPAWN)
         .subject("shady.jar")
         .attr("archive", "shady.jar")
+        .attr("artifact_id", shady_artifact_id.clone())
         .emit();
     // Well-identified archive (trust 95) with the same capability: must NOT flag.
     store
         .fact("sbom", kind::SBOM)
-        .subject("trusted.jar")
+        .subject(trusted_artifact_id.clone())
+        .attr("archive", "trusted.jar")
         .attr("trust_score", 95_i64)
+        .attr("provenance_correlation_eligible", false)
         .emit();
     store
         .fact("security", kind::USES_PROCESS_SPAWN)
         .subject("trusted.jar")
         .attr("archive", "trusted.jar")
+        .attr("artifact_id", trusted_artifact_id.clone())
         .emit();
 
     let ctx = ctx_from_store(&store);
@@ -534,7 +544,7 @@ fn sbom_correlation_flags_only_low_trust_capability() {
 
     let correlation: Vec<_> = findings
         .iter()
-        .filter(|f| f.id == "low-trust-capability:shady.jar")
+        .filter(|f| f.id == format!("low-trust-capability:{shady_artifact_id}"))
         .collect();
     assert_eq!(
         correlation.len(),
@@ -546,7 +556,7 @@ fn sbom_correlation_flags_only_low_trust_capability() {
     assert!(
         !findings
             .iter()
-            .any(|f| f.id == "low-trust-capability:trusted.jar"),
+            .any(|f| f.id == format!("low-trust-capability:{trusted_artifact_id}")),
         "well-identified archive must not be flagged"
     );
 }

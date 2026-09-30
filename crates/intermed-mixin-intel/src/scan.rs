@@ -1,10 +1,12 @@
 //! Jar-level mixin scanning and modpack aggregation.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use intermed_doctor_core::bounded_zip;
@@ -25,7 +27,13 @@ use crate::refmap::{MappingContext, Namespace, Refmap, TinyMappings, dotted_name
 
 const EXTRACTOR: &str = "mixin-analyzer";
 /// Bump trailing revision when parse / analysis logic changes within a release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r36");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r38");
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ArtifactBinding {
+    pub mod_id: Option<String>,
+    pub identity_certainty: String,
+}
 
 /// Stable collector / fact extractor id (`mixin-analyzer`).
 pub fn extractor_id() -> &'static str {
@@ -108,6 +116,7 @@ pub fn scan_mods_dir_filtered_with_environment(
         target_minecraft_version,
         None,
         false,
+        false,
     )
 }
 
@@ -124,6 +133,38 @@ pub fn scan_mods_dir_filtered_with_target_environment(
     target_minecraft_version: Option<&str>,
     target_loader: Option<intermed_doctor_core::Loader>,
     allow_foreign_configs: bool,
+    environment_conflicted: bool,
+) -> Result<MixinScan, MixinScanError> {
+    scan_mods_dir_filtered_with_identity(
+        dir,
+        cache,
+        scan,
+        mixin,
+        minecraft_jar,
+        minecraft_mappings,
+        target_minecraft_version,
+        target_loader,
+        crate::model::Side::Unknown,
+        allow_foreign_configs,
+        environment_conflicted,
+        &BTreeMap::new(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn scan_mods_dir_filtered_with_identity(
+    dir: &Path,
+    cache: Option<&JarCache>,
+    scan: &intermed_doctor_core::ScanSettings,
+    mixin: MixinSettings,
+    minecraft_jar: Option<&Path>,
+    minecraft_mappings: Option<&Path>,
+    target_minecraft_version: Option<&str>,
+    target_loader: Option<intermed_doctor_core::Loader>,
+    target_side: crate::model::Side,
+    allow_foreign_configs: bool,
+    environment_conflicted: bool,
+    identity_bindings: &BTreeMap<String, ArtifactBinding>,
 ) -> Result<MixinScan, MixinScanError> {
     if !dir.is_dir() {
         return Err(MixinScanError(format!(
@@ -150,7 +191,7 @@ pub fn scan_mods_dir_filtered_with_target_environment(
                 }),
                 None => scan_jar_cached(jar, target_loader, allow_foreign_configs),
             };
-            (archive, cached)
+            (jar.clone(), archive, cached)
         })
         .collect();
 
@@ -160,11 +201,19 @@ pub fn scan_mods_dir_filtered_with_target_environment(
     let mut failures = Vec::new();
     let mut hierarchy = HierarchyIndex::new();
     let mut target_index = crate::apply_failure::TargetClassIndex::new();
-    for (archive, mut result) in results {
+    for (jar, archive, mut result) in results {
         // Cache entries are content-addressed and may have been produced from an
         // identically-sized copy with a different filename. Locator data belongs
         // to this scan invocation, never to the reusable payload.
         rebind_archive(&mut result, &archive);
+        let exact_key = format!("path:{}", jar.display());
+        let archive_key = format!("name:{archive}");
+        if let Some(binding) = identity_bindings
+            .get(&exact_key)
+            .or_else(|| identity_bindings.get(&archive_key))
+        {
+            rebind_identity(&mut result, binding);
+        }
         match result {
             CachedMixinJar::Ok(mut partial) => {
                 configs_discovered += partial.configs_discovered;
@@ -181,6 +230,11 @@ pub fn scan_mods_dir_filtered_with_target_environment(
             }),
         }
     }
+
+    // Activation is environment-dependent and identity-sensitive. Cached class
+    // parsing deliberately stays neutral; re-evaluate only after canonical B
+    // identity has been bound and canonical A side is known.
+    apply_target_activation(&configs, &mut classes, target_side);
 
     let global_mappings = minecraft_mappings
         .and_then(load_tiny_mappings_file)
@@ -217,10 +271,20 @@ pub fn scan_mods_dir_filtered_with_target_environment(
     if let Some(namespace) = minecraft_observation.and_then(|observation| observation.namespace) {
         classpath_coverage.minecraft_namespace = namespace.as_str().to_string();
     }
+    let refmap_statuses: std::collections::BTreeMap<(String, String), crate::refmap::RefmapStatus> =
+        configs
+            .iter()
+            .map(|cfg| {
+                (
+                    (cfg.artifact_id.clone(), cfg.path.clone()),
+                    cfg.refmap_status.clone(),
+                )
+            })
+            .collect();
     let apply_failures = crate::apply_failure::detect_apply_failures(
         &classes,
         &target_index,
-        &std::collections::BTreeSet::new(),
+        &refmap_statuses,
         global_mappings.as_ref(),
     );
     // Fold confirmed apply failures into the risk heatmap (risk v2).
@@ -247,7 +311,73 @@ pub fn scan_mods_dir_filtered_with_target_environment(
         Some(&target_index),
         global_mappings.as_ref(),
         failures,
+        environment_conflicted,
+        match mixin.level {
+            intermed_doctor_core::settings::MixinLevel::Basic => {
+                crate::profile::PrecisionProfile::Fast
+            }
+            intermed_doctor_core::settings::MixinLevel::Standard => {
+                crate::profile::PrecisionProfile::Standard
+            }
+            intermed_doctor_core::settings::MixinLevel::Full => {
+                crate::profile::PrecisionProfile::Forensic
+            }
+        },
     ))
+}
+
+fn apply_target_activation(
+    configs: &[MixinConfigRecord],
+    classes: &mut [MixinClassRecord],
+    target_side: crate::model::Side,
+) {
+    let config_by_identity = configs
+        .iter()
+        .map(|config| ((config.artifact_id.clone(), config.path.clone()), config))
+        .collect::<BTreeMap<_, _>>();
+    for class in classes {
+        let Some(config) =
+            config_by_identity.get(&(class.artifact_id.clone(), class.config.clone()))
+        else {
+            class.activation = crate::model::ActivationStatus::Unknown;
+            class.activation_reason =
+                "owning mixin config could not be joined after identity binding".to_string();
+            continue;
+        };
+        let identity_confirmed = matches!(
+            class.identity_certainty.as_str(),
+            "confirmed" | "self-loader-bootstrap"
+        );
+        (class.activation, class.activation_reason) =
+            crate::activation::class_activation_for_target(
+                config,
+                class.side,
+                target_side,
+                identity_confirmed,
+            );
+    }
+}
+
+fn rebind_identity(cached: &mut CachedMixinJar, binding: &ArtifactBinding) {
+    let CachedMixinJar::Ok(partial) = cached else {
+        return;
+    };
+    for config in &mut partial.configs {
+        if let Some(mod_id) = &binding.mod_id {
+            config.mod_id.clone_from(mod_id);
+        }
+        config
+            .identity_certainty
+            .clone_from(&binding.identity_certainty);
+    }
+    for class in &mut partial.classes {
+        if let Some(mod_id) = &binding.mod_id {
+            class.mod_id.clone_from(mod_id);
+        }
+        class
+            .identity_certainty
+            .clone_from(&binding.identity_certainty);
+    }
 }
 
 fn rebind_archive(cached: &mut CachedMixinJar, archive: &str) {
@@ -317,33 +447,46 @@ fn ingest_minecraft_jar(
         ClassIndexSource::Minecraft,
     );
     let namespace = candidate.minecraft_class_namespace();
+    let mapping_compatibility = mappings.map(TinyMappings::mapping_compatibility);
     let error = if !truncations.is_empty() {
         Some(format!(
             "Minecraft class index is incomplete: {}",
             truncations.join("; ")
         ))
-    } else if mappings.is_some_and(|mapping| !mapping.target_compatible()) {
-        let mapping = mappings.expect("checked above");
-        Some(format!(
-            "mapping file targets Minecraft {}, but the analyzed environment is {}; absence checks were disabled",
-            mapping
-                .identity()
-                .minecraft_version
-                .as_deref()
-                .unwrap_or("unknown"),
-            mapping
-                .target_minecraft_version()
-                .unwrap_or("a different version")
-        ))
-    } else if namespace == crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
-        && mappings.is_some_and(|mapping| {
-            mapping.has_namespace("official")
-                && (mapping.has_namespace("named") || mapping.has_namespace("intermediary"))
-        })
-    {
-        candidate.mark_minecraft_coverage_complete();
-        target_index.merge_explicit_minecraft(&candidate);
-        None
+    } else if let Some(compatibility) = mapping_compatibility {
+        match compatibility {
+            crate::refmap::MappingCompatibility::Incompatible {
+                mapping_version,
+                target_version,
+            } => Some(format!(
+                "mapping file targets Minecraft {mapping_version}, but the analyzed environment is {target_version}; absence checks were disabled"
+            )),
+            crate::refmap::MappingCompatibility::VersionUnverified => Some(
+                "mapping file version is unknown; method/class absence checks may be unreliable"
+                    .to_string(),
+            ),
+            crate::refmap::MappingCompatibility::Compatible => {
+                let supports_namespace = !matches!(
+                    namespace,
+                    crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
+                ) || mappings.is_some_and(|mapping| {
+                    mapping.has_namespace("official")
+                        && (mapping.has_namespace("named") || mapping.has_namespace("intermediary"))
+                });
+                if supports_namespace
+                    && namespace != crate::apply_failure::MinecraftClassNamespace::Unsupported
+                {
+                    candidate.mark_minecraft_coverage_complete();
+                    target_index.merge_explicit_minecraft(&candidate);
+                    None
+                } else {
+                    Some(format!(
+                        "Minecraft artifact uses `{}` class names without a complete compatible mapping edge; absence checks were disabled",
+                        namespace.as_str()
+                    ))
+                }
+            }
+        }
     } else if matches!(
         namespace,
         crate::apply_failure::MinecraftClassNamespace::OfficialObfuscated
@@ -379,6 +522,8 @@ fn assemble_scan(
     target_index: Option<&crate::apply_failure::TargetClassIndex>,
     mappings: Option<&TinyMappings>,
     failures: Vec<MixinScanFailure>,
+    environment_conflicted: bool,
+    precision_profile: crate::profile::PrecisionProfile,
 ) -> MixinScan {
     // Phase 2: flatten classes into stable, site-level application records before
     // moving `classes` into the scan. Phase 5: resolve each site's target method
@@ -386,12 +531,8 @@ fn assemble_scan(
     // Phase 18: Standard baseline depth; Phase 19 escalates hot/destructive/required
     // /fail-hard/unresolved sites to Deep automatically, so heavy checks land where
     // they matter without paying for them on every benign observer inject.
-    let application_sites = crate::site::build_application_sites(
-        &classes,
-        target_index,
-        mappings,
-        crate::profile::PrecisionProfile::Standard,
-    );
+    let application_sites =
+        crate::site::build_application_sites(&classes, target_index, mappings, precision_profile);
     // Phases 9–10: order + composition of handlers sharing an exact injection point.
     let compositions = crate::composition::analyze_compositions(&application_sites);
     // Cross-layer: mixins hooking Minecraft data loaders mutate runtime resources
@@ -439,6 +580,7 @@ fn assemble_scan(
         capabilities,
         security_surfaces,
         failures,
+        environment_conflicted,
     }
 }
 
@@ -458,7 +600,7 @@ struct JarScanPartial {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum CachedMixinJar {
-    Ok(JarScanPartial),
+    Ok(Box<JarScanPartial>),
     Err { archive: String, reason: String },
 }
 
@@ -468,7 +610,7 @@ fn scan_jar_cached(
     allow_foreign_configs: bool,
 ) -> CachedMixinJar {
     match scan_jar(jar, target_loader, allow_foreign_configs) {
-        Ok(partial) => CachedMixinJar::Ok(partial),
+        Ok(partial) => CachedMixinJar::Ok(Box::new(partial)),
         Err(e) => CachedMixinJar::Err {
             archive: e.archive,
             reason: e.reason,
@@ -487,6 +629,10 @@ fn scan_jar(
     allow_foreign_configs: bool,
 ) -> Result<JarScanPartial, JarScanError> {
     let archive_label = archive_name(jar);
+    let artifact_id = hash_artifact(jar).map_err(|e| JarScanError {
+        archive: archive_label.clone(),
+        reason: format!("hash {}: {e}", jar.display()),
+    })?;
     let file = std::fs::File::open(jar).map_err(|e| JarScanError {
         archive: archive_label.clone(),
         reason: format!("open {}: {e}", jar.display()),
@@ -495,8 +641,10 @@ fn scan_jar(
         archive: archive_label.clone(),
         reason: format!("zip {}: {e}", jar.display()),
     })?;
-    let mod_id =
-        detect_mod_id(&mut archive, target_loader).unwrap_or_else(|| archive_stem(&archive_label));
+    // Display-only fallback. Canonical identity is supplied by Layer B through
+    // ARTIFACT_ROLE; absence of that fact must remain explicit, not trigger a
+    // second descriptor-selection implementation in F.
+    let mod_id = archive_stem(&archive_label);
     let config_paths = discover_mixin_configs(&mut archive, target_loader, allow_foreign_configs);
     let configs_discovered = config_paths.len();
     let tiny = discover_tiny_mappings(&mut archive);
@@ -538,26 +686,74 @@ fn scan_jar(
     }
 
     for config_path in config_paths {
-        match read_zip_text(&mut archive, &config_path)
-            .and_then(|text| parse_config(&archive_label, &config_path, &mod_id, &text).ok())
-        {
-            Some(config) => {
+        let config_result = read_zip_text(&mut archive, &config_path)
+            .and_then(|opt| {
+                opt.ok_or_else(|| bounded_zip::BoundedReadError::Unreadable {
+                    name: config_path.clone(),
+                    reason: "not found".to_string(),
+                })
+            })
+            .and_then(|text| {
+                parse_config(&archive_label, &config_path, &mod_id, &text).map_err(|e| {
+                    bounded_zip::BoundedReadError::Unreadable {
+                        name: config_path.clone(),
+                        reason: format!("JSON parse: {e}"),
+                    }
+                })
+            });
+
+        match config_result {
+            Ok(mut config) => {
+                config.artifact_id.clone_from(&artifact_id);
+                config.identity_certainty = "unresolved-display-fallback".to_string();
                 let mut mapping = MappingContext::new();
                 if let Some(t) = &tiny {
                     mapping = mapping.with_tiny(t.clone());
                 }
-                if let Some(ref rpath) = config.refmap
-                    && let Some(text) = read_zip_text(&mut archive, rpath)
-                    && let Ok(refmap) = Refmap::parse(&text)
-                {
-                    mapping = mapping.with_refmap(refmap);
-                }
+
+                config.refmap_status = if let Some(ref rpath) = config.refmap {
+                    match bounded_zip::read_zip_text_bounded(
+                        &mut archive,
+                        rpath,
+                        bounded_zip::cap_for_entry(rpath),
+                    ) {
+                        Ok(Some(text)) => match Refmap::parse(&text) {
+                            Ok(refmap) => {
+                                mapping = mapping.with_refmap(refmap);
+                                crate::refmap::RefmapStatus::DeclaredAndLoaded {
+                                    path: rpath.clone(),
+                                }
+                            }
+                            Err(e) => crate::refmap::RefmapStatus::DeclaredInvalid {
+                                path: rpath.clone(),
+                                reason: format!("JSON parse: {e}"),
+                            },
+                        },
+                        Ok(None) => crate::refmap::RefmapStatus::DeclaredMissing {
+                            declared_path: rpath.clone(),
+                        },
+                        Err(bounded_zip::BoundedReadError::TooLarge { cap, .. }) => {
+                            crate::refmap::RefmapStatus::DeclaredTooLarge {
+                                path: rpath.clone(),
+                                cap_bytes: cap,
+                            }
+                        }
+                        Err(bounded_zip::BoundedReadError::Unreadable { reason, .. }) => {
+                            crate::refmap::RefmapStatus::DeclaredUnreadable {
+                                path: rpath.clone(),
+                                reason,
+                            }
+                        }
+                    }
+                } else {
+                    crate::refmap::RefmapStatus::NotDeclared
+                };
 
                 let hierarchy = &partial.hierarchy;
                 for mixin in &config.mixins {
                     let class_path = mixin_class_path(&config.package, mixin);
                     match read_zip_bytes(&mut archive, &class_path) {
-                        Some(bytes) => {
+                        Ok(Some(bytes)) => {
                             let mut rec = analyze_class(
                                 &config,
                                 mixin,
@@ -569,23 +765,42 @@ fn scan_jar(
                             rec.runtime_namespace = runtime_namespace;
                             partial.classes.push(rec);
                         }
-                        None => partial.failures.push(MixinScanFailure {
+                        Ok(None) => partial.failures.push(MixinScanFailure {
                             archive: archive_label.clone(),
                             path: Some(class_path),
                             reason: "mixin class listed in config but not found".to_string(),
+                        }),
+                        Err(e) => partial.failures.push(MixinScanFailure {
+                            archive: archive_label.clone(),
+                            path: Some(class_path),
+                            reason: e.reason(),
                         }),
                     }
                 }
                 partial.configs.push(config);
             }
-            None => partial.failures.push(MixinScanFailure {
+            Err(e) => partial.failures.push(MixinScanFailure {
                 archive: archive_label.clone(),
                 path: Some(config_path),
-                reason: "mixin config could not be parsed".to_string(),
+                reason: e.reason(),
             }),
         }
     }
     Ok(partial)
+}
+
+fn hash_artifact(path: &Path) -> std::io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 pub(crate) fn analyze_class(
@@ -615,7 +830,9 @@ pub(crate) fn analyze_class(
 
     MixinClassRecord {
         archive: config.archive.clone(),
+        artifact_id: config.artifact_id.clone(),
         mod_id: config.mod_id.clone(),
+        identity_certainty: config.identity_certainty.clone(),
         config: config.path.clone(),
         class_name,
         class_path: class_path.to_string(),
@@ -712,7 +929,7 @@ fn discover_tiny_mappings(archive: &mut zip::ZipArchive<std::fs::File>) -> Optio
         "META-INF/mappings.tiny",
         "mappings.tiny",
     ] {
-        if let Some(text) = read_zip_text(archive, name)
+        if let Ok(Some(text)) = read_zip_text(archive, name)
             && let Some(map) =
                 TinyMappings::parse_with_identity(&text, format!("embedded:{name}"), None)
         {
@@ -734,11 +951,15 @@ fn discover_mixin_configs(
     allow_foreign_configs: bool,
 ) -> Vec<String> {
     let mut out = std::collections::BTreeSet::new();
-    let fabric = read_zip_text(archive, "fabric.mod.json");
-    let quilt = read_zip_text(archive, "quilt.mod.json");
-    let manifest = read_zip_text(archive, "META-INF/MANIFEST.MF");
-    let forge = read_zip_text(archive, "META-INF/mods.toml");
-    let neoforge = read_zip_text(archive, "META-INF/neoforge.mods.toml");
+    let fabric = read_zip_text(archive, "fabric.mod.json").ok().flatten();
+    let quilt = read_zip_text(archive, "quilt.mod.json").ok().flatten();
+    let manifest = read_zip_text(archive, "META-INF/MANIFEST.MF")
+        .ok()
+        .flatten();
+    let forge = read_zip_text(archive, "META-INF/mods.toml").ok().flatten();
+    let neoforge = read_zip_text(archive, "META-INF/neoforge.mods.toml")
+        .ok()
+        .flatten();
     let fabric_is_concrete = fabric.as_deref().is_some_and(json_descriptor_is_concrete);
     let quilt_is_concrete = quilt.as_deref().is_some_and(json_descriptor_is_concrete);
     let forge_is_concrete = forge.as_deref().is_some_and(toml_descriptor_is_concrete);
@@ -840,21 +1061,28 @@ fn discover_mixin_configs(
 /// `Unknown` and the namespace-mismatch checks stay silent rather than guess.
 fn detect_runtime_namespace(archive: &mut zip::ZipArchive<std::fs::File>) -> Namespace {
     let forge = read_zip_text(archive, "META-INF/mods.toml")
+        .ok()
+        .flatten()
         .as_deref()
         .is_some_and(toml_descriptor_is_concrete)
         || read_zip_text(archive, "META-INF/neoforge.mods.toml")
+            .ok()
+            .flatten()
             .as_deref()
             .is_some_and(toml_descriptor_is_concrete);
     let fabric = read_zip_text(archive, "fabric.mod.json")
+        .ok()
+        .flatten()
         .as_deref()
         .is_some_and(json_descriptor_is_concrete)
         || read_zip_text(archive, "quilt.mod.json")
+            .ok()
+            .flatten()
             .as_deref()
             .is_some_and(json_descriptor_is_concrete);
     match (forge, fabric) {
         (true, false) => Namespace::Named,
         (false, true) => Namespace::Intermediary,
-        // Neither manifest, or an ambiguous multi-loader jar with both.
         _ => Namespace::Unknown,
     }
 }
@@ -1091,11 +1319,14 @@ fn parse_config(
 
     Ok(MixinConfigRecord {
         archive: archive.to_string(),
+        artifact_id: String::new(),
         path: path.to_string(),
         mod_id: mod_id.to_string(),
+        identity_certainty: "unresolved-display-fallback".to_string(),
         package: raw.package,
         priority: raw.priority.unwrap_or(1000),
         refmap: raw.refmap,
+        refmap_status: crate::refmap::RefmapStatus::default(),
         mixins: mixins.into_iter().collect(),
         plugin: raw.plugin.filter(|p| !p.trim().is_empty()),
         mixin_sides,
@@ -1192,78 +1423,71 @@ fn is_safe_path(path: &str) -> bool {
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
 
-fn detect_mod_id(
+/// Bounded text read (config, refmap, manifest); cap chosen by entry name.
+/// `Ok(None)` means the entry is absent; `Err` preserves too-large/unreadable
+/// states so callers can surface incomplete coverage instead of treating them
+/// as an ordinary missing entry.
+fn read_zip_text(
     archive: &mut zip::ZipArchive<std::fs::File>,
-    target_loader: Option<intermed_doctor_core::Loader>,
-) -> Option<String> {
-    let fabric = |archive: &mut zip::ZipArchive<std::fs::File>| {
-        read_zip_text(archive, "fabric.mod.json").and_then(|text| {
-            intermed_doctor_core::fabric_json::parse_value(&text)
-                .ok()
-                .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
-        })
-    };
-    let quilt = |archive: &mut zip::ZipArchive<std::fs::File>| {
-        read_zip_text(archive, "quilt.mod.json").and_then(|text| {
-            intermed_doctor_core::fabric_json::parse_value(&text)
-                .ok()
-                .and_then(|v| {
-                    v.get("quilt_loader")
-                        .and_then(|q| q.get("id"))
-                        .and_then(|x| x.as_str())
-                        .map(str::to_string)
-                })
-        })
-    };
-    let neoforge = |archive: &mut zip::ZipArchive<std::fs::File>| {
-        read_zip_text(archive, "META-INF/neoforge.mods.toml")
-            .and_then(|text| intermed_resource_identity::mod_id_from_mods_toml(&text))
-    };
-    let forge = |archive: &mut zip::ZipArchive<std::fs::File>| {
-        read_zip_text(archive, "META-INF/mods.toml")
-            .and_then(|text| intermed_resource_identity::mod_id_from_mods_toml(&text))
-    };
-    let legacy = |archive: &mut zip::ZipArchive<std::fs::File>| {
-        read_zip_text(archive, "mcmod.info").and_then(|text| {
-            intermed_doctor_core::legacy_forge::parse_mcmod_info(&text)
-                .ok()
-                .and_then(|mods| mods.into_iter().next().map(|metadata| metadata.mod_id))
-        })
-    };
-    match target_loader {
-        Some(intermed_doctor_core::Loader::Fabric) => fabric(archive).or_else(|| quilt(archive)),
-        Some(intermed_doctor_core::Loader::Quilt) => quilt(archive).or_else(|| fabric(archive)),
-        Some(intermed_doctor_core::Loader::NeoForge) => neoforge(archive)
-            .or_else(|| forge(archive))
-            .or_else(|| legacy(archive)),
-        Some(intermed_doctor_core::Loader::Forge) => forge(archive)
-            .or_else(|| legacy(archive))
-            .or_else(|| neoforge(archive)),
-        _ => fabric(archive)
-            .or_else(|| quilt(archive))
-            .or_else(|| neoforge(archive))
-            .or_else(|| forge(archive))
-            .or_else(|| legacy(archive)),
-    }
-}
-
-/// Bounded manifest/config/refmap text read — the per-entry cap is picked from
-/// the entry name (a `*-refmap.json` may legitimately be large, a config small).
-/// An oversized or crafted entry yields `None` rather than driving unbounded
-/// decompression.
-fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    bounded_zip::read_zip_text_opt(archive, name, bounded_zip::cap_for_entry(name))
+    name: &str,
+) -> Result<Option<String>, bounded_zip::BoundedReadError> {
+    bounded_zip::read_zip_text_bounded(archive, name, bounded_zip::cap_for_entry(name))
 }
 
 /// Bounded byte read (mixin `.class` files); cap chosen by entry name.
-fn read_zip_bytes(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<Vec<u8>> {
+/// Returns `Err` for TooLarge/Unreadable so callers can surface scan truncation.
+fn read_zip_bytes(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+) -> Result<Option<Vec<u8>>, bounded_zip::BoundedReadError> {
     bounded_zip::read_zip_bytes_bounded(archive, name, bounded_zip::cap_for_entry(name))
-        .ok()
-        .flatten()
 }
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    #[test]
+    fn canonical_server_side_deactivates_parsed_client_mixin() {
+        let mut mixin_sides = BTreeMap::new();
+        mixin_sides.insert("ClientMixin".to_string(), crate::model::Side::Client);
+        let config = MixinConfigRecord {
+            archive: "client.jar".into(),
+            artifact_id: "sha256:client".into(),
+            mod_id: "client".into(),
+            identity_certainty: "confirmed".into(),
+            path: "client.mixins.json".into(),
+            package: "client.mixin".into(),
+            priority: 1000,
+            refmap: None,
+            refmap_status: crate::refmap::RefmapStatus::NotDeclared,
+            mixins: vec!["ClientMixin".into()],
+            plugin: None,
+            mixin_sides,
+        };
+        let bytes = crate::fixtures::mixin_class_with_inject_at(
+            "client/mixin/ClientMixin",
+            "net/minecraft/client/Minecraft",
+            "tick()V",
+            "HEAD",
+        );
+        let mut classes = vec![analyze_class(
+            &config,
+            "ClientMixin",
+            "client/mixin/ClientMixin.class",
+            &bytes,
+            &mut MappingContext::new(),
+            &HierarchyIndex::new(),
+        )];
+        apply_target_activation(
+            std::slice::from_ref(&config),
+            &mut classes,
+            crate::model::Side::Server,
+        );
+        assert_eq!(
+            classes[0].activation,
+            crate::model::ActivationStatus::InactiveBySide
+        );
+    }
 
     fn discovery_jar(entries: &[(&str, &[u8])]) -> std::path::PathBuf {
         use std::io::Write;
@@ -1320,31 +1544,6 @@ mod discovery_tests {
         assert_eq!(
             discover_mixin_configs(&mut archive, None, false),
             vec!["legacy.mixins.json"]
-        );
-        std::fs::remove_file(path).unwrap();
-    }
-
-    #[test]
-    fn mixin_owner_uses_authoritative_forge_descriptor_not_archive_stem() {
-        let path = discovery_jar(&[
-            (
-                "META-INF/mods.toml",
-                b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"real_forge_id\"\nversion=\"1.0\"\n",
-            ),
-            (
-                "META-INF/neoforge.mods.toml",
-                b"modLoader=\"javafml\"\n[[mods]]\nmodId=\"other_frontend\"\nversion=\"1.0\"\n",
-            ),
-        ]);
-        let file = std::fs::File::open(&path).unwrap();
-        let mut archive = zip::ZipArchive::new(file).unwrap();
-        assert_eq!(
-            detect_mod_id(&mut archive, Some(intermed_doctor_core::Loader::Forge)).as_deref(),
-            Some("real_forge_id")
-        );
-        assert_eq!(
-            detect_mod_id(&mut archive, Some(intermed_doctor_core::Loader::NeoForge)).as_deref(),
-            Some("other_frontend")
         );
         std::fs::remove_file(path).unwrap();
     }

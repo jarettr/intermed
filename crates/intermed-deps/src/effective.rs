@@ -29,6 +29,8 @@ use intermed_doctor_core::facts::{FactId, FactStore, kind};
 use sha2::{Digest, Sha256};
 
 use crate::graph::is_platform_dep;
+use crate::model::{ConstraintApplicability, ResolvedDependencyModel};
+use crate::relation::DependencyRelation;
 use crate::semver::VersionDialect;
 
 /// A declared dependency edge taken from a `dependency` fact.
@@ -37,7 +39,7 @@ pub struct DeclaredDep {
     pub from: String,
     pub to: String,
     pub range: String,
-    pub relation: String,
+    pub relation: DependencyRelation,
     pub mandatory: bool,
     pub version_dialect: VersionDialect,
     pub fact_id: FactId,
@@ -53,6 +55,9 @@ pub struct ImplicitDep {
     pub required: bool,
     pub conditioned: bool,
     pub hard: bool,
+    /// Whether the reference came from an exact schema field, a heuristic
+    /// registry walk, or an opaque custom payload.
+    pub reference_certainty: String,
     pub ref_count: i64,
     pub sample_path: String,
     pub resolve_state: String,
@@ -82,48 +87,48 @@ impl EffectiveModel {
     /// Build the model from a collected [`FactStore`].
     pub fn from_store(store: &FactStore) -> Self {
         let mut model = EffectiveModel::default();
+        let resolved = ResolvedDependencyModel::from_store(store);
 
-        for f in store.by_kind(kind::MOD).chain(store.by_kind(kind::PLUGIN)) {
-            model.providers.insert(f.subject.clone());
-            model.mod_ids.insert(f.subject.clone());
-        }
-        for f in store.by_kind(kind::PROVIDED_DEPENDENCY) {
-            if let Some(p) = f.attr("provides") {
-                model.providers.insert(p.to_string());
-            }
-        }
-        for f in store.by_kind(kind::NAMESPACE_OWNER) {
-            model.providers.insert(f.subject.clone());
-        }
+        model.providers = resolved.confirmed_provider_ids();
+        model.mod_ids = resolved
+            .confirmed_packages()
+            .map(|package| package.id.clone())
+            .collect();
 
-        for dep in store.by_kind(kind::DEPENDENCY) {
-            let to = dep.attr("dep").unwrap_or("").to_string();
-            if to.is_empty() {
-                continue;
-            }
+        for dep in resolved
+            .constraints
+            .iter()
+            .filter(|constraint| constraint.applicability == ConstraintApplicability::Active)
+        {
             model.declared.push(DeclaredDep {
-                from: dep.subject.clone(),
-                to,
-                range: dep.attr("range").unwrap_or("*").to_string(),
-                relation: dep.attr("relation").unwrap_or("depends").to_string(),
-                mandatory: dep.attr_bool("mandatory").unwrap_or(true),
-                version_dialect: dep
-                    .attr("version_dialect")
-                    .and_then(VersionDialect::parse)
-                    .unwrap_or_default(),
-                fact_id: dep.id,
+                from: dep.from.clone(),
+                to: dep.to.clone(),
+                range: dep.range.clone(),
+                relation: dep.relation.clone(),
+                mandatory: dep.mandatory,
+                version_dialect: dep.dialect,
+                fact_id: dep.fact_id,
             });
         }
 
         for e in store.by_kind(kind::IMPLICIT_DEPENDENCY_EDGE) {
             model.implicit.push(ImplicitDep {
-                from: e.subject.clone(),
+                from: e.subject.to_string(),
                 provider_ns: e.attr("provider_namespace").unwrap_or("").to_string(),
                 provider_mod: e.attr("provider_mod").unwrap_or("").to_string(),
                 via: e.attr("via").unwrap_or("reference").to_string(),
                 required: e.attr_bool("required").unwrap_or(false),
                 conditioned: e.attr_bool("conditioned").unwrap_or(false),
-                hard: e.attr_bool("hard").unwrap_or(false),
+                // Only exact schema edges can retain hard dependency meaning.
+                // Older facts without this attribute predate typed certainty and
+                // keep their historical behaviour for cache compatibility.
+                hard: e.attr_bool("hard").unwrap_or(false)
+                    && e.attr("reference_certainty")
+                        .is_none_or(|certainty| certainty == "exact-schema-reference"),
+                reference_certainty: e
+                    .attr("reference_certainty")
+                    .unwrap_or("exact-schema-reference")
+                    .to_string(),
                 ref_count: e.attr_int("ref_count").unwrap_or(1),
                 sample_path: e.attr("from_path").unwrap_or("").to_string(),
                 resolve_state: e.attr("resolve_state").unwrap_or("").to_string(),
@@ -144,10 +149,18 @@ impl EffectiveModel {
             .collect()
     }
 
+    fn positive_declared_targets(&self, from: &str) -> BTreeSet<String> {
+        self.declared
+            .iter()
+            .filter(|dependency| dependency.from == from && dependency.relation.is_positive())
+            .map(|dependency| dependency.to.clone())
+            .collect()
+    }
+
     /// Whether `from`'s manifest covers a dependency on `provider_mod` / `ns`,
     /// allowing for well-known namespace aliases (ae2 ↔ appliedenergistics2).
     fn declares(&self, from: &str, provider_mod: &str, ns: &str) -> bool {
-        let targets = self.declared_targets(from);
+        let targets = self.positive_declared_targets(from);
         if targets.is_empty() {
             return false;
         }
@@ -196,15 +209,24 @@ fn classify_range(range: &str, dialect: VersionDialect) -> RangeShape {
         };
     }
     let has_upper = r.contains('<');
-    let has_lower = r.contains(">=") || r.contains('>') || r.contains('^') || r.contains('~');
+    let has_caret_or_tilde = r.contains('^') || r.contains('~');
+    let has_lower = r.contains(">=") || r.contains('>') || has_caret_or_tilde;
     let has_op = has_upper || has_lower || r.contains('=');
     if !has_op {
         // Maven's bare form is a recommendation with an unbounded restriction;
         // only `[1.2.3]` is an exact pin for Forge/NeoForge.
-        if dialect == VersionDialect::MavenRange {
-            return RangeShape::Unconstrained;
-        }
-        return RangeShape::ExactPin;
+        return match dialect {
+            VersionDialect::MavenRange => RangeShape::Unconstrained,
+            // Quilt defines a bare version as `^version`: it is a compatible,
+            // upper-bounded family, not an exact pin.
+            VersionDialect::Quilt => RangeShape::Other,
+            _ => RangeShape::ExactPin,
+        };
+    }
+    // Caret/tilde operators encode a compatibility upper bound even though the
+    // literal range has no `<` token. This includes Quilt's `^^` and `~~`.
+    if has_caret_or_tilde {
+        return RangeShape::Other;
     }
     if r.starts_with('=') && !has_upper && !r.contains(">=") {
         return RangeShape::ExactPin;
@@ -216,13 +238,6 @@ fn classify_range(range: &str, dialect: VersionDialect) -> RangeShape {
 }
 
 /// True for relations the manifest uses to *require* (or strongly want) another mod.
-fn is_requiring_relation(relation: &str) -> bool {
-    matches!(
-        relation,
-        "depends" | "requires" | "required" | "embedded" | "include" | "included"
-    )
-}
-
 /// Findings derived from the joined three-level model.
 pub fn effective_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     let model = EffectiveModel::from_store(ctx.store);
@@ -238,7 +253,7 @@ pub fn effective_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         .chain(ctx.store.by_kind(kind::PLUGIN))
     {
         installed_versions
-            .entry(f.subject.clone())
+            .entry(f.subject.to_string())
             .or_default()
             .push(f.attr("version").unwrap_or("0").to_string());
     }
@@ -327,6 +342,7 @@ fn undisclosed_and_conditional(model: &EffectiveModel, rule_id: &str) -> Vec<Fin
                     ),
                 )
                 .severity(Severity::Note)
+                .proof_kind(ProofKind::DeterministicDerivation)
                 .confidence(0.5)
                 .category(Category::Dependency)
                 .title(format!(
@@ -363,7 +379,7 @@ fn range_shape_findings(
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     for dep in &model.declared {
-        if is_platform_dep(&dep.to) || !is_requiring_relation(&dep.relation) {
+        if is_platform_dep(&dep.to) || !dep.relation.requires_presence() {
             continue;
         }
         // Only reason about a provider that is actually installed: an absent one is
@@ -499,7 +515,7 @@ fn declared_but_unused(store: &FactStore, model: &EffectiveModel, rule_id: &str)
 
     let mut out = Vec::new();
     for dep in &model.declared {
-        if !dep.mandatory || is_platform_dep(&dep.to) || !is_requiring_relation(&dep.relation) {
+        if !dep.mandatory || is_platform_dep(&dep.to) || !dep.relation.requires_presence() {
             continue;
         }
         if !ships_resources.contains(dep.from.as_str()) {
@@ -789,5 +805,14 @@ mod tests {
             classify_range("[1.2.3]", VersionDialect::MavenRange),
             RangeShape::ExactPin
         );
+        assert_eq!(
+            classify_range("1.2.3", VersionDialect::Quilt),
+            RangeShape::Other
+        );
+        assert_eq!(
+            classify_range("^^1.2.3", VersionDialect::Quilt),
+            RangeShape::Other
+        );
+        assert_eq!(classify_range("^1.2.3", generic), RangeShape::Other);
     }
 }

@@ -35,13 +35,17 @@ impl ResourceLevel {
         }
     }
 
-    /// Parse from a config / CLI string; unknown values fall back to `basic`.
-    #[must_use]
-    pub fn parse(s: &str) -> Self {
+    /// Parse from a config / CLI string. Returns an error for unknown values to
+    /// avoid silently falling back to `basic` on typos (e.g., `--resource-level ful`
+    /// would disable Layer M without warning).
+    pub fn parse(s: &str) -> Result<Self, String> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "semantic" => ResourceLevel::Semantic,
-            "full" => ResourceLevel::Full,
-            _ => ResourceLevel::Basic,
+            "basic" => Ok(ResourceLevel::Basic),
+            "semantic" => Ok(ResourceLevel::Semantic),
+            "full" => Ok(ResourceLevel::Full),
+            _ => Err(format!(
+                "unknown resource level '{s}'; expected 'basic', 'semantic', or 'full'"
+            )),
         }
     }
 
@@ -127,6 +131,12 @@ pub enum ResourceCondition {
     TagEmpty { tag: String },
     /// E.g. `forge:false`
     False,
+    /// A recognized condition shape was malformed. Keeping this explicit avoids
+    /// turning a missing field into an apparently valid empty condition.
+    Malformed {
+        condition_type: String,
+        reason: String,
+    },
     /// Any other condition we don't deeply model
     Other { condition_type: String },
 }
@@ -157,8 +167,13 @@ impl SemanticOpacity {
         }
     }
     /// Whether the extracted semantic fields (outputs/ingredients) are reliable.
+    /// Explicit exhaustive match ensures new opacity levels must be consciously
+    /// classified as reliable or not.
     pub fn is_reliable(self) -> bool {
-        !matches!(self, SemanticOpacity::OpaqueCustomSerializer)
+        match self {
+            SemanticOpacity::Transparent | SemanticOpacity::PartiallyKnown => true,
+            SemanticOpacity::OpaqueCustomSerializer => false,
+        }
     }
 }
 
@@ -200,10 +215,19 @@ pub enum RefRelation {
     UsesTexture,
     LootEntry,
     AtlasSource,
+    /// Advancement parent reference (the `parent` field).
+    ParentAdvancement,
+    /// Advancement rewards a recipe unlock (`rewards.recipes` list).
+    UnlocksRecipe,
+    /// Legacy: previously used for both parent and criteria. Kept for compatibility.
+    #[deprecated(note = "Split into ParentAdvancement and criteria handling")]
     AdvancementCriterion,
     /// A reference extracted from an unmodelled datapack registry object by a
     /// data-driven JSON-pointer spec (damage type → sound, trim material → asset…).
     RegistryRef,
+    /// A namespaced value found in an opaque custom payload whose registry role
+    /// is not known. It is context only and never proves an item dependency.
+    UnknownRegistryRef,
 }
 
 impl RefRelation {
@@ -217,8 +241,12 @@ impl RefRelation {
             RefRelation::UsesModel => "uses_model",
             RefRelation::UsesTexture => "uses_texture",
             RefRelation::RegistryRef => "registry_ref",
+            RefRelation::UnknownRegistryRef => "unknown_registry_ref",
             RefRelation::LootEntry => "loot_entry",
             RefRelation::AtlasSource => "atlas_source",
+            RefRelation::ParentAdvancement => "parent_advancement",
+            RefRelation::UnlocksRecipe => "unlocks_recipe",
+            #[allow(deprecated)]
             RefRelation::AdvancementCriterion => "advancement_criterion",
         }
     }
@@ -232,15 +260,45 @@ impl RefRelation {
     /// proof of a missing mod (the same FP class the model-file resolver already
     /// refuses to raise findings from). Data references (recipe type/items, loot,
     /// tags, advancements, datapack registry refs) do imply a dependency.
+    ///
+    /// **Explicit allowlist**: new RefRelation variants are *not* dependencies by
+    /// default — add them here when their semantic makes it appropriate.
     #[must_use]
     pub fn implies_dependency(self) -> bool {
-        !matches!(
+        matches!(
             self,
-            RefRelation::ParentModel
-                | RefRelation::UsesModel
-                | RefRelation::UsesTexture
-                | RefRelation::AtlasSource
+            RefRelation::UsesItem
+                | RefRelation::UsesTag
+                | RefRelation::UsesRecipeType
+                | RefRelation::ProducesItem
+                | RefRelation::LootEntry
+                | RefRelation::ParentAdvancement
+                | RefRelation::UnlocksRecipe
+                | RefRelation::RegistryRef
         )
+    }
+}
+
+/// Strength and semantic origin of a resource reference.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReferenceCertainty {
+    /// Read from a field whose schema and registry role are known.
+    #[default]
+    ExactSchemaReference,
+    /// Extracted through a registry specification or another bounded heuristic.
+    HeuristicRegistryReference,
+    /// Found in an opaque custom payload; the referenced registry is unknown.
+    OpaqueCustomReference,
+}
+
+impl ReferenceCertainty {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactSchemaReference => "exact-schema-reference",
+            Self::HeuristicRegistryReference => "heuristic-registry-reference",
+            Self::OpaqueCustomReference => "opaque-custom-reference",
+        }
     }
 }
 
@@ -260,6 +318,8 @@ pub struct ResourceReference {
     pub conditions: Vec<ResourceCondition>,
     /// Whether `target` is a tag reference (`#namespace:path`).
     pub is_tag: bool,
+    #[serde(default)]
+    pub certainty: ReferenceCertainty,
 }
 
 impl ResourceReference {
@@ -309,7 +369,17 @@ pub struct CachedResourceAst {
     pub semantic_hash: String,
     pub summary: ResourceSummary,
     pub references: Vec<ResourceReference>,
+    /// False when bounded extraction intentionally stopped before the full
+    /// reference surface was visited.
+    #[serde(default = "default_true")]
+    pub references_complete: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_gap: Option<String>,
     pub diagnostics: Vec<ResourceParseDiagnostic>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Domain-specific compact summary. Only the modelled domains carry a typed
@@ -360,12 +430,24 @@ mod relation_tests {
         for r in [
             RefRelation::UsesRecipeType,
             RefRelation::UsesItem,
+            RefRelation::ProducesItem,
             RefRelation::UsesTag,
             RefRelation::LootEntry,
-            RefRelation::AdvancementCriterion,
+            RefRelation::ParentAdvancement,
+            RefRelation::UnlocksRecipe,
             RefRelation::RegistryRef,
         ] {
             assert!(r.implies_dependency(), "{r:?} must imply a dependency");
         }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn deprecated_advancement_criterion_not_in_allowlist() {
+        // AdvancementCriterion is deprecated; verify it's NOT in the allowlist
+        assert!(
+            !RefRelation::AdvancementCriterion.implies_dependency(),
+            "deprecated AdvancementCriterion should not imply dependency"
+        );
     }
 }

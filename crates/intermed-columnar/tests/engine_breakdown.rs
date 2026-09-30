@@ -55,7 +55,7 @@ fn load_facts() -> FactStore {
             for f in &facts {
                 let mut b = s
                     .fact(&f.extractor, &f.kind)
-                    .subject(f.subject.clone())
+                    .subject(f.subject.to_string())
                     .confidence(f.confidence)
                     .source(f.source.clone());
                 for (k, v) in &f.attributes {

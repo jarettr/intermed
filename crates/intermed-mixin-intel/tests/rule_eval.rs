@@ -42,10 +42,12 @@ fn overwrite_finding_attaches_inject_recommendation_via_site_key() {
 
     let target = mods_target(&mods);
     let mut store = FactStore::new();
+    let inputs = FactStore::new();
     let settings = intermed_doctor_core::DiagnosisSettings::default();
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings: &settings,
     };
@@ -92,6 +94,7 @@ fn mixin_effect_summary_includes_recommendations_and_historical_boost() {
         .attr("target", "net.minecraft.client.render.WorldRenderer")
         .attr("method", "m0()V")
         .attr("handler_method", "m0")
+        .attr("handler_descriptor", "()V")
         .attr("operation", "inject")
         .attr("site_key", "m0()V@HEAD")
         .attr("at_target", "HEAD")
@@ -104,6 +107,8 @@ fn mixin_effect_summary_includes_recommendations_and_historical_boost() {
         .subject("alpha")
         .attr("mixin", "alpha.mixin.RenderMixin")
         .attr("handler_method", "m0")
+        .attr("handler_descriptor", "()V")
+        .attr("bytecode_observed", true)
         .attr("handler_local_store", false)
         .attr("modifies_return", false)
         .attr("early_return", false)
@@ -174,10 +179,12 @@ fn overwrite_effect_does_not_duplicate_as_effect_summary() {
 
     let target = mods_target(&mods);
     let mut store = FactStore::new();
+    let inputs = FactStore::new();
     let settings = intermed_doctor_core::DiagnosisSettings::default();
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings: &settings,
     };
@@ -279,7 +286,7 @@ fn risk_cluster_fact_becomes_a_finding_citing_failing_sites() {
         .attr("target_method", "bar()V")
         .attr("selector_verification", "no-match")
         .attr("target_resolution", "exact-match")
-        .attr("signature_check", "valid")
+        .attr("signature_check", "compatible-shape")
         .attr("local_capture_status", "no-local-capture")
         .emit();
     store
@@ -288,7 +295,7 @@ fn risk_cluster_fact_becomes_a_finding_citing_failing_sites() {
         .attr("kind", "apply-failure")
         .attr("target_class", "net.example.Foo")
         .attr("severity", "warn")
-        .attr("confirmation_level", "static-exact")
+        .attr("verdict_strength", "static-exact")
         .attr("headline", "1 selector issue on `net.example.Foo` (modx)")
         .attr("recommended_action", "Inspect the failing sites.")
         .emit();
@@ -399,6 +406,7 @@ fn runtime_log_confirms_a_static_site() {
         .subject("modz::modz.mixin.ServerMixin::onTick->net.minecraft.Server#tick()V@HEAD")
         .attr("mod", "modz")
         .attr("mixin", "modz.mixin.ServerMixin")
+        .attr("config", "somemod.mixins.json")
         .attr("target_class", "net.minecraft.Server")
         .attr("target_method", "tick()V")
         .attr("site_key", "tick()V@HEAD")
@@ -409,7 +417,7 @@ fn runtime_log_confirms_a_static_site() {
         .attr("line", 42i64)
         .attr(
             "excerpt",
-            "InvalidInjectionException: @Inject could not find any targets matching 'tick()V' in somemod.mixins.json:ServerMixin",
+            "InvalidInjectionException: @Inject could not find any targets matching 'tick()V' in somemod.mixins.json:modz.mixin.ServerMixin",
         )
         .emit();
 
@@ -453,7 +461,7 @@ fn mod_level_security_capability_does_not_causally_elevate_mixin_surface() {
         .unwrap();
     let f = findings
         .iter()
-        .find(|f| f.id == "mixin-security:sketchymod:networking")
+        .find(|f| f.id == "mixin-security:s:networking")
         .expect("security finding");
     assert_eq!(f.severity, Severity::Note);
     assert_eq!(f.visibility, FindingVisibility::Verbose);
@@ -468,12 +476,19 @@ fn handler_local_dangerous_reflection_elevates_mixin_surface() {
     store
         .fact("mixin-analyzer", kind::MIXIN_SECURITY_SURFACE)
         .subject("sketchymod")
+        .attr("mixin", "sketchymod.NetMixin")
+        .attr("site_id", "s")
+        .attr("handler_method", "handle")
+        .attr("handler_descriptor", "()V")
         .attr("subsystem", "networking")
         .attr("reason", "weaves into network handling")
         .emit();
     store
         .fact("mixin-analyzer", kind::MIXIN_HANDLER_BODY)
         .subject("sketchymod")
+        .attr("mixin", "sketchymod.NetMixin")
+        .attr("handler_method", "handle")
+        .attr("handler_descriptor", "()V")
         .attr("uses_reflection", true)
         .attr("reflective_targets", "java.lang.Runtime")
         .emit();
@@ -488,7 +503,7 @@ fn handler_local_dangerous_reflection_elevates_mixin_surface() {
         .unwrap();
     let finding = findings
         .iter()
-        .find(|finding| finding.id == "mixin-security:sketchymod:networking")
+        .find(|finding| finding.id == "mixin-security:s:networking")
         .unwrap();
     assert_eq!(finding.severity, Severity::Warn);
     assert!(
@@ -505,6 +520,10 @@ fn common_low_level_capability_does_not_elevate_mixin_surface() {
     store
         .fact("mixin-analyzer", kind::MIXIN_SECURITY_SURFACE)
         .subject("performance-mod")
+        .attr("mixin", "performance.ModMixin")
+        .attr("site_id", "s")
+        .attr("handler_method", "handle")
+        .attr("handler_descriptor", "()V")
         .attr("subsystem", "networking")
         .attr("reason", "weaves into network handling")
         .emit();
@@ -519,7 +538,7 @@ fn common_low_level_capability_does_not_elevate_mixin_surface() {
         .unwrap();
     let finding = findings
         .iter()
-        .find(|finding| finding.id == "mixin-security:performance-mod:networking")
+        .find(|finding| finding.id == "mixin-security:s:networking")
         .unwrap();
     assert_eq!(finding.severity, Severity::Note);
     assert!(!finding.machine_tags.iter().any(|tag| tag == "elevated"));
@@ -544,7 +563,7 @@ fn mixin_security_surface_alone_is_a_note() {
         .evaluate(&RuleCtx::for_test(&store, &target))
         .unwrap()
         .into_iter()
-        .find(|f| f.id == "mixin-security:netmod:networking")
+        .find(|f| f.id == "mixin-security:s:networking")
         .expect("security note");
     assert_eq!(f.severity, Severity::Note);
     assert!(!f.machine_tags.iter().any(|t| t == "elevated"));

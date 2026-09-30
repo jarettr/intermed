@@ -3,12 +3,13 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::domain::DomainParse;
 use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary};
 use crate::semantic::namespace::namespace_of;
 
-pub const LOOT_TABLE_AST_VERSION: &str = "loot-table-r2";
+pub const LOOT_TABLE_AST_VERSION: &str = "loot-table-r4";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LootTableSummary {
@@ -16,6 +17,9 @@ pub struct LootTableSummary {
     pub entry_count: usize,
     /// Sorted dropped item/tag ids.
     pub drops: Vec<String>,
+    /// SHA256 fingerprint of the canonical pools/entries structure. Pool and entry
+    /// ordering affects behavior (first match wins), so a simple count is lossy.
+    pub structure_fingerprint: String,
 }
 
 /// Parse a loot table resource.
@@ -42,11 +46,18 @@ pub fn parse(value: &Value) -> DomainParse {
     drops.sort();
     drops.dedup();
 
+    // Fingerprint the pools structure (order matters: first match wins).
+    let structure_fingerprint = pools
+        .and_then(|p| serde_json::to_vec(p).ok())
+        .map(|b| format!("{:x}", Sha256::digest(&b)))
+        .unwrap_or_else(|| "empty".to_string());
+
     DomainParse {
         summary: ResourceSummary::LootTable(LootTableSummary {
             pool_count,
             entry_count,
             drops,
+            structure_fingerprint,
         }),
         references,
         diagnostics: Vec::new(),
@@ -81,6 +92,7 @@ fn collect_entry(entry: &Value, refs: &mut Vec<ResourceReference>, drops: &mut V
             required: true,
             conditions: Vec::new(),
             is_tag,
+            certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
         });
     }
     // Nested children (`type: alternatives`/`group`/`sequence`).

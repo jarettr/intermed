@@ -15,7 +15,7 @@ use crate::run::{LabRun, SmokeStatus, read_run};
 use crate::{LabError, write_atomic, write_json_atomic};
 
 /// Schema tag for the compatibility matrix.
-pub const COMPAT_MATRIX_SCHEMA: &str = "intermed-compatibility-matrix-v1";
+pub const COMPAT_MATRIX_SCHEMA: &str = "intermed-compatibility-matrix-v2";
 
 /// One environment's cell in the matrix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +45,14 @@ pub struct CompatibilityMatrix {
     pub degraded: usize,
     pub crashed: usize,
     pub timed_out: usize,
+    #[serde(default)]
+    pub inconclusive: usize,
+    #[serde(default)]
+    pub harness_failures: usize,
+    #[serde(default)]
+    pub infrastructure_failures: usize,
+    #[serde(default)]
+    pub skipped: usize,
     /// Failure-category histogram over *every* independent failure detected
     /// (dominant + additional), not just the per-environment verdict — so a log
     /// with a mixin error and a missing dependency increments both. Stable order.
@@ -64,6 +72,10 @@ impl CompatibilityMatrix {
         let mut degraded = 0;
         let mut crashed = 0;
         let mut timed_out = 0;
+        let mut inconclusive = 0;
+        let mut harness_failures = 0;
+        let mut infrastructure_failures = 0;
+        let mut skipped = 0;
         let mut by_category: BTreeMap<String, usize> = BTreeMap::new();
         let mut by_family: BTreeMap<String, usize> = BTreeMap::new();
         let mut cells = Vec::with_capacity(run.results.len());
@@ -75,6 +87,10 @@ impl CompatibilityMatrix {
                 SmokeStatus::Fail => failed += 1,
                 SmokeStatus::Crash => crashed += 1,
                 SmokeStatus::Timeout => timed_out += 1,
+                SmokeStatus::Inconclusive => inconclusive += 1,
+                SmokeStatus::HarnessFailure => harness_failures += 1,
+                SmokeStatus::InfrastructureFailure => infrastructure_failures += 1,
+                SmokeStatus::Skipped => skipped += 1,
             }
             // Count every independent failure, not only the verdict, so secondary
             // failures are visible in the aggregate histograms.
@@ -108,19 +124,26 @@ impl CompatibilityMatrix {
             degraded,
             crashed,
             timed_out,
+            inconclusive,
+            harness_failures,
+            infrastructure_failures,
+            skipped,
             by_category,
             by_family,
             cells,
         }
     }
 
-    /// Fraction of environments that passed, in `0.0..=1.0`.
+    /// Fraction of conclusive compatibility cells that passed, in `0.0..=1.0`.
+    /// Inconclusive, harness, infrastructure and skipped attempts are excluded
+    /// rather than silently counted as either compatible or incompatible.
     #[must_use]
     pub fn pass_rate(&self) -> f64 {
-        if self.total == 0 {
+        let evaluated = self.passed + self.degraded + self.failed + self.crashed + self.timed_out;
+        if evaluated == 0 {
             0.0
         } else {
-            self.passed as f64 / self.total as f64
+            self.passed as f64 / evaluated as f64
         }
     }
 }
@@ -213,9 +236,14 @@ pub fn render_html(matrix: &CompatibilityMatrix) -> String {
   <p class="summary">
     <span>Total: {total}</span>
     <span>Passed: {passed}</span>
+    <span>Degraded: {degraded}</span>
     <span>Failed: {failed}</span>
     <span>Crashed: {crashed}</span>
     <span>Timed out: {timed_out}</span>
+    <span>Inconclusive: {inconclusive}</span>
+    <span>Harness failures: {harness_failures}</span>
+    <span>Infrastructure failures: {infrastructure_failures}</span>
+    <span>Skipped: {skipped}</span>
     <span>Pass rate: {rate:.0}%</span>
   </p>
   <h2>Failures by family</h2>
@@ -239,9 +267,14 @@ pub fn render_html(matrix: &CompatibilityMatrix) -> String {
         digest = escape(&matrix.corpus_digest),
         total = matrix.total,
         passed = matrix.passed,
+        degraded = matrix.degraded,
         failed = matrix.failed,
         crashed = matrix.crashed,
         timed_out = matrix.timed_out,
+        inconclusive = matrix.inconclusive,
+        harness_failures = matrix.harness_failures,
+        infrastructure_failures = matrix.infrastructure_failures,
+        skipped = matrix.skipped,
         rate = matrix.pass_rate() * 100.0,
         families = families,
         categories = categories,
@@ -326,6 +359,25 @@ mod tests {
         assert_eq!(m.crashed, 1);
         assert_eq!(m.by_category.get("out-of-memory"), Some(&1));
         assert!((m.pass_rate() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn inconclusive_attempt_is_not_counted_as_a_pass_or_rate_denominator() {
+        let mut run = run();
+        run.results.push(SmokeResult {
+            environment: "short-clean-exit".into(),
+            status: SmokeStatus::Inconclusive,
+            failure: None,
+            additional_failures: Vec::new(),
+            attributions: Vec::new(),
+            detail: "no readiness".into(),
+            log_excerpt: None,
+            observation: None,
+        });
+        let matrix = CompatibilityMatrix::from_run(&run);
+        assert_eq!(matrix.passed, 1);
+        assert_eq!(matrix.inconclusive, 1);
+        assert!((matrix.pass_rate() - 0.5).abs() < 1e-9);
     }
 
     #[test]

@@ -206,6 +206,8 @@ pub struct MixinSecuritySurface {
     pub mod_id: String,
     pub mixin_class: String,
     pub site_id: String,
+    pub handler_method: String,
+    pub handler_descriptor: String,
     pub target_class: String,
     pub subsystem: Subsystem,
     pub operation: String,
@@ -239,7 +241,9 @@ pub fn derive_subsystems(
         let Some(subsystem) = classify_subsystem(&s.target_class) else {
             continue;
         };
-        let weight = operation_weight(&s.operation).min(if s.confidence < 60 { 85 } else { 100 });
+        let identity_activation = s.precision.identity.min(s.precision.activation);
+        let weight =
+            operation_weight(&s.operation).min(if identity_activation < 60 { 70 } else { 100 });
         let reason = format!(
             "mixin `{}` ({}) on `{}`",
             s.mixin_class, s.operation, s.target_class
@@ -258,6 +262,8 @@ pub fn derive_subsystems(
                 mod_id: s.mod_id.clone(),
                 mixin_class: s.mixin_class.clone(),
                 site_id: s.site_id.clone(),
+                handler_method: s.handler_method.clone(),
+                handler_descriptor: s.handler_descriptor.clone(),
                 target_class: s.target_class.clone(),
                 subsystem,
                 operation: s.operation.clone(),
@@ -294,6 +300,8 @@ mod tests {
         ApplicationSite {
             site_id: format!("{mod_id}::M::h->{target_class}#m@HEAD"),
             mod_id: mod_id.into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: format!("{mod_id}.jar"),
             config_path: "m.json".into(),
             mixin_class: format!("{mod_id}.M"),
@@ -317,6 +325,7 @@ mod tests {
             },
             target_resolution: crate::target_res::TargetResolution::Unchecked,
             selector_verification: crate::selector::SelectorVerification::Unchecked,
+            selector_offsets: Vec::new(),
             signature_check: crate::signature::SignatureCheck::Unchecked,
             local_capture_status: crate::locals::LocalCaptureStatus::NoLocalCapture,
             side: crate::model::Side::Both,
@@ -326,8 +335,15 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence: 100,
             imprecision_reasons: Vec::new(),
+            precision: crate::site::SitePrecision {
+                identity: 100,
+                activation: 100,
+                verification: 100,
+                effect: 100,
+            },
         }
     }
 

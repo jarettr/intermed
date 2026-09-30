@@ -43,7 +43,7 @@ use crate::cost::Statistics;
 use crate::error::ColumnarError;
 use crate::external::FunctionRegistry;
 use crate::ir::{
-    AggFunc, Aggregate, CmpOp, Condition, RelExpr, ScalarValue, WindowFn, WindowFunction,
+    AggFunc, Aggregate, CmpOp, Condition, Predicate, RelExpr, ScalarValue, WindowFn, WindowFunction,
 };
 use crate::physical::{self, BuildSide, PhysicalPlan};
 use crate::strategy::ExecutionStrategy;
@@ -232,17 +232,17 @@ impl ColumnarStore {
 
         for f in facts {
             if let Some(keep) = kinds
-                && !keep.contains(&f.kind)
+                && !keep.contains(f.kind.as_str())
             {
                 continue;
             }
             let base = [
                 Value::Int(f.id.0 as i64),
-                Value::Str(f.kind.clone()),
-                Value::Str(f.subject.clone()),
+                Value::Str(f.kind.to_string()),
+                Value::Str(f.subject.to_string()),
                 Value::Float(f.confidence as f64),
-                Value::Str(f.extractor.clone()),
-                Value::Str(f.source.locator.clone()),
+                Value::Str(f.extractor.to_string()),
+                Value::Str(f.source.locator.to_string()),
                 match f.source.line {
                     Some(l) => Value::Int(l as i64),
                     None => Value::Null,
@@ -257,14 +257,14 @@ impl ColumnarStore {
                 if base_set.contains(k.as_str()) {
                     continue;
                 }
-                attrs.insert(k.clone(), Value::from_attr(v));
+                attrs.insert(k.to_string(), Value::from_attr(v));
             }
-            let keyset = kind_attr_keys.entry(f.kind.clone()).or_default();
+            let keyset = kind_attr_keys.entry(f.kind.to_string()).or_default();
             for key in attrs.keys() {
                 keyset.insert(key.clone());
             }
             kind_facts
-                .entry(f.kind.clone())
+                .entry(f.kind.to_string())
                 .or_default()
                 .push(Pending { base, attrs });
         }
@@ -831,14 +831,17 @@ mod tests {
         // `foo` ships in two distinct files (duplicate); `bar` in one.
         s.fact("meta", "mod")
             .subject("foo")
+            .attr("loader", "fabric")
             .attr("file", "a.jar")
             .emit();
         s.fact("meta", "mod")
             .subject("foo")
+            .attr("loader", "fabric")
             .attr("file", "b.jar")
             .emit();
         s.fact("meta", "mod")
             .subject("bar")
+            .attr("loader", "forge")
             .attr("file", "c.jar")
             .emit();
         let batches = facts_to_batches(s.all(), "r").unwrap();
@@ -846,13 +849,26 @@ mod tests {
 
         let plan = RelExpr::GroupCountDistinct {
             kinds: vec!["mod".into()],
-            group_col: "id".into(),
+            group_col: "loader".into(),
             distinct_attr: "file".into(),
+            filters: vec![],
             min_count: 2,
         };
         let r = execute(&plan, &store).unwrap();
         assert_eq!(r.len(), 1);
-        assert_eq!(r.rows[0].get("id").and_then(Value::as_str), Some("foo"));
+        assert_eq!(
+            r.rows[0].get("loader").and_then(Value::as_str),
+            Some("fabric")
+        );
+
+        let missing_group = RelExpr::GroupCountDistinct {
+            kinds: vec!["mod".into()],
+            group_col: "not_present".into(),
+            distinct_attr: "file".into(),
+            filters: vec![],
+            min_count: 2,
+        };
+        assert!(execute(&missing_group, &store).unwrap().is_empty());
     }
 
     #[test]
@@ -889,12 +905,12 @@ mod tests {
                 .all(|row| row.get("operation").and_then(Value::as_str) == Some("redirect"))
         );
 
-        // Unregistered module ⇒ pass-through (all 3 rows).
-        let passthrough = execute(
+        // Unregistered module is not the identity transform.
+        let err = execute(
             &RelExpr::scan("mixin_application_site").call_external("missing"),
             &store(),
         )
-        .unwrap();
-        assert_eq!(passthrough.len(), 3);
+        .unwrap_err();
+        assert!(matches!(err, ColumnarError::MissingExternalModule(name) if name == "missing"));
     }
 }

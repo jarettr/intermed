@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use intermed_evidence::{
     ArtifactId, ArtifactNode, AssessmentDisposition, BridgeCapability, CausalNode,
     CausalTransition, CertaintyTier, ClassSymbol, CompatibilityBridge, ConclusionAdjustment,
-    ConclusionKind, Contributor, DescriptorKind, EntityRef, EvidenceGraph, EvidenceLink,
-    EvidenceOrigin, EvidenceRelation, EvidenceStrength, Finding, FindingAssessment,
-    FindingVisibility, Impact, Incident, MappingGraphId, MappingNamespace, MethodDescriptor,
-    MethodSymbol, MixinSiteId, ModInstanceId, ModInstanceNode, ProofKind, ResourceKey,
-    RuntimeOccurrenceId, Severity, ThrowableId,
+    ConclusionKind, Contributor, DependencyEdgeId, DescriptorKind, EntityRef, EnvironmentId,
+    EvidenceGraph, EvidenceLink, EvidenceOrigin, EvidenceRelation, EvidenceStrength, Finding,
+    FindingAssessment, FindingVisibility, Impact, Incident, JavaRuntimeId, MappingGraphId,
+    MappingNamespace, MethodDescriptor, MethodSymbol, MixinSiteId, ModInstanceId, ModInstanceNode,
+    ProofKind, ResourceKey, RuntimeOccurrenceId, Severity, ThrowableId,
 };
 use intermed_facts::{Fact, FactId, FactStore, kind};
 use sha2::{Digest, Sha256};
@@ -342,13 +342,23 @@ mod tests {
                 .iter()
                 .filter(|link| link.source_fact == environment)
                 .count(),
-            0,
-            "report-v2 has no environment entity; never invent a mod node"
+            1,
+            "shared environment evidence has one canonical typed link"
+        );
+        assert!(graph.entities.iter().any(|entity| matches!(
+            entity,
+            EntityRef::Environment(id) if id.as_str() == "target-environment"
+        )));
+        assert!(
+            !graph
+                .entities
+                .iter()
+                .any(|entity| matches!(entity, EntityRef::Mod(_)))
         );
     }
 
     #[test]
-    fn shared_unmodeled_evidence_gets_one_canonical_graph_link() {
+    fn shared_unmodeled_evidence_is_coverage_not_a_fabricated_entity() {
         let mut store = FactStore::new();
         let evidence = store
             .fact("metadata", kind::INVALID_METADATA)
@@ -372,8 +382,10 @@ mod tests {
                 .iter()
                 .filter(|link| link.source_fact == evidence)
                 .count(),
-            1
+            0
         );
+        assert_eq!(graph.coverage_evidence, vec![evidence]);
+        assert!(graph.entities.is_empty());
     }
 
     #[test]

@@ -145,6 +145,7 @@ fn push_ref(id: &str, required: bool, out: &mut Vec<ResourceReference>) {
     if !id.contains(':') {
         return;
     }
+    let is_tag = id.starts_with('#');
     let target = id.trim_start_matches('#').to_string();
     out.push(ResourceReference {
         relation: RefRelation::RegistryRef,
@@ -152,7 +153,8 @@ fn push_ref(id: &str, required: bool, out: &mut Vec<ResourceReference>) {
         target,
         required,
         conditions: Vec::new(),
-        is_tag: false,
+        is_tag,
+        certainty: crate::model::ReferenceCertainty::HeuristicRegistryReference,
     });
 }
 

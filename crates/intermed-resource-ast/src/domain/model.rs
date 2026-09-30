@@ -1,20 +1,28 @@
 //! Model domain (`assets/<ns>/models/<path>.json`): a parent model + texture
 //! references. Drives missing-parent / missing-texture graph rules.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::domain::DomainParse;
 use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary};
 use crate::semantic::namespace::namespace_of;
 
-pub const MODEL_AST_VERSION: &str = "model-r1";
+pub const MODEL_AST_VERSION: &str = "model-r3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelSummary {
     pub parent: Option<String>,
-    pub texture_count: usize,
-    pub override_count: usize,
+    /// Texture slot → texture id mappings (sorted). Excludes texture variables
+    /// (`#name` slots).
+    pub textures: BTreeMap<String, String>,
+    /// SHA256 fingerprint of the overrides array, when present. Order matters for
+    /// overrides (first match wins), so a simple count is lossy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides_fingerprint: Option<String>,
 }
 
 /// Parse a model resource.
@@ -32,29 +40,38 @@ pub fn parse(value: &Value) -> DomainParse {
         references.push(reference(RefRelation::ParentModel, p));
     }
 
-    let mut texture_count = 0;
-    if let Some(textures) = obj.get("textures").and_then(Value::as_object) {
-        for v in textures.values() {
+    let mut textures = BTreeMap::new();
+    if let Some(tex_obj) = obj.get("textures").and_then(Value::as_object) {
+        for (key, v) in tex_obj {
             if let Some(tex) = v.as_str() {
                 // `#name` texture variables reference another key, not an asset.
                 if !tex.starts_with('#') {
                     references.push(reference(RefRelation::UsesTexture, tex));
-                    texture_count += 1;
+                    textures.insert(key.clone(), tex.to_string());
                 }
             }
         }
     }
 
-    let override_count = obj
+    // Fingerprint the overrides array (order matters: first match wins).
+    let overrides_fingerprint = obj
         .get("overrides")
         .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+        .and_then(|arr| {
+            if arr.is_empty() {
+                None
+            } else {
+                serde_json::to_vec(arr)
+                    .ok()
+                    .map(|b| format!("{:x}", Sha256::digest(&b)))
+            }
+        });
 
     DomainParse {
         summary: ResourceSummary::Model(ModelSummary {
             parent,
-            texture_count,
-            override_count,
+            textures,
+            overrides_fingerprint,
         }),
         references,
         diagnostics: Vec::new(),
@@ -70,6 +87,7 @@ fn reference(relation: RefRelation, id: &str) -> ResourceReference {
         required: true,
         conditions: Vec::new(),
         is_tag: false,
+        certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
     }
 }
 
@@ -95,7 +113,7 @@ mod tests {
             panic!()
         };
         assert_eq!(s.parent.as_deref(), Some("minecraft:item/generated"));
-        assert_eq!(s.texture_count, 1); // `#layer0` is a variable, not a ref
+        assert_eq!(s.textures.len(), 1); // `#layer0` is a variable, not a ref
         assert!(
             p.references
                 .iter()

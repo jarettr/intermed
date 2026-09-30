@@ -1,120 +1,135 @@
 # Project status
 
-InterMed 0.1.9-alpha is an alpha static analyzer with an operational
-Compatibility Lab. The CLI, report schemas, corpus locks, resumable campaigns,
-and bounded runtime-observation path are usable; compatibility is not promised
-for every Minecraft or loader release and machine-facing formats may still
-change before 1.0.
+InterMed 0.2.0-alpha is an alpha static analyzer with a typed trust contract,
+canonical cross-layer entity identities, and an operational Compatibility Lab.
+Every strong conclusion declares its evidence and coverage prerequisites. When
+those prerequisites are unavailable or contradictory, the report downgrades or
+abstains instead of presenting an unsupported Error/Fatal conclusion.
 
-## 0.1.9 real-pack measurement gate
+The CLI, report schemas, corpus locks, resumable campaigns, bounded runtime-log
+normalization, and static-analysis pipeline are usable. Compatibility is not
+promised for every Minecraft or loader release, and machine-facing formats may
+still change before 1.0.
 
-The 2026-08-29 release gate analyzed 101 fully materialized Modrinth packs:
-77 Fabric, 18 Forge, 4 NeoForge, and 2 Quilt instances spanning Minecraft
-1.7.10 through 26.2. Every case was pinned by an `intermed-corpus-lock-v2`
-generated from its authoritative `.mrpack`. Before Doctor ran, Layer K verified
-all 56,448 locked files (23,844,535,832 bytes) against their declared content
-hashes; no required or optional file was absent.
+## 0.2.0 real-pack measurement gate
 
-All 101 reports were produced by one 0.1.9-alpha executable (SHA-256
-`055d0c8589f4168498daab2d96d09d02cf33f63245eb5103c898dd74d0e67218`)
+The 0.2.0 gate reran the exact 101-pack corpus used for 0.1.9: 77 Fabric,
+18 Forge, 4 NeoForge, and 2 Quilt instances spanning Minecraft 1.7.10 through
+26.2. The authoritative case-list SHA-256 is
+`453620d2343c0bd69eb48b510e86b9c07d19be3a2e688f4676d0d1a3640f73eb`.
+
+Layer K verified all 56,448 locked files (23,844,535,832 bytes) before Doctor
+ran. No required or optional file was absent. All reports were produced by one
+0.2.0-alpha executable (SHA-256
+`3f7fa37ac0235fe77572af6e6d4497ba140ac1009d7fdfff09285f9dd644c2d6`)
 and one effective rule pack (SHA-256
-`3e7a297cb2a4f9d4aa31541ba4c64394444d3db47f79709a752c73a6e1c9570a`).
-The campaign completed with zero infrastructure failures, harness failures,
-unfinished cases, target-verification failures, or Doctor operational errors.
+`a20b7bb8b5d18f28604340ae65015037e21430ee5ba6bf5151fbfea9a1831899`).
 
 | Measurement | Result |
 |---|---:|
 | Materialized packs / reports | 101 / 101 |
+| Infrastructure / harness / operational failures | 0 / 0 / 0 |
 | Locked files verified | 56,448 |
 | Bytes re-hashed before analysis | 23,844,535,832 |
-| Raw findings | 62,356 |
+| Raw findings | 66,632 |
 | Confirmed problems | 18 |
-| Needs review | 595 |
-| Incomplete analysis | 51 |
-| Facts generated / retained / compacted | 5,538,175 / 1,902,546 / 3,635,629 |
-| Aggregate Doctor time | 510.501 s |
-| Maximum per-run peak RSS | 2,502,066,176 bytes (2.33 GiB) |
-| Final cache payload size / files | 417,903,038 bytes / 37,186 |
+| Needs review | 712 |
+| Incomplete analysis | 85 |
+| Context / hidden detail | 4,500 / 61,343 |
+| Facts generated / retained / compacted | 7,339,415 / 1,797,160 / 5,542,255 |
+| Aggregate Doctor time | 727.546 s |
+| Maximum per-run peak RSS | 3,317,592,064 bytes (3.09 GiB) |
+| Final cache logical bytes / files | 435,583,084 / 40,985 |
 
-The 18 hard conclusions were manually inspected against their report evidence
-and materialized inputs. They comprise seven duplicate active mod IDs, six exact
+The 18 hard conclusions were manually checked against descriptor, artifact, and
+runtime evidence. They comprise seven duplicate active mod IDs, six exact
 version/incompatibility conclusions, two absent required providers, and three
-terminal Forge mod-loading incidents recovered from supplied crash reports.
-Every one is `asserted` and `confirmed`; no hard conclusion carries an
-assessment blocker. Runtime log context is not treated as culprit attribution:
-only terminal incident evidence produces the three runtime Errors, while raw
-signals and simple mod mentions remain explanation/context detail.
+terminal Forge mod-loading incidents from a supplied crash report. Every hard
+conclusion is `asserted` and `confirmed`, with no assessment blocker. The sorted
+hard-finding IDs are unchanged from the final 0.1.9 corpus run.
 
-The 51 incomplete items are intentional and attributable. Forty-nine are
-visible structured abstentions: 41 resource conclusions gated by possible
-runtime mutation and eight loader-mismatch conclusions gated by bridge
-uncertainty. The remaining two are collector-level gaps for one Ardacraft input
-whose relevant resource entries exceed configured bounds. Oversized unrelated
-media does not affect metadata completeness.
+The 85 incomplete items are explicit rather than inferred from global scan
+state: 59 conclusions carry typed blockers or partial coverage, 24 packs reached
+a relevant Resource AST bound, one metadata descriptor declares a missing
+access-transformer file, and one VFS scan reached its resource-entry limit.
+Unrelated oversized media does not make metadata analysis incomplete.
 
-Mixin analysis was explicitly active at `basic` depth in all 101 packs. No
-Minecraft jar or compatible mappings were supplied, and every report records
-those capabilities as unavailable, so Minecraft class or method absence is not
-promoted to proof. Repetitive recipe and resource conflicts are represented by
-typed writer-pair clusters on the default surface; individual resources remain
-available as explain-only records. Within every report, occurrence IDs are
-unique and semantically different payloads are never silently merged.
+Mixin analysis was active at `basic` depth in all 101 packs. No Minecraft jar or
+compatible mappings were supplied. Target/method absence therefore cannot
+become a hard conclusion. Undecidable site-level apply hypotheses remain in
+JSON/Explain and the coverage passport, but do not flood the default surface.
+The final visibility-only triage changed 8,124 records without changing any of
+the 66,632 semantic finding payloads.
 
-The campaign retained 1,902,546 of 5,538,175 generated facts after all
-registered rules completed. The 3,635,629 compacted facts are snapshot detail,
-not collection-time loss. A cold 512 MiB cache stayed within its logical payload
-budget during the full campaign and ended at 417,903,038 bytes; filesystem block
-usage is higher because the cache contains many small fingerprint and payload
-files.
+The table and methodology above are the committed, release-facing numerical
+summary. The raw packs and per-case reports are intentionally not committed:
+they are large third-party artifacts. Reproduction is anchored by the case-list,
+binary, rule-pack, and input hashes recorded here rather than by a machine-local
+filesystem path.
 
-## Runtime-observation gate
+## Coherent evidence graph
 
-One corpus pack includes historical Forge crash reports and logs. Doctor recovers
-the target Java 17 / Forge 47.3.1 / Minecraft 1.20.1 environment independently
-of the analyzer host, parses three `-- MOD ... --` failure sections, and emits
-separate terminal incidents for `car`, `framework`, and `toolbelt`. The generic
-`Mod Loading has failed` wrapper remains context and does not displace the
-specific causes.
+The 0.2 line uses shared identities for artifacts, mod instances, classes,
+methods, resources, runtime events, throwable nodes, dependencies, and Mixin
+sites. Physical artifact identity is content-addressed; paths are locators, not
+join keys. Method identities include descriptors so overloads cannot silently
+merge.
 
-Synthetic regression fixtures additionally cover multiline/flattened event
-equivalence, repeated physical incidents, background ERROR recovery, watchdog
-and OOM terminality, runtime/static contradiction handling, provider uncertainty,
-foreign descriptor selection, bridge ambiguity, cache replacement with preserved
-size/mtime, bounded class scanning, and VFS second-pass read failure.
+Before report assembly, the coherence pass can refine or contradict a proposed
+conclusion. Examples include a runtime frame refuting static class absence, an
+exact code/runtime use refuting `declared-but-unused`, a nested active provider
+refuting dependency absence, and runtime loader evidence refining an otherwise
+unknown static environment. Adjustments are retained in the assessment rather
+than silently rewriting severity.
+
+Runtime logs are normalized into structured events, throwable chains, stack
+frames, crash anchors, and physical occurrence IDs. Semantic fingerprints group
+equivalent failures without merging separate occurrences or their source
+locations. Host Java remains in `analysis_environment`; compatibility verdicts
+use only target-derived runtime evidence.
 
 ## Supported use
 
 - Static inspection of local servers, launcher instances, mods directories,
   `.mrpack`/zip packs, logs, and crash reports.
-- Metadata, dependency, resource, mixin, script, security-preflight, SBOM, and
+- Metadata, dependency, resource, Mixin, script, security-preflight, SBOM, and
   imported Spark analysis at the documented depth.
-- Terminal, JSON, SARIF, and self-contained HTML reports, with operational
-  failures kept separate from domain findings.
-- Content-addressed `.mrpack` locks and materialization, target verification,
-  resumable bounded-parallel Layer-K campaigns, captured runtime observations,
-  explicit sandboxed command plans, accuracy reports, and mismatch clustering.
-- Bounded archive reads, a persistent content-verified scan cache, and a
-  configurable worker cap for large packs.
+- Loader-specific dependency dialects for Fabric/Quilt and Forge/NeoForge,
+  conservative unknown-version handling, nested providers, and typed bridge
+  capabilities.
+- Terminal, JSON, SARIF, and self-contained HTML reports with typed assessment,
+  evidence paths, target capabilities, collector completeness, and analyzer
+  fingerprinting.
+- Content-addressed corpus locks and materialization, target verification,
+  resumable bounded-parallel campaigns, captured runtime observations, explicit
+  sandbox plans, accuracy reports, and mismatch clustering.
+- Bounded archive/log reads, content-verified persistent scan caches, and
+  post-rule semantics-preserving fact compaction.
 
 ## Not promised by this alpha
 
 - `doctor` never launches Minecraft. Layer-K execution requires an explicit
   command and sandbox policy; loader installation and network acquisition are
-  intentionally separate inputs.
-- A static-only campaign does not produce runtime precision/recall. Runtime
-  absence can refute a prediction only when the required milestone and coverage
-  were actually observed.
-- Security output is a preflight of signatures, identity, and sensitive API
-  references; it is not malware certification or full behavioral analysis.
-- Mixin apply absence is conclusive only when the relevant complete classpath and
-  compatible namespace/mappings are available.
+  separate inputs.
+- A static-only campaign does not produce runtime precision/recall. A zero
+  runtime false-positive counter without runtime labels is not an accuracy
+  measurement.
+- Security output is structural preflight evidence, not malware certification
+  or full behavioral analysis.
+- Mixin apply absence is conclusive only with the relevant complete classpath,
+  compatible namespace/mappings, active side, and exact selector/signature
+  coverage.
+- Static resource state may be changed by scripts, Mixins, or custom loaders;
+  conclusions are gated when mutator coverage is partial.
 - No minimum Minecraft or loader version has been declared. Older and unusual
-  metadata dialects remain an explicit compatibility frontier.
-- InterMed never edits the analyzed pack. Overlay and fix operations are previews
-  or writes to a separately requested output location.
+  metadata dialects remain a compatibility frontier.
+- InterMed never edits the analyzed pack. Overlay and fix operations write only
+  to an explicitly requested separate output.
 - Telemetry is disabled by default. There is no background sender, default
   endpoint, stable installation identifier, or implicit log upload.
+- A clean report means only that no supported problem was found in inspected
+  evidence; it is not a guarantee that the pack will start or remain stable.
 
-The [analysis reference](reference/analysis.md) gives the exact stopping point of
-each analyzer. The [roadmap](ROADMAP.md) tracks the remaining acquisition,
-runtime coverage, measurement-corpus, evidence-to-action, and product work.
+The [analysis reference](reference/analysis.md) defines the exact stopping point
+of each analyzer. The [roadmap](ROADMAP.md) tracks remaining acquisition,
+runtime-coverage, measurement, evidence-to-action, and product work.

@@ -4,6 +4,7 @@
   "parse_status": "parsed",
   "references": [
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "minecraft",
@@ -12,6 +13,7 @@
       "target": "minecraft:cobblestone"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": true,
       "namespace": "c",
@@ -20,6 +22,7 @@
       "target": "c:ingots/iron"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "create",
@@ -28,6 +31,7 @@
       "target": "create:crushing"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "create",
@@ -36,6 +40,7 @@
       "target": "create:crushed_iron"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "minecraft",
@@ -52,14 +57,17 @@
       "c:ingots/iron",
       "minecraft:cobblestone"
     ],
+    "input_fingerprint": "d3e11b9755648fc104a4fc081e241c15bd62da8a7feb0729566c27dee5dae263",
     "kind": "recipe",
     "opacity": "partially-known",
     "output_count": 2,
+    "output_fingerprint": "36021a326c978f5a94ccd55c47fc1e17024c49c432408c8242f713443f84f876",
     "outputs": [
       "create:crushed_iron",
       "minecraft:gravel"
     ],
     "recipe_type": "create:crushing",
-    "serializer_namespace": "create"
+    "serializer_namespace": "create",
+    "structure_fingerprint": "b58ca7b18f19141349ffce8d7428beef2774f9877209638ae1f4fc87322e7aad"
   }
 }

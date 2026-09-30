@@ -1,10 +1,10 @@
 //! Wall-clock profiling for one doctor run.
 //!
 //! Collectors and rules are timed individually (per `Collector::id` and
-//! `Rule::id`); cache counters are copied from [`JarCache`](crate::jar_cache::JarCache)
-//! when present. The profile is embedded in `--json` reports automatically when
-//! the jar cache is enabled. This is intentionally lightweight (no `tracing`
-//! subscriber) to keep cold start cheap.
+//! `Rule::id`), and post-rule pipeline stages are recorded separately. Cache
+//! counters are copied from [`JarCache`](crate::jar_cache::JarCache) when
+//! present. This is intentionally lightweight (no `tracing` subscriber) to
+//! keep cold start cheap.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -37,6 +37,9 @@ pub struct DiagnosticProfile {
     pub total_ms: u64,
     pub collectors: Vec<PhaseTiming>,
     pub rules: Vec<PhaseTiming>,
+    /// Typed post-rule stages that can materially affect large-pack latency.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipeline: Vec<PhaseTiming>,
     pub cache: CacheStats,
     /// Number of verbose facts dropped by retention compaction *after* rules ran
     /// (0 when the store stayed under `max_facts`). Surfaced so users can see
@@ -66,6 +69,7 @@ impl DiagnosticProfile {
             total_ms,
             collectors,
             rules,
+            pipeline: Vec::new(),
             cache,
             facts_dropped: 0,
             facts_generated_by_kind: BTreeMap::new(),
@@ -73,6 +77,11 @@ impl DiagnosticProfile {
             facts_dropped_by_kind: BTreeMap::new(),
             peak_rss_bytes: None,
         }
+    }
+
+    pub fn with_pipeline(mut self, pipeline: Vec<PhaseTiming>) -> Self {
+        self.pipeline = pipeline;
+        self
     }
 
     /// Record how many facts retention compaction removed from the snapshot.

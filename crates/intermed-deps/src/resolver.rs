@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::graph::{MODPACK_ROOT_ID, ModpackGraph, build_graph};
-use crate::provider::build_provider;
+use crate::provider::{build_provider, catalog_versions};
 use crate::report::format_unsat_tree;
 use crate::semver::parse_mod_version;
 use intermed_doctor_core::facts::FactStore;
@@ -171,11 +171,10 @@ fn selection_to_strings(
         if package == MODPACK_ROOT_ID {
             continue;
         }
-        let display = graph
-            .packages
-            .iter()
-            .find(|p| p.id == *package)
-            .map(|p| p.version.clone())
+        let display = catalog_versions(graph)
+            .get(package)
+            .and_then(|versions| versions.get(version))
+            .cloned()
             .unwrap_or_else(|| version.to_string());
         out.insert(package.clone(), display);
     }
@@ -209,6 +208,38 @@ mod tests {
             .emit();
         let outcome = resolve_store(&store).expect("resolve");
         assert!(matches!(outcome, ResolutionOutcome::Satisfied { .. }));
+    }
+
+    #[test]
+    fn arbitrary_raw_version_remains_in_finite_catalog() {
+        let mut store = FactStore::new();
+        store
+            .fact("meta", kind::MOD)
+            .subject("alpha")
+            .attr("version", "1.0.0")
+            .attr("loader", "neoforge")
+            .emit();
+        store
+            .fact("meta", kind::MOD)
+            .subject("beta")
+            .attr("version", "release-1")
+            .attr("loader", "neoforge")
+            .emit();
+        store
+            .fact("meta", kind::DEPENDENCY)
+            .subject("alpha")
+            .attr("dep", "beta")
+            .attr("range", "[release-1,)")
+            .attr("relation", "depends")
+            .attr("mandatory", true)
+            .attr("version_dialect", "maven-range")
+            .emit();
+        let graph = build_graph(&store);
+        assert!(graph.packages.iter().any(|package| package.id == "beta"));
+        assert!(matches!(
+            resolve_graph(&graph).expect("resolve"),
+            ResolutionOutcome::Satisfied { .. }
+        ));
     }
 
     #[test]

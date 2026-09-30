@@ -70,6 +70,7 @@ pub fn derive_handler_effect(summary: &HandlerBodySummary) -> HandlerEffect {
 
     HandlerEffect {
         handler_method: summary.handler_method.clone(),
+        bytecode_observed: summary.instruction_count > 0,
         handler_local_store: summary.handler_local_store,
         modifies_return: summary.modifies_return_value,
         early_return,
@@ -131,6 +132,24 @@ pub fn handler_effect_for(
     summaries
         .iter()
         .find(|s| s.handler_method == handler_method)
+        .map(derive_handler_effect)
+}
+
+/// Descriptor-aware lookup used for application-site identity. Handler names can
+/// be overloaded; composition/security conclusions must never borrow the body of
+/// a sibling overload.
+pub fn handler_effect_for_site(
+    summaries: &[HandlerBodySummary],
+    handler_method: &str,
+    handler_descriptor: &str,
+) -> Option<HandlerEffect> {
+    summaries
+        .iter()
+        .find(|summary| {
+            summary.handler_method == handler_method
+                && (handler_descriptor.is_empty()
+                    || summary.handler_descriptor == handler_descriptor)
+        })
         .map(derive_handler_effect)
 }
 

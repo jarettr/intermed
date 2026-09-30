@@ -13,14 +13,14 @@ use sha2::{Digest, Sha256};
 use intermed_evidence::{
     ArtifactId, AssessmentDisposition, CertaintyTier, DescriptorKind, EntityRef, EvidenceEdge,
     EvidenceSummaryItem, Finding, FindingVisibility, FixCandidate, ModInstanceId, Recommendation,
-    RecommendationAction, RecommendationId, RecommendationSafety, Severity,
+    RecommendationAction, RecommendationId, Severity,
 };
 use intermed_facts::{Fact, FactStore, kind};
 
 use crate::collector::{CollectorOutcome, CollectorStatus};
 use crate::instance_layout::LayoutKind;
 use crate::layer::Layer;
-use crate::profile::DiagnosticProfile;
+use crate::profile::{DiagnosticProfile, PhaseTiming};
 use crate::scope::TargetCapabilities;
 use crate::target::{Environment, InstanceType, Loader, Side, Target, TargetKind};
 
@@ -330,71 +330,49 @@ fn environment_from_facts(store: &FactStore) -> Environment {
         env.launcher = f.attr("launcher").map(str::to_string);
         env.host_launcher = f.attr("host_launcher").map(str::to_string);
         env.layout = f.attr("layout").and_then(parse_layout_kind);
+        env.layout_topology = f.attr("layout_topology").and_then(parse_layout_topology);
         env.instance_type = f.attr("instance_type").and_then(parse_instance_type);
+        env.instance_type_certainty = f
+            .attr("instance_type_certainty")
+            .and_then(parse_instance_resolution_certainty);
+        env.instance_type_reason = f.attr("instance_type_reason").map(str::to_string);
         env.side = f
             .attr("side")
             .and_then(parse_side)
-            .or_else(|| env.instance_type.map(InstanceType::to_side));
+            .or_else(|| env.instance_type.and_then(InstanceType::to_side));
     }
-    // Refine unknown/heuristic target identity with stronger evidence emitted by
-    // later collectors. Runtime logs describe the analyzed run, never the host.
-    let mut best_loader: Option<(u8, Loader, Option<String>)> = None;
-    let mut best_minecraft: Option<(u8, String)> = None;
-    let mut loader_conflict = false;
-    let mut minecraft_conflict = false;
-    for fact in store.by_kind(kind::ENVIRONMENT) {
-        let source = fact
-            .attr("loader_source")
-            .or_else(|| fact.attr("evidence_source"));
-        let priority = environment_source_priority(source);
-        // Filesystem loader inference is a fallback below artifact consensus,
-        // not a target declaration that participates in refinement.
-        if source != Some("filesystem-heuristic")
-            && let Some(loader) = fact.attr("loader").and_then(Loader::parse)
-            && best_loader
-                .as_ref()
-                .is_none_or(|(best, _, _)| priority > *best)
-        {
-            best_loader = Some((priority, loader, source.map(str::to_string)));
-            loader_conflict = false;
-        } else if source != Some("filesystem-heuristic")
-            && let (Some(loader), Some((best, current, _))) = (
-                fact.attr("loader").and_then(Loader::parse),
-                best_loader.as_ref(),
-            )
-            && priority == *best
-            && loader != *current
-        {
-            loader_conflict = true;
-        }
-        if let Some(version) = fact.attr("mc_version") {
-            let mc_source = fact.attr("mc_version_source").or(source);
-            let priority = environment_source_priority(mc_source);
-            if best_minecraft
-                .as_ref()
-                .is_none_or(|(best, _)| priority > *best)
-            {
-                best_minecraft = Some((priority, version.to_string()));
-                minecraft_conflict = false;
-            } else if best_minecraft
-                .as_ref()
-                .is_some_and(|(best, current)| priority == *best && current != version)
-            {
-                minecraft_conflict = true;
-            }
-        }
-    }
+    // Refine unknown/heuristic target identity through the same resolver used
+    // by capability gating and coherence. Runtime logs describe the analyzed
+    // run, never the analyzer host.
+    let loader_resolution = crate::environment::resolve_environment_field(
+        store,
+        "loader",
+        &["loader_source", "evidence_source"],
+    );
+    let minecraft_resolution = crate::environment::resolve_environment_field(
+        store,
+        "mc_version",
+        &["mc_version_source", "loader_source", "evidence_source"],
+    );
+    let loader_conflict = loader_resolution.is_conflicted();
+    let minecraft_conflict = minecraft_resolution.is_conflicted();
     if loader_conflict {
         env.loader = None;
         env.loader_source = Some("conflicting-evidence".to_string());
-    } else if let Some((_, loader, source)) = best_loader {
-        env.loader = Some(loader);
-        env.loader_source = source;
+    } else if let Some(loader) = loader_resolution.value.and_then(Loader::parse) {
+        if loader_resolution.source == Some("filesystem-heuristic") {
+            filesystem_loader = Some(loader);
+            env.loader = None;
+            env.loader_source = None;
+        } else {
+            env.loader = Some(loader);
+            env.loader_source = loader_resolution.source.map(str::to_string);
+        }
     }
     if minecraft_conflict {
         env.minecraft_version = None;
-    } else if let Some((_, minecraft)) = best_minecraft {
-        env.minecraft_version = Some(minecraft);
+    } else if let Some(minecraft) = minecraft_resolution.value {
+        env.minecraft_version = Some(minecraft.to_string());
     }
     if let Some(f) = store.by_kind(kind::JAVA_RUNTIME).next() {
         env.java_version = f.attr("version").map(str::to_string);
@@ -421,17 +399,6 @@ fn environment_from_facts(store: &FactStore) -> Environment {
     env
 }
 
-fn environment_source_priority(source: Option<&str>) -> u8 {
-    match source.unwrap_or("") {
-        "pack-manifest" | "modrinth-manifest" | "curseforge-manifest" => 100,
-        "launcher-manifest" | "instance-metadata" => 90,
-        "runtime-log" => 80,
-        "artifact-consensus" => 50,
-        "filesystem-heuristic" => 10,
-        _ => 40,
-    }
-}
-
 fn analysis_environment_from_facts(store: &FactStore) -> AnalysisEnvironment {
     let Some(fact) = store.by_kind(kind::ANALYSIS_ENVIRONMENT).next() else {
         return AnalysisEnvironment::default();
@@ -445,7 +412,7 @@ fn analysis_environment_from_facts(store: &FactStore) -> AnalysisEnvironment {
 /// The loader the scanned content targets (consensus of the per-mod / per-plugin
 /// `loader` facts). Covers both mod loaders (Fabric/Forge/NeoForge) and server
 /// plugin platforms (Bukkit/Spigot/Paper), which ship `plugin` facts, not `mod`.
-fn infer_loader_from_mods(store: &FactStore) -> Option<Loader> {
+pub(crate) fn infer_loader_from_mods(store: &FactStore) -> Option<Loader> {
     let mut loaders = std::collections::BTreeSet::new();
     for f in store
         .by_kind(kind::MOD)
@@ -473,7 +440,7 @@ fn infer_loader_from_mods(store: &FactStore) -> Option<Loader> {
 /// Infer Minecraft only from a cross-artifact consensus. A single malformed
 /// descriptor must not define the whole instance (legacy coremods sometimes
 /// carry copied `mods.toml` templates with the wrong game version).
-fn infer_minecraft_version(store: &FactStore) -> Option<String> {
+pub(crate) fn infer_minecraft_version(store: &FactStore) -> Option<String> {
     let mut candidates_by_artifact: BTreeMap<String, std::collections::BTreeSet<String>> =
         BTreeMap::new();
     let mod_files: BTreeMap<&str, &str> = store
@@ -542,7 +509,7 @@ fn infer_minecraft_version(store: &FactStore) -> Option<String> {
         for token in version_tokens(&f.subject) {
             if plausible_minecraft_version(&token) {
                 candidates_by_artifact
-                    .entry(f.subject.clone())
+                    .entry(f.subject.to_string())
                     .or_default()
                     .insert(token);
             }
@@ -631,6 +598,29 @@ fn parse_instance_type(value: &str) -> Option<InstanceType> {
         "server" => Some(InstanceType::Server),
         "client" => Some(InstanceType::Client),
         "integrated" => Some(InstanceType::Integrated),
+        "unknown" => Some(InstanceType::Unknown),
+        _ => None,
+    }
+}
+
+fn parse_instance_resolution_certainty(value: &str) -> Option<crate::InstanceResolutionCertainty> {
+    match value {
+        "confirmed" => Some(crate::InstanceResolutionCertainty::Confirmed),
+        "inferred" => Some(crate::InstanceResolutionCertainty::Inferred),
+        "conflict" => Some(crate::InstanceResolutionCertainty::Conflict),
+        "unknown" => Some(crate::InstanceResolutionCertainty::Unknown),
+        _ => None,
+    }
+}
+
+fn parse_layout_topology(value: &str) -> Option<crate::LayoutTopology> {
+    match value {
+        "direct-game-root" => Some(crate::LayoutTopology::DirectGameRoot),
+        "nested-dot-minecraft" => Some(crate::LayoutTopology::NestedDotMinecraft),
+        "overrides-root" => Some(crate::LayoutTopology::OverridesRoot),
+        "bare-artifacts" => Some(crate::LayoutTopology::BareArtifacts),
+        "dedicated-server" => Some(crate::LayoutTopology::DedicatedServer),
+        "unknown" => Some(crate::LayoutTopology::Unknown),
         _ => None,
     }
 }
@@ -780,14 +770,20 @@ fn synthesize_recommendations(findings: &mut [Finding]) -> Vec<Recommendation> {
             .first()
             .cloned()
             .unwrap_or_else(|| "analysis-input".to_string());
-        let target = EntityRef::Mod(ModInstanceId {
+        let inferred_target = EntityRef::Mod(ModInstanceId {
             artifact: ArtifactId::unresolved(&format!("recommendation-target:{target_name}")),
             declared_id: target_name,
             descriptor_kind: DescriptorKind::Unknown,
             ordinal: 0,
         });
         for fix in &finding.fix_candidates {
-            let action = infer_recommendation_action(&fix.description);
+            let action = fix
+                .action
+                .unwrap_or_else(|| recommendation_action_for(finding.conclusion_kind));
+            let target = fix
+                .target
+                .clone()
+                .unwrap_or_else(|| inferred_target.clone());
             let mut digest = Sha256::new();
             digest.update(b"intermed-recommendation-v1\0");
             digest.update(format!("{action:?}").as_bytes());
@@ -808,11 +804,7 @@ fn synthesize_recommendations(findings: &mut [Finding]) -> Vec<Recommendation> {
                         action,
                         target: target.clone(),
                         rationale: fix.description.clone(),
-                        safety: if fix.command.is_some() {
-                            RecommendationSafety::ReviewRequired
-                        } else {
-                            RecommendationSafety::ReadOnly
-                        },
+                        safety: fix.safety,
                         evidence: finding.evidence.iter().map(|edge| edge.fact).collect(),
                         affected_findings: Vec::new(),
                     });
@@ -833,27 +825,19 @@ fn synthesize_recommendations(findings: &mut [Finding]) -> Vec<Recommendation> {
     recommendations.into_values().collect()
 }
 
-fn infer_recommendation_action(text: &str) -> RecommendationAction {
-    let text = text.to_ascii_lowercase();
-    if text.contains("install") {
-        RecommendationAction::Install
-    } else if text.contains("update") || text.contains("upgrade") {
-        RecommendationAction::Update
-    } else if text.contains("remove") {
-        RecommendationAction::Remove
-    } else if text.contains("replace") {
-        RecommendationAction::Replace
-    } else if text.contains("configure") || text.contains("enable") || text.contains("disable") {
-        RecommendationAction::Configure
-    } else if text.contains("provide")
-        || text.contains("supply")
-        || text.contains("--minecraft-jar")
-    {
-        RecommendationAction::ProvideInput
-    } else if text.contains("verify") || text.contains("check") {
-        RecommendationAction::Verify
-    } else {
-        RecommendationAction::Inspect
+fn recommendation_action_for(kind: intermed_evidence::ConclusionKind) -> RecommendationAction {
+    use intermed_evidence::ConclusionKind;
+    match kind {
+        ConclusionKind::MissingDependency => RecommendationAction::Install,
+        ConclusionKind::WrongVersion => RecommendationAction::Update,
+        ConclusionKind::LoaderMismatch => RecommendationAction::Replace,
+        ConclusionKind::AnalysisIncomplete => RecommendationAction::ProvideInput,
+        ConclusionKind::StaticResourceState => RecommendationAction::Configure,
+        ConclusionKind::ClassAbsent
+        | ConclusionKind::MethodAbsent
+        | ConclusionKind::DependencyUnused
+        | ConclusionKind::RuntimeIncident
+        | ConclusionKind::Generic => RecommendationAction::Inspect,
     }
 }
 
@@ -931,7 +915,7 @@ fn evidence_summary_item(fact: &Fact) -> EvidenceSummaryItem {
     item.path = fact
         .attr("path")
         .map(str::to_string)
-        .or_else(|| (!fact.subject.is_empty()).then(|| fact.subject.clone()));
+        .or_else(|| (!fact.subject.is_empty()).then(|| fact.subject.to_string()));
     let writers = fact
         .attr("writers")
         .or_else(|| fact.attr("archives"))
@@ -941,7 +925,7 @@ fn evidence_summary_item(fact: &Fact) -> EvidenceSummaryItem {
     // A `resource_writer` fact's subject is the single writing mod; surface it as
     // a writer when the fact carried a resource `path` rather than a writer list.
     if item.writers.is_empty() && fact.attr("path").is_some() && !fact.subject.is_empty() {
-        item.writers = vec![fact.subject.clone()];
+        item.writers = vec![fact.subject.to_string()];
     }
     item.classification = fact.attr("class").map(str::to_string);
     item.diff_kind = fact.attr("diff_kind").map(str::to_string);
@@ -1041,41 +1025,11 @@ fn mixin_coverage_passport(
 ///   20 `pack.mcmeta` is expected. The override only matters when an overlay is
 ///   generated (which carries its own). → `OverlayOnly`.
 ///
-/// These are demoted to `Info` so they never dominate the severity histogram, but
-/// stay in the JSON for `--explain` / overlay tooling.
+/// Visibility is a presentation decision only. It must not rewrite the typed
+/// severity used by machine consumers or the raw forensic histogram.
+#[cfg(test)]
 fn apply_visibility_policy(findings: &mut [Finding]) {
-    for f in findings.iter_mut() {
-        let has_tag = |t: &str| f.machine_tags.iter().any(|x| x == t);
-        // Any proven-safe merge (CRDT set union, disjoint object union) is a
-        // normal state, not a problem.
-        if has_tag("safe-merge") || has_tag("safe-crdt-merge") {
-            f.visibility = FindingVisibility::ExplainOnly;
-            if f.severity < Severity::Warn {
-                f.severity = Severity::Info;
-            }
-        } else if has_tag("root-metadata") {
-            // Root pack metadata (pack.mcmeta): expected, only matters for overlays.
-            f.visibility = FindingVisibility::OverlayOnly;
-            if f.severity < Severity::Warn {
-                f.severity = Severity::Info;
-            }
-        } else if f.severity <= Severity::Note && has_tag("mixin-detail") {
-            // Full mixin mode intentionally emits site-level evidence, but tens
-            // of thousands of informational rows must not bury errors/warnings
-            // in human reports. The records remain in JSON and explain views.
-            f.visibility = FindingVisibility::Verbose;
-        } else if f.assessment.disposition == intermed_evidence::AssessmentDisposition::Abstained
-            && has_tag("apply-failure")
-            && has_tag("mixin")
-        {
-            // Absence/apply hypotheses without the declared classpath, mapping,
-            // or activation prerequisites are structured abstentions, not 20+
-            // independent user actions. The coverage passport explains the
-            // missing prerequisite once; per-site hypotheses remain available
-            // in JSON and `--explain`.
-            f.visibility = FindingVisibility::ExplainOnly;
-        }
-    }
+    crate::triage::apply_visibility_policy(findings);
 }
 
 /// Populate each finding's `evidence_summary` from the facts its evidence cites.
@@ -1095,7 +1049,7 @@ fn populate_evidence_summaries(findings: &mut [Finding], store: &FactStore) {
     }
 }
 
-fn cluster_resource_conflicts(findings: &mut Vec<Finding>, store: &FactStore) {
+pub(crate) fn cluster_resource_conflicts(findings: &mut Vec<Finding>, store: &FactStore) {
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, finding) in findings.iter().enumerate() {
         let Some(family) = recipe_override_family(finding) else {
@@ -1244,7 +1198,7 @@ fn recipe_override_subject(family: &str) -> &'static str {
 /// bridge is present or a hybrid archive exposes inactive secondary metadata.
 /// Keep each artifact hypothesis for Explain, but make the default surface one
 /// directional compatibility decision instead of dozens of identical cards.
-fn cluster_loader_mismatches(findings: &mut Vec<Finding>, store: &FactStore) {
+pub(crate) fn cluster_loader_mismatches(findings: &mut Vec<Finding>, store: &FactStore) {
     let mut groups: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
     for (index, finding) in findings.iter().enumerate() {
         if finding.conclusion_kind != intermed_evidence::ConclusionKind::LoaderMismatch
@@ -1523,45 +1477,33 @@ pub fn assemble_with_settings_and_capabilities(
     collectors: Vec<(&'static str, Layer, CollectorOutcome)>,
     rule_stats: Vec<RuleStat>,
     mut operational_errors: Vec<OperationalError>,
-    profile: Option<DiagnosticProfile>,
+    mut profile: Option<DiagnosticProfile>,
     settings: &crate::settings::DiagnosisSettings,
     target_capabilities: TargetCapabilities,
 ) -> DoctorReport {
     // 1. Enforce the unique-id contract. Semantically different payloads may
     // never be silently merged under one occurrence id.
     merge_findings_by_id(&mut findings, &mut operational_errors);
-    // 2. Fold cross-layer duplicates (Layer-E collision ↔ Layer-M semantic diff
-    //    on the same path) into the more meaningful finding.
-    crate::suppression::apply_semantic_override_suppression(&mut findings);
-    // 2b. Downgrade static resource findings a data-pack script removes/replaces.
-    crate::suppression::apply_runtime_caveats(&mut findings, store);
-    // 2c. Turn repetitive writer-pair recipe overrides into one actionable card;
-    // raw per-resource findings remain in JSON/ExplainOnly.
-    cluster_resource_conflicts(&mut findings, store);
-    cluster_loader_mismatches(&mut findings, store);
-    // Report-generated aggregate findings pass through the same trust contract
-    // as rule output. Re-assessment is idempotent and preserves explicit
-    // contradiction adjustments made by the cross-layer engine.
-    crate::assessment::assess_findings(
+    // 2. Aggregation and visibility are an explicit post-processing stage, not
+    // hidden report inference.
+    let triage_started = std::time::Instant::now();
+    let triage = crate::FindingPostProcessor::process(
+        &crate::DefaultTriage,
         store,
         &target_capabilities,
+        settings,
         &mut findings,
-        settings.scan.changed_since.is_some(),
     );
-    // 3. Demote "normal state" findings (safe merges, pack.mcmeta) so the default
-    //    report can collapse them.
-    apply_visibility_policy(&mut findings);
-    for finding in &mut findings {
-        let channel = if finding.channel == intermed_evidence::FindingChannel::Incident {
-            "incident-diagnosis"
-        } else {
-            "pack-health-static-review"
-        };
-        if !finding.machine_tags.iter().any(|tag| tag == channel) {
-            finding.machine_tags.push(channel.to_string());
-        }
+    if let Some(profile) = &mut profile {
+        profile.pipeline.push(PhaseTiming {
+            id: "triage:default-triage".to_string(),
+            duration_ms: triage_started.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: triage.output_findings,
+            store_facts_after: store.len(),
+        });
     }
-    // 4. Lift the cited facts into an inline, structured evidence summary.
+    // 3. Lift cited facts into an inline, structured evidence summary.
     populate_evidence_summaries(&mut findings, store);
 
     debug_assert!(
@@ -1587,7 +1529,17 @@ pub fn assemble_with_settings_and_capabilities(
 
     let mut summary = Summary::tally(&findings);
 
+    let recommendations_started = std::time::Instant::now();
     let recommendations = synthesize_recommendations(&mut findings);
+    if let Some(profile) = &mut profile {
+        profile.pipeline.push(PhaseTiming {
+            id: "recommendations".to_string(),
+            duration_ms: recommendations_started.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: recommendations.len(),
+            store_facts_after: store.len(),
+        });
+    }
     let mut seen_fixes = std::collections::BTreeSet::new();
     let mut fix_plan = Vec::new();
     for finding in findings
@@ -1628,7 +1580,8 @@ pub fn assemble_with_settings_and_capabilities(
             CollectorStatus::Disabled => "disabled",
             CollectorStatus::Active => "active",
             CollectorStatus::Incomplete => "incomplete",
-            CollectorStatus::Skipped => "skipped",
+            CollectorStatus::NotApplicable => "not-applicable",
+            CollectorStatus::CompleteEmpty => "complete-empty",
             CollectorStatus::Deferred => "deferred",
             CollectorStatus::Failed => "failed",
         };
@@ -1682,7 +1635,11 @@ pub fn assemble_with_settings_and_capabilities(
             .filter_map(|fact| {
                 fact.attr("hex").map(|sha256| InputFingerprint {
                     kind: fact.attr("input_kind").unwrap_or("mod-archive").to_string(),
-                    path: fact.subject.clone(),
+                    path: fact
+                        .attr("source_locator")
+                        .or_else(|| fact.attr("archive"))
+                        .unwrap_or(&fact.subject)
+                        .to_string(),
                     sha256: sha256.to_string(),
                 })
             })
@@ -1690,10 +1647,20 @@ pub fn assemble_with_settings_and_capabilities(
     };
     let mixin_coverage = mixin_coverage_passport(store, &collector_reports, settings);
 
+    let incident_started = std::time::Instant::now();
     let mut evidence_graph = crate::coherence::build_evidence_graph(store);
     crate::coherence::complete_evidence_graph(store, &mut evidence_graph, &findings);
     evidence_graph.normalize();
     let incidents = crate::coherence::synthesize_incidents(store, &evidence_graph);
+    if let Some(profile) = &mut profile {
+        profile.pipeline.push(PhaseTiming {
+            id: "incident-synthesis".to_string(),
+            duration_ms: incident_started.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: incidents.len(),
+            store_facts_after: store.len(),
+        });
+    }
 
     DoctorReport {
         schema: REPORT_SCHEMA.to_string(),
@@ -2026,6 +1993,33 @@ mod tests {
     }
 
     #[test]
+    fn environment_projection_preserves_unknown_instance_and_topology_reasoning() {
+        let mut store = FactStore::new();
+        store
+            .fact("environment-detector", kind::ENVIRONMENT)
+            .attr("instance_type", "unknown")
+            .attr("instance_type_certainty", "conflict")
+            .attr("instance_type_reason", "server-and-client-markers-conflict")
+            .attr("layout_topology", "nested-dot-minecraft")
+            .emit();
+
+        let environment = environment_from_facts(&store);
+        assert_eq!(environment.instance_type, Some(InstanceType::Unknown));
+        assert_eq!(
+            environment.instance_type_certainty,
+            Some(crate::InstanceResolutionCertainty::Conflict)
+        );
+        assert_eq!(
+            environment.layout_topology,
+            Some(crate::LayoutTopology::NestedDotMinecraft)
+        );
+        assert_eq!(
+            environment.instance_type_reason.as_deref(),
+            Some("server-and-client-markers-conflict")
+        );
+    }
+
+    #[test]
     fn filesystem_loader_is_last_resort_after_ambiguous_artifacts() {
         let mut store = FactStore::new();
         store
@@ -2165,6 +2159,40 @@ mod tests {
     }
 
     #[test]
+    fn recommendation_action_never_depends_on_human_prose() {
+        let mut generic = Finding::builder("test", "generic")
+            .conclusion_kind(intermed_evidence::ConclusionKind::Generic)
+            .fix(FixCandidate::advice(
+                "Do not remove this mod; install nothing until provenance is verified.",
+            ))
+            .build();
+        let recommendations = synthesize_recommendations(std::slice::from_mut(&mut generic));
+        assert_eq!(recommendations[0].action, RecommendationAction::Inspect);
+
+        let mut missing = Finding::builder("test", "missing")
+            .conclusion_kind(intermed_evidence::ConclusionKind::MissingDependency)
+            .fix(FixCandidate::advice(
+                "Review the provider identity before making any change.",
+            ))
+            .build();
+        let recommendations = synthesize_recommendations(std::slice::from_mut(&mut missing));
+        assert_eq!(recommendations[0].action, RecommendationAction::Install);
+    }
+
+    #[test]
+    fn explicit_typed_recommendation_overrides_conclusion_default() {
+        let mut finding = Finding::builder("test", "typed")
+            .conclusion_kind(intermed_evidence::ConclusionKind::MissingDependency)
+            .fix(
+                FixCandidate::advice("Inspect the supplied manifest.")
+                    .action(RecommendationAction::Verify),
+            )
+            .build();
+        let recommendations = synthesize_recommendations(std::slice::from_mut(&mut finding));
+        assert_eq!(recommendations[0].action, RecommendationAction::Verify);
+    }
+
+    #[test]
     fn repeated_copy_of_a_colliding_payload_merges_under_derived_id() {
         let distinct = Finding::builder("rule-a", "shared")
             .severity(Severity::Error)
@@ -2190,7 +2218,7 @@ mod tests {
     }
 
     #[test]
-    fn safe_crdt_merge_is_explain_only_and_demoted() {
+    fn safe_crdt_merge_is_explain_only_without_severity_rewrite() {
         let mut findings = vec![
             Finding::builder(
                 "resource-conflict",
@@ -2202,7 +2230,7 @@ mod tests {
         ];
         apply_visibility_policy(&mut findings);
         assert_eq!(findings[0].visibility, FindingVisibility::ExplainOnly);
-        assert_eq!(findings[0].severity, Severity::Info);
+        assert_eq!(findings[0].severity, Severity::Note);
     }
 
     #[test]
@@ -2259,6 +2287,7 @@ mod tests {
         let mut asserted = abstained.clone();
         asserted.id = "mixin-apply:missing:two".to_string();
         asserted.assessment.disposition = intermed_evidence::AssessmentDisposition::Asserted;
+        asserted.assessment.certainty = intermed_evidence::CertaintyTier::Confirmed;
         let mut findings = vec![abstained, asserted];
 
         apply_visibility_policy(&mut findings);

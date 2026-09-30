@@ -28,7 +28,7 @@ Top-level keys:
 | `target` | The path and detected kind. |
 | `environment` | Loader, Minecraft version, side, OS, Java — detected or inferred. |
 | `analysis_environment` | Host process information, kept separate from the analyzed runtime. |
-| `target_capabilities` | Coverage of the manifest, artifacts, classpaths, mappings, logs, configs, scripts, datapacks, and runtime profile. |
+| `target_capabilities` | Coverage of the manifest, artifacts, classpaths, mappings, logs, configs, static script sources, runtime mutation logs, datapacks, and runtime profile. Static and runtime script coverage are reported separately as well as through a compatibility aggregate. |
 | `summary` | Counts: `fatal`, `error`, `warn`, `note`, `info`, `total`, and `worst`. |
 | `findings` | The flat list (see below). Not grouped — group them as you like. |
 | `evidence_graph` | Canonical artifacts, mod instances, classes, methods, resources and runtime events plus typed links between them. |
@@ -82,7 +82,7 @@ Fatal conclusions are permitted only when their declared contract is satisfied.
 
 Rule packs follow the same explicit policy. `intermed-rule-pack-v3` requires an
 assessment contract, including a typed `conclusion_kind`, for Error/Fatal rules.
-Legacy v1/v2 packs still load, but
+V1 rule packs no longer load. Legacy v2 packs remain migration-readable, but
 their hard findings are capped at Warn and carry the
 `legacy-rule-pack-has-no-proof-contract` blocker.
 

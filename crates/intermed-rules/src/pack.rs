@@ -6,9 +6,8 @@ use std::path::{Path, PathBuf};
 use intermed_doctor_core::facts::kind;
 
 use crate::RulePackError;
-use crate::convert::upgrade_pack_to_v2;
 use crate::model::{
-    FindingTemplate, MissingPrerequisiteBehavior, RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V3,
+    FindingTemplate, MissingPrerequisiteBehavior, RULE_PACK_SCHEMA_V2, RULE_PACK_SCHEMA_V3,
     RuleAssessmentContract, RuleKind, RulePack, RuleSpec,
 };
 use crate::validate::validate_rule_pack;
@@ -112,15 +111,11 @@ fn is_rule_file(path: &Path) -> bool {
     true
 }
 
-/// Legacy v1 core pack (tests and backward compatibility).
+/// Canonical core pack. The unsuffixed API always returns the current schema;
+/// legacy v2 remains available only through the explicitly named migration API.
 #[must_use]
 pub fn default_core_pack() -> RulePack {
-    let mut pack = default_core_pack_v2();
-    pack.schema = RULE_PACK_SCHEMA.to_string();
-    pack.version.clear();
-    pack.publisher = None;
-    pack.signature = None;
-    pack
+    default_core_pack_v3()
 }
 
 /// Core pack without mixin overlap/overwrite rules (Layer F owns those in imperative mode).
@@ -155,7 +150,7 @@ pub fn default_core_pack_v3() -> RulePack {
 
     let mut pack = default_core_pack_v2();
     pack.schema = RULE_PACK_SCHEMA_V3.to_string();
-    pack.version = "0.1.9".to_string();
+    pack.version = "0.2.0".to_string();
     for rule in &mut pack.rules {
         let hard = matches!(rule.finding.severity.as_str(), "error" | "fatal");
         let coverage_requirements = match rule.id.as_str() {
@@ -283,16 +278,24 @@ fn log_signal_rules() -> Vec<RuleSpec> {
         .collect()
 }
 
-/// Normalize any pack to v2 schema (no-op for v2 packs).
+/// Fill optional migration metadata for a v2 pack. This function intentionally
+/// does not upgrade v1: v1 is no longer a runtime-readable schema.
 pub fn normalize_pack(mut pack: RulePack) -> RulePack {
-    upgrade_pack_to_v2(&mut pack);
+    if pack.schema == RULE_PACK_SCHEMA_V2 {
+        if pack.version.is_empty() {
+            pack.version = env!("CARGO_PKG_VERSION").to_string();
+        }
+        if pack.publisher.is_none() {
+            pack.publisher = Some("intermed".to_string());
+        }
+    }
     pack
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RULE_PACK_SCHEMA_V2;
+    use crate::{RULE_PACK_SCHEMA, RULE_PACK_SCHEMA_V2};
 
     #[test]
     fn malformed_packs_error_without_panicking() {
@@ -327,6 +330,24 @@ mod tests {
         validate_rule_pack(&pack).expect("valid");
         assert!(pack.rules.iter().any(|r| r.id == "loader-mismatch"));
         assert!(pack.rules.iter().any(|r| r.kind == RuleKind::Join));
+    }
+
+    #[test]
+    fn v3_is_canonical_v2_is_migration_read_only_and_v1_is_removed() {
+        assert_eq!(default_core_pack().schema, RULE_PACK_SCHEMA_V3);
+
+        let v2 = default_core_pack_v2();
+        let v2_json = serde_json::to_string(&v2).unwrap();
+        assert_eq!(
+            parse_rule_pack(&v2_json, "legacy-v2.json").unwrap().schema,
+            RULE_PACK_SCHEMA_V2
+        );
+
+        let mut v1 = v2;
+        v1.schema = RULE_PACK_SCHEMA.to_string();
+        let error =
+            parse_rule_pack(&serde_json::to_string(&v1).unwrap(), "removed-v1.json").unwrap_err();
+        assert!(error.0.contains("schema v1 has been removed"), "{error}");
     }
 
     #[test]

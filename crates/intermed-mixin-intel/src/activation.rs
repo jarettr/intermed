@@ -38,7 +38,22 @@ pub fn entry_side(entry: &serde_json::Value, array_default: Side) -> Side {
 /// `InactiveBySide` here (that is a *comparison* result, applied when a target side
 /// is fixed); the honest class-level verdict is "assumed active" unless a plugin
 /// makes it conditional.
-pub fn class_activation(config: &MixinConfigRecord, side: Side) -> (ActivationStatus, String) {
+pub fn class_activation_for_target(
+    config: &MixinConfigRecord,
+    side: Side,
+    target_side: Side,
+    identity_confirmed: bool,
+) -> (ActivationStatus, String) {
+    if !matches!(target_side, Side::Unknown) && !side.compatible_with(target_side) {
+        return (
+            ActivationStatus::InactiveBySide,
+            format!(
+                "declared for side `{}`, which cannot apply to analyzed `{}` environment",
+                side.as_str(),
+                target_side.as_str()
+            ),
+        );
+    }
     if let Some(plugin) = &config.plugin {
         return (
             ActivationStatus::ConditionalByPlugin,
@@ -46,6 +61,16 @@ pub fn class_activation(config: &MixinConfigRecord, side: Side) -> (ActivationSt
                 "config `{}` declares plugin `{plugin}` which can toggle this mixin at load time; \
                  side `{}`",
                 config.path,
+                side.as_str()
+            ),
+        );
+    }
+    if !matches!(target_side, Side::Unknown) && identity_confirmed {
+        return (
+            ActivationStatus::ActiveConfirmed,
+            format!(
+                "canonical artifact identity and analyzed `{}` environment confirm declaration applicability on side `{}`",
+                target_side.as_str(),
                 side.as_str()
             ),
         );
@@ -58,6 +83,13 @@ pub fn class_activation(config: &MixinConfigRecord, side: Side) -> (ActivationSt
             side.as_str()
         ),
     )
+}
+
+/// Environment-neutral compatibility wrapper used by isolated class parsing.
+/// Production scanning re-evaluates activation after canonical A/B evidence has
+/// been bound through [`class_activation_for_target`].
+pub fn class_activation(config: &MixinConfigRecord, side: Side) -> (ActivationStatus, String) {
+    class_activation_for_target(config, side, Side::Unknown, false)
 }
 
 #[cfg(test)]
@@ -107,11 +139,14 @@ mod tests {
     fn plugin_makes_activation_conditional() {
         let config = MixinConfigRecord {
             archive: "m.jar".into(),
+            artifact_id: "sha256:test".into(),
             path: "m.mixins.json".into(),
             mod_id: "m".into(),
+            identity_certainty: "confirmed".into(),
             package: "m.mixin".into(),
             priority: 1000,
             refmap: None,
+            refmap_status: crate::refmap::RefmapStatus::NotDeclared,
             mixins: vec!["FooMixin".into()],
             plugin: Some("m.mixin.Plugin".into()),
             mixin_sides: Default::default(),
@@ -123,5 +158,27 @@ mod tests {
         ungated.plugin = None;
         let (status, _) = class_activation(&ungated, Side::Both);
         assert_eq!(status, ActivationStatus::ActiveAssumed);
+    }
+
+    #[test]
+    fn canonical_target_side_excludes_inapplicable_mixins() {
+        let config = MixinConfigRecord {
+            archive: "m.jar".into(),
+            artifact_id: "sha256:test".into(),
+            path: "m.mixins.json".into(),
+            mod_id: "m".into(),
+            identity_certainty: "confirmed".into(),
+            package: "m.mixin".into(),
+            priority: 1000,
+            refmap: None,
+            refmap_status: crate::refmap::RefmapStatus::NotDeclared,
+            mixins: vec!["ClientMixin".into()],
+            plugin: None,
+            mixin_sides: Default::default(),
+        };
+        let (status, _) = class_activation_for_target(&config, Side::Client, Side::Server, true);
+        assert_eq!(status, ActivationStatus::InactiveBySide);
+        let (status, _) = class_activation_for_target(&config, Side::Client, Side::Client, true);
+        assert_eq!(status, ActivationStatus::ActiveConfirmed);
     }
 }

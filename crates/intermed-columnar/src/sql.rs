@@ -13,6 +13,8 @@
 
 use std::collections::BTreeSet;
 
+use intermed_facts::schema_contract::{AttrType, contract};
+
 use crate::ir::{AggFunc, Aggregate, CmpOp, Condition, Predicate, RelExpr, ScalarValue};
 
 /// Base columns that live directly on the `facts` table (everything else is a
@@ -58,14 +60,10 @@ pub fn to_sql(expr: &RelExpr) -> Option<String> {
             kinds,
             group_col,
             distinct_attr,
+            filters,
             min_count,
         } => {
-            return Some(group_count_distinct_sql(
-                kinds,
-                group_col,
-                distinct_attr,
-                *min_count,
-            ));
+            return group_count_distinct_sql(kinds, group_col, distinct_attr, filters, *min_count);
         }
         _ => {}
     }
@@ -113,19 +111,29 @@ fn scan_cte(kind: &str, attrs: &[&str]) -> String {
         "f.source_line".to_string(),
         "f.source_inner".to_string(),
     ];
+    let kind_schema = contract().kind(kind);
     for a in attrs {
-        // COALESCE across typed value columns; cast non-string for predicates.
+        let value = match kind_schema.and_then(|kind| kind.attrs.get(*a)) {
+            Some(AttrType::String | AttrType::Enum(_)) => "a.val_str".to_string(),
+            Some(AttrType::Int) => "a.val_int".to_string(),
+            Some(AttrType::Float) => "a.val_float".to_string(),
+            Some(AttrType::Bool) => "a.val_bool".to_string(),
+            // Legacy or intentionally incomplete fact schemas cannot provide a
+            // stable physical type. Preserve display compatibility only there.
+            None => display_value_sql("a"),
+        };
         cols.push(format!(
-            "MAX(CASE WHEN a.key = '{a}' THEN COALESCE(a.val_str, CAST(a.val_int AS VARCHAR), \
-             CAST(a.val_float AS VARCHAR), CAST(a.val_bool AS VARCHAR)) END) AS \"{a}\""
+            "MAX(CASE WHEN a.key = {} THEN {value} END) AS {}",
+            quote_literal(a),
+            quote_identifier(a),
         ));
     }
     format!(
         "  SELECT {}\n  FROM facts f LEFT JOIN fact_attributes a USING (run_id, fact_id)\n  \
-         WHERE f.kind = '{}'\n  GROUP BY f.fact_id, f.kind, f.subject, f.confidence, f.extractor, \
+         WHERE f.kind = {}\n  GROUP BY f.fact_id, f.kind, f.subject, f.confidence, f.extractor, \
          f.source_locator, f.source_line, f.source_inner",
         cols.join(", "),
-        escape(kind)
+        quote_literal(kind)
     )
 }
 
@@ -147,7 +155,7 @@ fn lower(expr: &RelExpr) -> Option<(String, String)> {
             let (_, rest) = lower(input)?;
             let cols = columns
                 .iter()
-                .map(|c| format!("\"{c}\""))
+                .map(|c| quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ");
             Some((format!("SELECT {cols}"), rest))
@@ -159,7 +167,7 @@ fn lower(expr: &RelExpr) -> Option<(String, String)> {
         } => {
             let (_, rest) = lower(input)?;
             let mut select_cols: Vec<String> =
-                group_by.iter().map(|c| format!("\"{c}\"")).collect();
+                group_by.iter().map(|c| quote_identifier(c)).collect();
             for a in aggregates {
                 select_cols.push(agg_sql(a));
             }
@@ -170,7 +178,7 @@ fn lower(expr: &RelExpr) -> Option<(String, String)> {
                     " GROUP BY {}",
                     group_by
                         .iter()
-                        .map(|c| format!("\"{c}\""))
+                        .map(|c| quote_identifier(c))
                         .collect::<Vec<_>>()
                         .join(", ")
                 )
@@ -193,14 +201,15 @@ fn push_where(rest: &str, clause: &str) -> String {
 }
 
 fn agg_sql(a: &Aggregate) -> String {
+    let column = quote_identifier(&a.column);
     let inner = match a.func {
         AggFunc::Count => "COUNT(*)".to_string(),
-        AggFunc::Sum => format!("SUM(CAST(\"{}\" AS DOUBLE))", a.column),
-        AggFunc::Avg => format!("AVG(CAST(\"{}\" AS DOUBLE))", a.column),
-        AggFunc::Min => format!("MIN(CAST(\"{}\" AS DOUBLE))", a.column),
-        AggFunc::Max => format!("MAX(CAST(\"{}\" AS DOUBLE))", a.column),
+        AggFunc::Sum => format!("SUM(CAST({column} AS DOUBLE))"),
+        AggFunc::Avg => format!("AVG(CAST({column} AS DOUBLE))"),
+        AggFunc::Min => format!("MIN(CAST({column} AS DOUBLE))"),
+        AggFunc::Max => format!("MAX(CAST({column} AS DOUBLE))"),
     };
-    format!("{inner} AS \"{}\"", a.alias)
+    format!("{inner} AS {}", quote_identifier(&a.alias))
 }
 
 fn predicate_sql(p: &Predicate) -> String {
@@ -212,20 +221,39 @@ fn predicate_sql(p: &Predicate) -> String {
         CmpOp::Gt => ">",
         CmpOp::Ge => ">=",
     };
-    format!("\"{}\" {op} {}", p.column, scalar_sql(&p.value))
+    format!(
+        "{} {op} {}",
+        quote_identifier(&p.column),
+        scalar_sql(&p.value)
+    )
 }
 
 fn scalar_sql(v: &ScalarValue) -> String {
     match v {
-        ScalarValue::Str(s) => format!("'{}'", escape(s)),
+        ScalarValue::Str(s) => quote_literal(s),
         ScalarValue::Int(i) => i.to_string(),
         ScalarValue::Float(f) => f.to_string(),
         ScalarValue::Bool(b) => b.to_string(),
     }
 }
 
-fn escape(s: &str) -> String {
-    s.replace('\'', "''")
+fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+fn quote_identifier(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Canonical display projection for a dynamically typed attribute. This is only
+/// used by legacy/incomplete schemas and GroupDistinct's deliberately display-based
+/// equality contract.
+fn display_value_sql(alias: &str) -> String {
+    let alias = quote_identifier(alias);
+    format!(
+        "COALESCE({alias}.val_str, CAST({alias}.val_int AS VARCHAR), \
+         CAST({alias}.val_float AS VARCHAR), CAST({alias}.val_bool AS VARCHAR))"
+    )
 }
 
 fn cmp_sql(op: CmpOp) -> &'static str {
@@ -245,14 +273,10 @@ fn cmp_sql(op: CmpOp) -> &'static str {
 fn col_ref(qualified: &str) -> String {
     let (alias, rest) = match qualified.split_once('.') {
         Some((a, r)) => (a, r),
-        None => return format!("\"{qualified}\""),
+        None => return quote_identifier(qualified),
     };
     let field = rest.strip_prefix("attr:").unwrap_or(rest);
-    if is_base_column(field) {
-        format!("{alias}.{field}")
-    } else {
-        format!("{alias}.\"{field}\"")
-    }
+    format!("{}.{}", quote_identifier(alias), quote_identifier(field))
 }
 
 /// Render a [`Condition`] to SQL.
@@ -268,7 +292,7 @@ fn condition_sql(c: &Condition) -> String {
         Condition::In { column, values } => {
             let list = values
                 .iter()
-                .map(|v| format!("'{}'", escape(v)))
+                .map(|v| quote_literal(v))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("{} IN ({list})", col_ref(column))
@@ -334,30 +358,98 @@ fn join_filter_sql(
          {la}.fact_id AS left_fact_id, {la}.subject AS left_subject, \
          {ra}.fact_id AS right_fact_id, {ra}.subject AS right_subject\n\
          FROM {la} CROSS JOIN {ra}\nWHERE {cond}",
-        la = left_alias,
-        ra = right_alias,
+        la = quote_identifier(left_alias),
+        ra = quote_identifier(right_alias),
         cond = condition_sql(condition),
     )
 }
 
-/// SQL for a GroupDistinct rule (group by subject, keep groups with ≥ min_count
-/// distinct values of `distinct_attr`).
+/// SQL for a GroupDistinct rule. The specialised relation deliberately uses the
+/// interpreter's display equality for grouped/distinct terms while retaining
+/// NULL-as-missing semantics.
 fn group_count_distinct_sql(
     kinds: &[String],
     group_col: &str,
     distinct_attr: &str,
+    filters: &[Predicate],
     min_count: usize,
-) -> String {
-    let kind_list = kinds
+) -> Option<String> {
+    if kinds.is_empty() || group_col.is_empty() || distinct_attr.is_empty() {
+        return None;
+    }
+    let mut attrs = BTreeSet::new();
+    if !is_base_column(group_col) {
+        attrs.insert(group_col);
+    }
+    if !is_base_column(distinct_attr) {
+        attrs.insert(distinct_attr);
+    }
+    for filter in filters {
+        if !is_base_column(&filter.column) {
+            attrs.insert(filter.column.as_str());
+        }
+    }
+    let attrs: Vec<&str> = attrs.into_iter().collect();
+
+    let scans = kinds
         .iter()
-        .map(|k| format!("'{}'", escape(k)))
+        .enumerate()
+        .map(|(index, kind)| {
+            let name = quote_identifier(&format!("group_input_{index}"));
+            format!("{name} AS (\n{}\n)", display_scan_cte(kind, &attrs))
+        })
         .collect::<Vec<_>>()
-        .join(", ");
+        .join(",\n");
+    let union = (0..kinds.len())
+        .map(|index| {
+            format!(
+                "SELECT * FROM {}",
+                quote_identifier(&format!("group_input_{index}"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" UNION ALL ");
+    let group = quote_identifier(group_col);
+    let distinct = quote_identifier(distinct_attr);
+    let mut clauses = vec![
+        format!("{group} IS NOT NULL"),
+        format!("{distinct} IS NOT NULL"),
+    ];
+    clauses.extend(filters.iter().map(predicate_sql));
+    Some(format!(
+        "WITH {scans},\n{source} AS ({union})\nSELECT {group} AS {group}\n  FROM {source}\n  \
+         WHERE {where_clause}\n  GROUP BY {group}\n  \
+         HAVING COUNT(DISTINCT {distinct}) >= {min_count}",
+        source = quote_identifier("group_source"),
+        where_clause = clauses.join(" AND "),
+    ))
+}
+
+fn display_scan_cte(kind: &str, attrs: &[&str]) -> String {
+    let mut cols = vec![
+        "f.fact_id".to_string(),
+        "f.kind".to_string(),
+        "f.subject".to_string(),
+        "f.confidence".to_string(),
+        "f.extractor".to_string(),
+        "f.source_locator".to_string(),
+        "f.source_line".to_string(),
+        "f.source_inner".to_string(),
+    ];
+    for attr in attrs {
+        cols.push(format!(
+            "MAX(CASE WHEN a.key = {} THEN {} END) AS {}",
+            quote_literal(attr),
+            display_value_sql("a"),
+            quote_identifier(attr),
+        ));
+    }
     format!(
-        "SELECT f.subject AS \"{group_col}\"\n  FROM facts f JOIN fact_attributes a \
-         USING (run_id, fact_id)\n  WHERE f.kind IN ({kind_list}) AND a.key = '{}'\n  \
-         GROUP BY f.subject\n  HAVING COUNT(DISTINCT a.val_str) >= {min_count}",
-        escape(distinct_attr),
+        "  SELECT {}\n  FROM facts f LEFT JOIN fact_attributes a USING (run_id, fact_id)\n  \
+         WHERE f.kind = {}\n  GROUP BY f.fact_id, f.kind, f.subject, f.confidence, f.extractor, \
+         f.source_locator, f.source_line, f.source_inner",
+        cols.join(", "),
+        quote_literal(kind),
     )
 }
 
@@ -440,7 +532,7 @@ mod tests {
         let sql = to_sql(&plan).unwrap();
         // Pivots the referenced attributes and filters on them.
         assert!(sql.contains("WHERE f.kind = 'mixin_application_site'"));
-        assert!(sql.contains("THEN COALESCE(a.val_str"));
+        assert!(sql.contains("THEN COALESCE(\"a\".val_str"));
         assert!(sql.contains("\"operation\""));
         assert!(sql.contains("\"operation\" = 'redirect'"));
         assert!(sql.contains("SELECT \"mod\", \"target_class\""));
@@ -469,6 +561,19 @@ mod tests {
     }
 
     #[test]
+    fn schema_typed_attributes_remain_typed_in_scan_cte() {
+        let plan = RelExpr::scan("artifact_role").filter(Predicate {
+            column: "ordinal".into(),
+            op: CmpOp::Ge,
+            value: ScalarValue::Int(2),
+        });
+        let sql = to_sql(&plan).unwrap();
+        assert!(sql.contains("THEN a.val_int END) AS \"ordinal\""), "{sql}");
+        assert!(sql.contains("\"ordinal\" >= 2"));
+        assert!(!sql.contains("CAST(a.val_int AS VARCHAR)"));
+    }
+
+    #[test]
     fn non_single_scan_shapes_return_none() {
         // A top-level transitive closure is Souffle's job, not SQL.
         let plan = RelExpr::scan("dependency").transitive_closure("mod", "requires");
@@ -480,5 +585,41 @@ mod tests {
         let plan = RelExpr::scan("mod").filter(eq("name", "O'Hare"));
         let sql = to_sql(&plan).unwrap();
         assert!(sql.contains("'O''Hare'"));
+    }
+
+    #[test]
+    fn identifiers_are_quoted_independently_from_literals() {
+        let plan = RelExpr::scan("mod").project(vec!["odd\"column".into()]);
+        let sql = to_sql(&plan).unwrap();
+        assert!(sql.contains("\"odd\"\"column\""));
+
+        let join = RelExpr::JoinFilter {
+            left_kind: "mod".into(),
+            left_alias: "left\"alias".into(),
+            right_kind: "plugin".into(),
+            right_alias: "right".into(),
+            condition: Condition::True,
+        };
+        let sql = to_sql(&join).unwrap();
+        assert!(sql.contains("\"left\"\"alias\" AS"));
+        assert!(!sql.contains("WITH left\"alias AS"));
+    }
+
+    #[test]
+    fn group_distinct_uses_requested_group_typed_values_and_filters() {
+        let plan = RelExpr::GroupCountDistinct {
+            kinds: vec!["mod".into(), "plugin".into()],
+            group_col: "loader".into(),
+            distinct_attr: "numeric_id".into(),
+            filters: vec![eq("side", "client")],
+            min_count: 2,
+        };
+        let sql = to_sql(&plan).unwrap();
+        assert!(sql.contains("SELECT \"loader\" AS \"loader\""));
+        assert!(sql.contains("GROUP BY \"loader\""));
+        assert!(sql.contains("COUNT(DISTINCT \"numeric_id\")"));
+        assert!(sql.contains("CAST(\"a\".val_int AS VARCHAR)"));
+        assert!(sql.contains("\"side\" = 'client'"));
+        assert!(!sql.contains("GROUP BY f.subject"));
     }
 }

@@ -195,6 +195,19 @@ pub fn mixin_class_with_inject_at(
     method: &str,
     at_value: &str,
 ) -> Vec<u8> {
+    mixin_class_with_inject_at_member(internal_name, mixin_target, method, at_value, "")
+}
+
+/// Build a mixin class with a descriptor-bearing target method and a member
+/// selector inside `@At`. This exercises the complete parser → site-builder →
+/// instruction-index production path.
+pub fn mixin_class_with_inject_at_member(
+    internal_name: &str,
+    mixin_target: &str,
+    method: &str,
+    at_value: &str,
+    at_member: &str,
+) -> Vec<u8> {
     let mut cp = Pool::new();
     let this = cp.class(internal_name);
     let super_class = cp.class("java/lang/Object");
@@ -220,15 +233,22 @@ pub fn mixin_class_with_inject_at(
     let method_elem = cp.utf8("method");
     let at_elem = cp.utf8("at");
     let value_elem = cp.utf8("value");
+    let target_elem = cp.utf8("target");
     let method_val = cp.utf8(method);
     let at_val = cp.utf8(at_value);
+    let at_member_val = cp.utf8(at_member);
 
     let mut at_ann = Vec::new();
     at_ann.extend_from_slice(&at_type.to_be_bytes());
-    at_ann.extend_from_slice(&1u16.to_be_bytes());
+    at_ann.extend_from_slice(&(if at_member.is_empty() { 1u16 } else { 2u16 }).to_be_bytes());
     at_ann.extend_from_slice(&value_elem.to_be_bytes());
     at_ann.push(b's');
     at_ann.extend_from_slice(&at_val.to_be_bytes());
+    if !at_member.is_empty() {
+        at_ann.extend_from_slice(&target_elem.to_be_bytes());
+        at_ann.push(b's');
+        at_ann.extend_from_slice(&at_member_val.to_be_bytes());
+    }
 
     let mut method_ann = Vec::new();
     method_ann.extend_from_slice(&inject_type.to_be_bytes());

@@ -27,10 +27,13 @@ mod explain;
 mod graph;
 mod impact;
 mod implicit;
+mod model;
 mod ordering;
 mod pairwise;
 mod provider;
+mod quilt;
 mod ranges;
+mod relation;
 mod report;
 mod resolver;
 mod rule;
@@ -49,8 +52,14 @@ pub use impact::{
     BreakingDep, ImplicitDependent, RemoveImpact, ReverseResourceImpact, UpdateImpact,
     remove_impact, update_impact,
 };
+pub use model::{
+    ConstraintApplicability, DependencyCoverage, IdentityState, ProviderResolution,
+    ResolvedConstraint, ResolvedDependencyModel, ResolvedPackage, ResolvedProvider,
+    ResolvedTargetContext,
+};
 pub use provider::{ModpackProvider, ProviderError, build_provider};
-pub use ranges::{ModRange, parse_mod_range};
+pub use ranges::ModRange;
+pub use relation::DependencyRelation;
 pub use report::{format_derivation_tree, format_unsat_tree};
 pub use resolver::{
     ResolutionOutcome, ResolutionSkipReason, ResolverError, resolve_graph, resolve_store,

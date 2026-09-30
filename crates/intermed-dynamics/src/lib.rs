@@ -40,6 +40,7 @@ pub mod script_scan;
 /// Confidence stamped on dynamics facts. Below the structural collectors (1.0):
 /// these are heuristic reads of free-form logs, not parsed registries.
 const DYNAMICS_CONFIDENCE: f32 = 0.6;
+const MAX_SCRIPT_LOG_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Which script engine produced a marker (the `engine` attribute on facts).
 pub mod engine {
@@ -198,16 +199,16 @@ impl Collector for ScriptDynamicsCollector {
             intermed_doctor_core::CompletenessModel::BoundedPartial,
         )
         .produces([
+            kind::SCRIPT_MUTATION,
             kind::RUNTIME_REMOVED_RECIPE,
+            kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
             kind::RUNTIME_REMOVED_ITEM,
             kind::RUNTIME_REMOVED_TAG,
             kind::RUNTIME_REMOVED_LOOT_TABLE,
             kind::SCRIPT_DISCOVERY_COVERAGE,
+            kind::SCAN_TRUNCATED,
         ])
-        .regions([
-            intermed_doctor_core::TargetRegion::Logs,
-            intermed_doctor_core::TargetRegion::Scripts,
-        ])
+        .regions([intermed_doctor_core::TargetRegion::RuntimeMutationLogs])
     }
     fn applies(&self, target: &Target) -> bool {
         matches!(target.kind, TargetKind::Server | TargetKind::Instance)
@@ -216,7 +217,7 @@ impl Collector for ScriptDynamicsCollector {
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
         let files = script_log_files(ctx.target);
         if files.is_empty() {
-            return CollectorOutcome::skipped("no script-engine logs found");
+            return CollectorOutcome::not_applicable("no script-engine logs found");
         }
         let compiled: Vec<(Regex, &Pattern)> = patterns()
             .iter()
@@ -226,9 +227,13 @@ impl Collector for ScriptDynamicsCollector {
         let mut emitted = 0usize;
         let mut scanned = 0usize;
         let mut failures = 0usize;
+        let mut truncations = 0usize;
         for file in &files {
-            let text = match std::fs::read_to_string(file) {
-                Ok(text) => text,
+            let bounded = match intermed_doctor_core::bounded_text::read_text_tail(
+                file,
+                MAX_SCRIPT_LOG_BYTES,
+            ) {
+                Ok(read) => read,
                 Err(error) => {
                     ctx.store
                         .fact(self.id(), kind::SCAN_TRUNCATED)
@@ -244,9 +249,60 @@ impl Collector for ScriptDynamicsCollector {
                     continue;
                 }
             };
+            if bounded.truncated {
+                ctx.store
+                    .fact(self.id(), kind::SCAN_TRUNCATED)
+                    .subject(file.display().to_string())
+                    .attr("layer", "resource-dynamics")
+                    .attr(
+                        "reason",
+                        format!(
+                            "script log exceeds {MAX_SCRIPT_LOG_BYTES} bytes; analyzed bounded tail"
+                        ),
+                    )
+                    .attr("relevant_entry", true)
+                    .source(SourceRef::file(file.display().to_string()))
+                    .confidence(1.0)
+                    .emit();
+                emitted += 1;
+                truncations += 1;
+            }
             scanned += 1;
             let locator = file.display().to_string();
-            for hit in scan_lines(&text, &compiled) {
+            let (session_relation, session_id) = session_relation(ctx.target, file);
+            for (ordinal, hit) in scan_lines(&bounded.text, &compiled).into_iter().enumerate() {
+                let (domain, selector_kind) = mutation_shape(hit.fact_kind, hit.via);
+                ctx.store
+                    .fact(self.id(), kind::SCRIPT_MUTATION)
+                    .subject(format!("{}:{}:{}", locator, hit.lineno + 1, ordinal))
+                    .attr(
+                        "operation",
+                        if hit.via.contains("replace") {
+                            "replace"
+                        } else {
+                            "remove"
+                        },
+                    )
+                    .attr("domain", domain)
+                    .attr("selector_kind", selector_kind)
+                    .attr("selector_value", hit.target.clone())
+                    .attr("selector_json", "")
+                    .attr("origin", "runtime-observed")
+                    .attr("applicability", "runtime")
+                    .attr("session_relation", session_relation)
+                    .attr("session_id", session_id.clone())
+                    .attr("engine", hit.engine)
+                    .attr("via", hit.via)
+                    .attr("source_kind", "runtime-log")
+                    .attr("evidence_origin", "runtime-observed")
+                    .attr("session_relation", session_relation)
+                    .attr("session_id", session_id.clone())
+                    .attr("line", (hit.lineno as i64) + 1)
+                    .attr("excerpt", hit.excerpt.clone())
+                    .source(SourceRef::at_line(locator.clone(), (hit.lineno as u32) + 1))
+                    .confidence(DYNAMICS_CONFIDENCE)
+                    .emit();
+                emitted += 1;
                 ctx.store
                     .fact(self.id(), hit.fact_kind)
                     .subject(hit.target)
@@ -260,13 +316,78 @@ impl Collector for ScriptDynamicsCollector {
                 emitted += 1;
             }
         }
-        let summary = format!("{scanned} script log(s) scanned, {failures} read failure(s)");
-        if failures == 0 {
+        let complete = failures == 0 && truncations == 0;
+        ctx.store
+            .fact(self.id(), kind::SCRIPT_DISCOVERY_COVERAGE)
+            .subject(ctx.target.path.display().to_string())
+            .attr("files_discovered", files.len() as i64)
+            .attr("complete", complete)
+            .attr("roots_present", !files.is_empty())
+            .attr(
+                "reason",
+                if complete {
+                    "runtime mutation logs scanned completely"
+                } else {
+                    "runtime mutation log scan was partial"
+                },
+            )
+            .source(SourceRef::file(ctx.target.path.display().to_string()))
+            .emit();
+        emitted += 1;
+        let summary = format!(
+            "{scanned} script log(s) scanned, {failures} read failure(s), {truncations} truncation(s)"
+        );
+        if complete {
             CollectorOutcome::active(emitted, summary)
         } else {
             CollectorOutcome::incomplete(emitted, summary)
         }
     }
+}
+
+fn mutation_shape(fact_kind: &str, via_name: &str) -> (&'static str, &'static str) {
+    match fact_kind {
+        kind::RUNTIME_REMOVED_RECIPE => ("recipe", "recipe-id"),
+        kind::RUNTIME_REMOVED_ITEM if via_name == via::RECIPE_OUTPUT_REMOVED => {
+            ("recipe", "output-item")
+        }
+        kind::RUNTIME_REMOVED_ITEM => ("item", "item-id"),
+        kind::RUNTIME_REMOVED_TAG => ("tag", "tag"),
+        kind::RUNTIME_REMOVED_LOOT_TABLE => ("loot-table", "resource-id"),
+        _ => ("unknown", "dynamic"),
+    }
+}
+
+fn session_relation(target: &Target, mutation_log: &std::path::Path) -> (&'static str, String) {
+    let newest = target
+        .candidate_roots()
+        .into_iter()
+        .flat_map(|root| [root.join("logs/latest.log"), root.join("logs/debug.log")])
+        .filter(|path| path.is_file())
+        .max_by_key(|path| path.metadata().and_then(|m| m.modified()).ok());
+    let Some(runtime_log) = newest else {
+        return ("unresolved", String::new());
+    };
+    if runtime_log == mutation_log {
+        return ("current", runtime_log.display().to_string());
+    }
+    let runtime_time = runtime_log.metadata().and_then(|m| m.modified()).ok();
+    let mutation_time = mutation_log.metadata().and_then(|m| m.modified()).ok();
+    let related = runtime_time
+        .zip(mutation_time)
+        .is_some_and(|(left, right)| {
+            left.duration_since(right)
+                .or_else(|_| right.duration_since(left))
+                .is_ok_and(|delta| delta <= std::time::Duration::from_secs(5 * 60))
+        });
+    (
+        if related {
+            "plausible-current"
+        } else {
+            "historical-or-unresolved"
+        },
+        runtime_log.display().to_string(),
+    )
 }
 
 /// One matched line: the marker it hit and the captured registry id.
@@ -313,6 +434,8 @@ fn script_log_files(target: &Target) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for root in target.candidate_roots() {
         let candidates = [
+            root.join("logs").join("latest.log"),
+            root.join("logs").join("debug.log"),
             root.join("crafttweaker.log"),
             root.join("logs").join("crafttweaker.log"),
             root.join("logs").join("kubejs").join("startup.log"),
@@ -326,6 +449,7 @@ fn script_log_files(target: &Target) -> Vec<PathBuf> {
         ];
         out.extend(candidates.into_iter().filter(|p| p.is_file()));
     }
+    out.sort();
     out.dedup();
     out
 }
@@ -366,13 +490,16 @@ impl Collector for StaticScriptCollector {
             intermed_doctor_core::CompletenessModel::BoundedPartial,
         )
         .produces([
+            kind::SCRIPT_MUTATION,
             kind::RUNTIME_REMOVED_RECIPE,
+            kind::RUNTIME_SCRIPT_MODIFIES_RECIPE,
             kind::RUNTIME_REMOVED_ITEM,
             kind::RUNTIME_REMOVED_TAG,
             kind::RUNTIME_REMOVED_LOOT_TABLE,
             kind::SCRIPT_DISCOVERY_COVERAGE,
+            kind::SCAN_TRUNCATED,
         ])
-        .regions([intermed_doctor_core::TargetRegion::Scripts])
+        .regions([intermed_doctor_core::TargetRegion::ScriptSources])
     }
     fn applies(&self, target: &Target) -> bool {
         target.kind.has_mods() && target.path.is_dir()
@@ -415,7 +542,12 @@ impl Collector for StaticScriptCollector {
             result.files_discovered,
             result.gaps.len()
         );
-        if result.gaps.is_empty() {
+        if result.gaps.is_empty() && !roots_present {
+            CollectorOutcome::complete_empty(
+                emitted,
+                "script roots were authoritatively absent from the target",
+            )
+        } else if result.gaps.is_empty() {
             CollectorOutcome::active(emitted, summary)
         } else {
             CollectorOutcome::incomplete(emitted, summary)
@@ -425,7 +557,7 @@ impl Collector for StaticScriptCollector {
 
 // ── Rule ─────────────────────────────────────────────────────────────────
 
-/// Folds runtime-removal facts into a single auditable note.
+/// Folds script declarations and runtime observations into one auditable note.
 pub struct ScriptDynamicsRule;
 
 /// Construct the Layer-E dynamics rule.
@@ -442,14 +574,51 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
     fn id(&self) -> &'static str {
         "script-dynamics"
     }
+    fn requirements(&self) -> intermed_doctor_core::RuleRequirements {
+        intermed_doctor_core::RuleRequirements::default()
+            .facts([kind::SCRIPT_MUTATION])
+            .layers([Layer::Resource])
+    }
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, intermed_doctor_core::RuleError> {
-        let recipes: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_RECIPE).collect();
-        let items: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_ITEM).collect();
-        let loot_tables: Vec<&_> = ctx
-            .store
-            .by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE)
-            .collect();
-        let tags: Vec<&_> = ctx.store.by_kind(kind::RUNTIME_REMOVED_TAG).collect();
+        let typed = ctx.store.by_kind(kind::SCRIPT_MUTATION).collect::<Vec<_>>();
+        let recipes: Vec<&_> = if typed.is_empty() {
+            ctx.store.by_kind(kind::RUNTIME_REMOVED_RECIPE).collect()
+        } else {
+            typed
+                .iter()
+                .copied()
+                .filter(|fact| fact.attr("domain") == Some("recipe"))
+                .collect()
+        };
+        let items: Vec<&_> = if typed.is_empty() {
+            ctx.store.by_kind(kind::RUNTIME_REMOVED_ITEM).collect()
+        } else {
+            typed
+                .iter()
+                .copied()
+                .filter(|fact| fact.attr("domain") == Some("item"))
+                .collect()
+        };
+        let loot_tables: Vec<&_> = if typed.is_empty() {
+            ctx.store
+                .by_kind(kind::RUNTIME_REMOVED_LOOT_TABLE)
+                .collect()
+        } else {
+            typed
+                .iter()
+                .copied()
+                .filter(|fact| fact.attr("domain") == Some("loot-table"))
+                .collect()
+        };
+        let tags: Vec<&_> = if typed.is_empty() {
+            ctx.store.by_kind(kind::RUNTIME_REMOVED_TAG).collect()
+        } else {
+            typed
+                .iter()
+                .copied()
+                .filter(|fact| fact.attr("domain") == Some("tag"))
+                .collect()
+        };
         if recipes.is_empty() && items.is_empty() && loot_tables.is_empty() && tags.is_empty() {
             return Ok(Vec::new());
         }
@@ -467,9 +636,8 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
         engines.dedup();
 
         let explanation = format!(
-            "Data-pack scripts ({}) removed {} recipe(s), {} item(s), {} loot table(s), and {} tag(s) at load time. \
-             Items, recipes, and loot present in jars may therefore be unobtainable or unreachable in-game; \
-             treat static content as a superset of what is actually reachable.{}{}{}{}",
+            "Data-pack script evidence ({}) contains {} recipe mutation record(s), {} item mutation record(s), {} loot-table mutation record(s), and {} tag mutation record(s). \
+             Static declarations are intent; runtime observations are session-scoped evidence. Items, recipes, and loot present in jars may therefore differ from the effective runtime state.{}{}{}{}",
             if engines.is_empty() {
                 "script engine".to_string()
             } else {
@@ -489,7 +657,7 @@ impl intermed_doctor_core::Rule for ScriptDynamicsRule {
             .severity(Severity::Note)
             .category(Category::Resource)
             .title(format!(
-                "Scripts removed {} recipe(s), {} item(s), {} loot table(s), {} tag(s) at runtime",
+                "Script mutation evidence: {} recipe, {} item, {} loot-table, {} tag record(s)",
                 recipes.len(),
                 items.len(),
                 loot_tables.len(),
@@ -513,7 +681,10 @@ fn sample_clause(label: &str, facts: &[&intermed_doctor_core::facts::Fact]) -> S
     if facts.is_empty() {
         return String::new();
     }
-    let mut ids: Vec<&str> = facts.iter().map(|f| f.subject.as_str()).collect();
+    let mut ids: Vec<&str> = facts
+        .iter()
+        .map(|f| f.attr("selector_value").unwrap_or(f.subject.as_str()))
+        .collect();
     ids.sort_unstable();
     ids.dedup();
     let shown: Vec<&str> = ids.iter().take(SAMPLE_LIMIT).copied().collect();
@@ -523,7 +694,7 @@ fn sample_clause(label: &str, facts: &[&intermed_doctor_core::facts::Fact]) -> S
     } else {
         String::new()
     };
-    format!(" Removed {label}: {}{suffix}.", shown.join(", "))
+    format!(" {label} selectors: {}{suffix}.", shown.join(", "))
 }
 
 #[cfg(test)]
@@ -708,7 +879,7 @@ mod tests {
             .iter()
             .find(|outcome| outcome.id == "static-script-scanner")
             .unwrap();
-        assert_eq!(outcome.status, "active");
+        assert_eq!(outcome.status, "complete-empty");
         let coverage = run
             .facts
             .iter()

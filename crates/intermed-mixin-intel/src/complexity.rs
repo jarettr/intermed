@@ -236,7 +236,9 @@ mod tests {
     fn class(mod_id: &str, name: &str, targets: &[&str], ops: &[&str]) -> MixinClassRecord {
         MixinClassRecord {
             archive: format!("{mod_id}.jar"),
+            artifact_id: "sha256:test".into(),
             mod_id: mod_id.into(),
+            identity_certainty: "confirmed".into(),
             config: "mixins.json".into(),
             class_name: name.into(),
             class_path: format!("{name}.class"),
@@ -267,6 +269,7 @@ mod tests {
                     meta: Default::default(),
                     at_ordinal: None,
                     at_target_member: String::new(),
+                    at_constraints: Default::default(),
                 })
                 .collect(),
             shadows: Vec::new(),

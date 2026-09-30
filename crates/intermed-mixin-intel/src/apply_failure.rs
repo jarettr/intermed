@@ -21,30 +21,59 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{MemberKind, MixinClassRecord};
 use crate::refmap::{Namespace, TinyMappings};
+use crate::target_res::split_member_ref;
 
-/// Build the invoked/accessed-member simple-name histogram for one method body.
-fn method_call_sites(method: &MethodInfo<'_>) -> Option<BTreeMap<String, u32>> {
+/// One concrete member-reference instruction in a target method body.
+///
+/// Keeping the owner, descriptor, opcode and bytecode offset is essential: two
+/// overloads (or two owners with the same simple member name) are distinct Mixin
+/// selectors, and `ordinal` is counted only among instructions matching the full
+/// selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InstructionMemberSite {
+    offset: u32,
+    opcode: String,
+    owner: String,
+    name: String,
+    descriptor: String,
+}
+
+/// Build the instruction-level member index and the ordered instruction PCs for
+/// one method body. The latter is required because Mixin `shift = AFTER/BY`
+/// counts JVM instructions, not raw byte offsets.
+fn method_call_sites(method: &MethodInfo<'_>) -> Option<(Vec<InstructionMemberSite>, Vec<u32>)> {
     let code = method.attributes.iter().find_map(|a| match &a.data {
         AttributeData::Code(c) => Some(c),
         _ => None,
     })?;
     let bytecode = code.bytecode.as_ref()?;
-    let mut out: BTreeMap<String, u32> = BTreeMap::new();
-    for (_, op) in &bytecode.opcodes {
-        let member = match op {
-            Opcode::Invokevirtual(m)
-            | Opcode::Invokespecial(m)
-            | Opcode::Invokestatic(m)
-            | Opcode::Invokeinterface(m, _)
-            | Opcode::Getfield(m)
-            | Opcode::Getstatic(m)
-            | Opcode::Putfield(m)
-            | Opcode::Putstatic(m) => m.name_and_type.name.as_ref().to_string(),
+    let instruction_offsets = bytecode
+        .opcodes
+        .iter()
+        .map(|(offset, _)| u32::try_from(*offset).unwrap_or(u32::MAX))
+        .collect::<Vec<_>>();
+    let mut out = Vec::new();
+    for (offset, op) in &bytecode.opcodes {
+        let (opcode, member) = match op {
+            Opcode::Invokevirtual(m) => ("invokevirtual", m),
+            Opcode::Invokespecial(m) => ("invokespecial", m),
+            Opcode::Invokestatic(m) => ("invokestatic", m),
+            Opcode::Invokeinterface(m, _) => ("invokeinterface", m),
+            Opcode::Getfield(m) => ("getfield", m),
+            Opcode::Getstatic(m) => ("getstatic", m),
+            Opcode::Putfield(m) => ("putfield", m),
+            Opcode::Putstatic(m) => ("putstatic", m),
             _ => continue,
         };
-        *out.entry(member).or_insert(0) += 1;
+        out.push(InstructionMemberSite {
+            offset: u32::try_from(*offset).unwrap_or(u32::MAX),
+            opcode: opcode.to_string(),
+            owner: member.class_name.as_ref().to_string(),
+            name: member.name_and_type.name.as_ref().to_string(),
+            descriptor: member.name_and_type.descriptor.as_ref().to_string(),
+        });
     }
-    Some(out)
+    Some((out, instruction_offsets))
 }
 
 /// Local-variable frame information for one target method (plan Phase 8): whether a
@@ -60,6 +89,43 @@ pub struct MethodFrame {
     pub local_descriptors: BTreeSet<String>,
     /// Slot indices occupied by locals.
     pub local_slots: BTreeSet<u16>,
+    /// Scope-aware LVT entries. A local is usable at an injection point only
+    /// while `start_pc <= offset < start_pc + length`.
+    #[serde(default)]
+    pub locals: Vec<LocalVariableScope>,
+    #[serde(default)]
+    pub scope_offset: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalVariableScope {
+    pub start_pc: u32,
+    pub end_pc: u32,
+    pub descriptor: String,
+    pub slot: u16,
+}
+
+impl MethodFrame {
+    #[must_use]
+    pub fn at_offset(&self, offset: u32) -> Self {
+        let locals: Vec<_> = self
+            .locals
+            .iter()
+            .filter(|local| local.start_pc <= offset && offset < local.end_pc)
+            .cloned()
+            .collect();
+        Self {
+            has_lvt: self.has_lvt,
+            has_stackmap: self.has_stackmap,
+            local_descriptors: locals
+                .iter()
+                .map(|local| local.descriptor.clone())
+                .collect(),
+            local_slots: locals.iter().map(|local| local.slot).collect(),
+            locals,
+            scope_offset: Some(offset),
+        }
+    }
 }
 
 /// Extract the [`MethodFrame`] from a method's `Code` attribute.
@@ -80,6 +146,12 @@ fn method_frame(method: &MethodInfo<'_>) -> MethodFrame {
                 for e in entries {
                     frame.local_descriptors.insert(e.descriptor.to_string());
                     frame.local_slots.insert(e.index);
+                    frame.locals.push(LocalVariableScope {
+                        start_pc: u32::from(e.start_pc),
+                        end_pc: u32::from(e.start_pc).saturating_add(u32::from(e.length)),
+                        descriptor: e.descriptor.to_string(),
+                        slot: e.index,
+                    });
                 }
             }
             AttributeData::StackMapTable(_) => frame.has_stackmap = true,
@@ -98,17 +170,9 @@ struct ClassMembers {
     methods: BTreeSet<(String, String)>,
     /// `(name, descriptor)` field signatures.
     fields: BTreeSet<(String, String)>,
-    /// Per-method call-site histogram: target-method simple name → invoked/accessed
-    /// member simple name → count. Drives the ordinal-out-of-range check: an
-    /// `@At(ordinal = N)` is unsatisfiable when N exceeds the number of matching
-    /// sites. Keyed by *simple name* to stay robust against named↔intermediary
-    /// skew (we only act when ≥1 match is found, never on a zero-match miss).
-    #[serde(default)]
-    call_sites: BTreeMap<String, BTreeMap<String, u32>>,
-    /// Per-method local-variable frame info (plan Phase 8), keyed by method simple
-    /// name. Drives local-capture verification.
-    #[serde(default)]
-    frames: BTreeMap<String, MethodFrame>,
+    /// Per-method instruction-level member references. The enclosing class key +
+    /// `(method name, descriptor)` form the canonical `(owner,name,descriptor)`
+    /// method-body identity.
     /// Immediate superclass (slash form), `None` for a `java/lang/Object` root.
     /// Lets `method_resolves` walk inherited methods so a mixin into an inherited
     /// method (`Block#use`) is not mis-reported as missing on the subclass.
@@ -122,10 +186,23 @@ struct ClassMembers {
     has_interfaces: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct MethodBodyKey {
+    owner: String,
+    name: String,
+    descriptor: String,
+}
+
 /// A `slash/internal/Name` → member index of candidate mixin target classes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TargetClassIndex {
     classes: BTreeMap<String, ClassMembers>,
+    #[serde(default)]
+    call_sites: BTreeMap<MethodBodyKey, Vec<InstructionMemberSite>>,
+    #[serde(default)]
+    instruction_offsets: BTreeMap<MethodBodyKey, Vec<u32>>,
+    #[serde(default)]
+    frames: BTreeMap<MethodBodyKey, MethodFrame>,
     /// Class names indexed from ordinary mod jars. Provenance matters: a coremod
     /// may legitimately ship a handful of `net/minecraft/*` replacement classes,
     /// but that does not make absence from the rest of Minecraft conclusive.
@@ -195,14 +272,26 @@ impl TargetClassIndex {
         let mut members = ClassMembers::default();
         for m in &class.methods {
             let mname = m.name.to_string();
+            let mdesc = m.descriptor.to_string();
             members.method_names.insert(mname.clone());
-            members
-                .methods
-                .insert((mname.clone(), m.descriptor.to_string()));
-            if let Some(sites) = method_call_sites(m) {
-                members.call_sites.insert(mname.clone(), sites);
+            members.methods.insert((mname.clone(), mdesc.clone()));
+            if let Some((sites, offsets)) = method_call_sites(m) {
+                let key = MethodBodyKey {
+                    owner: name.clone(),
+                    name: mname.clone(),
+                    descriptor: mdesc.clone(),
+                };
+                self.call_sites.insert(key.clone(), sites);
+                self.instruction_offsets.insert(key, offsets);
             }
-            members.frames.insert(mname, method_frame(m));
+            self.frames.insert(
+                MethodBodyKey {
+                    owner: name.clone(),
+                    name: mname,
+                    descriptor: mdesc,
+                },
+                method_frame(m),
+            );
         }
         members.super_class = class
             .super_class
@@ -318,8 +407,14 @@ impl TargetClassIndex {
             // certainty gates absence, not an exact present-class match.
             return true;
         }
-        if mappings.is_some_and(|mapping| !mapping.target_compatible()) {
-            return false;
+        // VersionUnverified mapping compatibility means we cannot reliably prove
+        // class absence — the mapping file may be for a different MC version.
+        if let Some(mapping) = mappings {
+            match mapping.mapping_compatibility() {
+                crate::refmap::MappingCompatibility::Incompatible { .. } => return false,
+                crate::refmap::MappingCompatibility::VersionUnverified => return false,
+                crate::refmap::MappingCompatibility::Compatible => {}
+            }
         }
         let target_namespace = minecraft_class_namespace(target);
         match self.minecraft_class_namespace() {
@@ -374,17 +469,100 @@ impl TargetClassIndex {
         method.to_string()
     }
 
-    /// Count of call sites in `method` matching the simple name `member_simple`.
-    /// `None` when the method isn't indexed (no call-site data — never flag).
-    fn call_site_count(&self, class_slash: &str, method: &str, member_simple: &str) -> Option<u32> {
-        let sites = self.classes.get(class_slash)?.call_sites.get(method)?;
-        Some(sites.get(member_simple).copied().unwrap_or(0))
+    fn matching_instruction_sites(
+        &self,
+        class_slash: &str,
+        method: &str,
+        descriptor: &str,
+        at_target: &str,
+        at_member: &str,
+        opcode: Option<i32>,
+    ) -> Option<Vec<&InstructionMemberSite>> {
+        let sites = self.call_sites.get(&MethodBodyKey {
+            owner: class_slash.to_string(),
+            name: method.to_string(),
+            descriptor: descriptor.to_string(),
+        })?;
+        let selector = MemberSelector::parse(at_member)?;
+        let wants_field = at_target.trim().eq_ignore_ascii_case("FIELD");
+        Some(
+            sites
+                .iter()
+                .filter(|site| {
+                    let is_field = matches!(
+                        site.opcode.as_str(),
+                        "getfield" | "getstatic" | "putfield" | "putstatic"
+                    );
+                    is_field == wants_field
+                        && opcode
+                            .is_none_or(|expected| opcode_number(&site.opcode) == Some(expected))
+                        && selector
+                            .owner
+                            .as_deref()
+                            .is_none_or(|owner| owner == site.owner)
+                        && selector.name == site.name
+                        && selector
+                            .descriptor
+                            .as_deref()
+                            .is_none_or(|descriptor| descriptor == site.descriptor)
+                })
+                .collect(),
+        )
+    }
+
+    fn shifted_offsets(
+        &self,
+        key: &MethodBodyKey,
+        base_offsets: Vec<u32>,
+        shift: &str,
+        by: Option<i32>,
+    ) -> Option<Vec<u32>> {
+        let shift = shift.trim().to_ascii_uppercase();
+        let delta = match shift.as_str() {
+            "" | "NONE" => 0_i32,
+            "BEFORE" => -1,
+            "AFTER" => 1,
+            "BY" => by?,
+            _ => return None,
+        };
+        if delta == 0 {
+            return Some(base_offsets);
+        }
+        let instructions = self.instruction_offsets.get(key)?;
+        let mut shifted = Vec::with_capacity(base_offsets.len());
+        for offset in base_offsets {
+            let position = instructions.binary_search(&offset).ok()?;
+            let shifted_position = i64::try_from(position).ok()? + i64::from(delta);
+            if shifted_position < 0 {
+                return Some(Vec::new());
+            }
+            let Some(offset) = instructions.get(usize::try_from(shifted_position).ok()?) else {
+                return Some(Vec::new());
+            };
+            shifted.push(*offset);
+        }
+        Some(shifted)
     }
 
     /// Merge another index into this one (first writer wins per class).
     pub fn merge(&mut self, other: &Self) {
         for (k, v) in &other.classes {
             self.classes.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        for (key, value) in &other.call_sites {
+            self.call_sites
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        for (key, value) in &other.instruction_offsets {
+            self.instruction_offsets
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        for (key, value) in &other.frames {
+            self.frames
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
         }
         self.mod_classes.extend(other.mod_classes.iter().cloned());
         self.minecraft_classes
@@ -400,6 +578,16 @@ impl TargetClassIndex {
         for name in &other.minecraft_classes {
             if let Some(members) = other.classes.get(name) {
                 self.classes.insert(name.clone(), members.clone());
+            }
+        }
+        for (key, value) in &other.call_sites {
+            if other.minecraft_classes.contains(&key.owner) {
+                self.call_sites.insert(key.clone(), value.clone());
+            }
+        }
+        for (key, value) in &other.frames {
+            if other.minecraft_classes.contains(&key.owner) {
+                self.frames.insert(key.clone(), value.clone());
             }
         }
         self.minecraft_classes
@@ -485,7 +673,13 @@ impl TargetClassIndex {
             let Some(descriptor) = descriptor else {
                 return TargetResolution::NameOnlyMatch;
             };
-            let Some(mapping) = mappings.filter(|mapping| mapping.target_compatible()) else {
+            // VersionUnverified means we cannot prove method absence reliably.
+            let Some(mapping) = mappings.filter(|m| {
+                matches!(
+                    m.mapping_compatibility(),
+                    crate::refmap::MappingCompatibility::Compatible
+                )
+            }) else {
                 return TargetResolution::Unchecked;
             };
             let Some(from_namespace) = mapping_source_namespace(mapping, dotted) else {
@@ -555,43 +749,138 @@ impl TargetClassIndex {
         ordinal: Option<i32>,
         mappings: Option<&TinyMappings>,
     ) -> crate::selector::SelectorVerification {
+        self.verify_selector_with_offsets(
+            dotted,
+            target_method,
+            at_target,
+            at_member,
+            ordinal,
+            mappings,
+        )
+        .0
+    }
+
+    /// Selector verdict plus the exact matching bytecode offsets. Offsets are
+    /// consumed by local-capture verification so LVT live ranges are evaluated
+    /// at the injection point rather than over the whole method.
+    pub fn verify_selector_with_offsets(
+        &self,
+        dotted: &str,
+        target_method: &str,
+        at_target: &str,
+        at_member: &str,
+        ordinal: Option<i32>,
+        mappings: Option<&TinyMappings>,
+    ) -> (crate::selector::SelectorVerification, Vec<u32>) {
+        self.verify_selector_query_with_offsets(
+            dotted,
+            target_method,
+            SelectorQuery::basic(at_target, at_member, ordinal),
+            mappings,
+        )
+    }
+
+    /// Full production verifier. Unlike the compatibility wrapper above this
+    /// consumes every parsed `@At` discriminator that affects matching.
+    pub fn verify_selector_query_with_offsets(
+        &self,
+        dotted: &str,
+        target_method: &str,
+        query: SelectorQuery<'_>,
+        mappings: Option<&TinyMappings>,
+    ) -> (crate::selector::SelectorVerification, Vec<u32>) {
         use crate::selector::{SelectorKind, SelectorVerification, classify_selector};
         if !self.namespace_comparable(dotted, mappings) {
-            return SelectorVerification::Unchecked;
+            return (SelectorVerification::Unchecked, Vec::new());
         }
         let slash = self.resolve_target_slash(dotted, mappings);
-        let method = method_simple_name(target_method);
+        // Extract descriptor from target_method if present (e.g. "handler()V" -> ("handler", Some("()V")))
+        let (method, target_descriptor) = split_member_ref(target_method);
+        let descriptor = target_descriptor.unwrap_or("");
         let resolved_method = self.resolve_target_method_name(dotted, method, mappings);
         let Some(members) = self.classes.get(&slash) else {
-            return SelectorVerification::Unchecked;
+            return (SelectorVerification::Unchecked, Vec::new());
         };
         if !members.method_names.contains(&resolved_method) {
-            return SelectorVerification::TargetMethodMissing;
+            return (SelectorVerification::TargetMethodMissing, Vec::new());
         }
-        match classify_selector(at_target) {
+        match classify_selector(query.kind) {
             // HEAD/RETURN/TAIL exist on any present method.
-            SelectorKind::Boundary => SelectorVerification::MatchesByConstruction,
-            SelectorKind::MemberRef => {
-                if at_member.is_empty() {
-                    return SelectorVerification::Unsupported;
-                }
-                let member = at_member_simple_name(at_member);
-                if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
-                    return SelectorVerification::Unchecked;
-                }
-                match self.call_site_count(&slash, &resolved_method, member) {
-                    // No call-site data for this method body ⇒ cannot verify.
-                    None => SelectorVerification::Unchecked,
-                    Some(0) => SelectorVerification::NoMatch,
-                    Some(count) => match ordinal {
-                        Some(n) if n >= 0 && n as u32 >= count => {
-                            SelectorVerification::OrdinalOutOfRange
-                        }
-                        _ => SelectorVerification::Matched,
-                    },
+            SelectorKind::Boundary => {
+                let offsets = if query.kind.trim().eq_ignore_ascii_case("HEAD") {
+                    vec![0]
+                } else {
+                    Vec::new()
+                };
+                if !query.slice.is_empty()
+                    || !query.args.is_empty()
+                    || query.opcode.is_some()
+                    || !query.shift.is_empty()
+                    || query.by.is_some()
+                {
+                    (SelectorVerification::MatchedPartial, offsets)
+                } else {
+                    (SelectorVerification::MatchesByConstruction, offsets)
                 }
             }
-            SelectorKind::Other => SelectorVerification::Unsupported,
+            SelectorKind::MemberRef => {
+                if query.member.is_empty() {
+                    return (SelectorVerification::Unsupported, Vec::new());
+                }
+                if self.minecraft_class_namespace() == MinecraftClassNamespace::OfficialObfuscated {
+                    return (SelectorVerification::Unchecked, Vec::new());
+                }
+                let key = MethodBodyKey {
+                    owner: slash.clone(),
+                    name: resolved_method.clone(),
+                    descriptor: descriptor.to_string(),
+                };
+                match self.matching_instruction_sites(
+                    &slash,
+                    &resolved_method,
+                    descriptor,
+                    query.kind,
+                    query.member,
+                    query.opcode,
+                ) {
+                    // No call-site data for this method body ⇒ cannot verify.
+                    None => (SelectorVerification::Unchecked, Vec::new()),
+                    Some(sites) if sites.is_empty() => (SelectorVerification::NoMatch, Vec::new()),
+                    Some(sites) => {
+                        let offsets: Vec<u32> = match query.ordinal {
+                            Some(n) if n >= 0 => sites
+                                .get(n as usize)
+                                .map(|site| vec![site.offset])
+                                .unwrap_or_default(),
+                            _ => sites.iter().map(|site| site.offset).collect(),
+                        };
+                        if query
+                            .ordinal
+                            .is_some_and(|n| n >= 0 && n as usize >= sites.len())
+                        {
+                            (SelectorVerification::OrdinalOutOfRange, Vec::new())
+                        } else {
+                            let Some(offsets) =
+                                self.shifted_offsets(&key, offsets, query.shift, query.by)
+                            else {
+                                return (SelectorVerification::MatchedPartial, Vec::new());
+                            };
+                            if offsets.is_empty() {
+                                return (SelectorVerification::NoMatch, offsets);
+                            }
+                            // Slice bounds and injection-point-specific args need
+                            // their own parsed predicates. Preserve the positive
+                            // member match, but do not claim full verification.
+                            if !query.slice.is_empty() || !query.args.is_empty() {
+                                (SelectorVerification::MatchedPartial, offsets)
+                            } else {
+                                (SelectorVerification::Matched, offsets)
+                            }
+                        }
+                    }
+                }
+            }
+            SelectorKind::Other => (SelectorVerification::Unsupported, Vec::new()),
         }
     }
 
@@ -607,10 +896,25 @@ impl TargetClassIndex {
             return None;
         }
         let slash = self.resolve_target_slash(dotted, mappings);
-        self.classes
-            .get(&slash)?
-            .frames
-            .get(&self.resolve_target_method_name(dotted, method_simple_name(method), mappings))
+        let resolved_name =
+            self.resolve_target_method_name(dotted, method_simple_name(method), mappings);
+        let descriptor = method_descriptor(method);
+        self.frames.get(&MethodBodyKey {
+            owner: slash,
+            name: resolved_name,
+            descriptor: descriptor.to_string(),
+        })
+    }
+
+    pub fn method_frame_at(
+        &self,
+        dotted: &str,
+        method: &str,
+        offset: Option<u32>,
+        mappings: Option<&TinyMappings>,
+    ) -> Option<MethodFrame> {
+        let frame = self.method_frame_for(dotted, method, mappings)?;
+        Some(offset.map_or_else(|| frame.clone(), |offset| frame.at_offset(offset)))
     }
 
     fn field_descriptors(&self, slash: &str, name: &str) -> Vec<String> {
@@ -650,11 +954,23 @@ pub enum ApplyFailureKind {
     DescriptorMismatch,
     RequireUnsatisfied,
     RefmapMissing,
+    RefmapUnavailable,
     RemapFalseSuspicious,
     OrdinalOutOfRange,
 }
 
 impl ApplyFailureKind {
+    pub const ALL: [Self; 8] = [
+        Self::TargetClassMissing,
+        Self::TargetMethodMissing,
+        Self::DescriptorMismatch,
+        Self::RequireUnsatisfied,
+        Self::RefmapMissing,
+        Self::RefmapUnavailable,
+        Self::RemapFalseSuspicious,
+        Self::OrdinalOutOfRange,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             ApplyFailureKind::TargetClassMissing => "mixin_apply_target_class_missing",
@@ -662,9 +978,108 @@ impl ApplyFailureKind {
             ApplyFailureKind::DescriptorMismatch => "mixin_apply_descriptor_mismatch",
             ApplyFailureKind::RequireUnsatisfied => "mixin_apply_require_unsatisfied",
             ApplyFailureKind::RefmapMissing => "mixin_apply_refmap_missing",
+            ApplyFailureKind::RefmapUnavailable => "mixin_apply_refmap_unavailable",
             ApplyFailureKind::RemapFalseSuspicious => "mixin_apply_remap_false_suspicious",
             ApplyFailureKind::OrdinalOutOfRange => "mixin_apply_ordinal_out_of_range",
         }
+    }
+
+    #[must_use]
+    pub fn from_fact_kind(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "mixin_apply_target_class_missing" => Self::TargetClassMissing,
+            "mixin_apply_target_method_missing" => Self::TargetMethodMissing,
+            "mixin_apply_descriptor_mismatch" => Self::DescriptorMismatch,
+            "mixin_apply_require_unsatisfied" => Self::RequireUnsatisfied,
+            "mixin_apply_refmap_missing" => Self::RefmapMissing,
+            "mixin_apply_refmap_unavailable" => Self::RefmapUnavailable,
+            "mixin_apply_remap_false_suspicious" => Self::RemapFalseSuspicious,
+            "mixin_apply_ordinal_out_of_range" => Self::OrdinalOutOfRange,
+            _ => return None,
+        })
+    }
+
+    /// One canonical proof table for both the emitted observability attribute and
+    /// the core trust contract. Presentation IDs never decide coverage policy.
+    #[must_use]
+    pub fn proof_requirements(self) -> &'static [ApplyProofRequirement] {
+        use ApplyFailureKind::*;
+        use ApplyProofRequirement::*;
+        match self {
+            TargetClassMissing => &[ApplicableMixin, TargetClassCoverage, CompatibleMappings],
+            TargetMethodMissing | DescriptorMismatch | RequireUnsatisfied => &[
+                ApplicableMixin,
+                TargetClassCoverage,
+                ExactTargetMethod,
+                CompatibleMappings,
+            ],
+            OrdinalOutOfRange => &[
+                ApplicableMixin,
+                ExactTargetMethod,
+                CompatibleMappings,
+                InstructionBody,
+            ],
+            RefmapMissing | RefmapUnavailable => {
+                &[ApplicableMixin, RuntimeNamespace, RefmapLifecycle]
+            }
+            RemapFalseSuspicious => &[ApplicableMixin, RuntimeNamespace, CompatibleMappings],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApplyProofRequirement {
+    ApplicableMixin,
+    TargetClassCoverage,
+    ExactTargetMethod,
+    CompatibleMappings,
+    InstructionBody,
+    RefmapLifecycle,
+    RuntimeNamespace,
+    HandlerSignature,
+    LocalFrameAtInjectionPoint,
+}
+
+impl ApplyProofRequirement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ApplicableMixin => "applicable-mixin",
+            Self::TargetClassCoverage => "target-class-coverage",
+            Self::ExactTargetMethod => "exact-target-method",
+            Self::CompatibleMappings => "compatible-mappings",
+            Self::InstructionBody => "instruction-body",
+            Self::RefmapLifecycle => "refmap-lifecycle",
+            Self::RuntimeNamespace => "runtime-namespace",
+            Self::HandlerSignature => "handler-signature",
+            Self::LocalFrameAtInjectionPoint => "local-frame-at-injection-point",
+        }
+    }
+
+    #[must_use]
+    pub fn coverage_requirement(self) -> intermed_doctor_core::evidence::CoverageRequirement {
+        use intermed_doctor_core::evidence::CoverageRequirement;
+        match self {
+            Self::ApplicableMixin => CoverageRequirement::ApplicableMixin,
+            Self::CompatibleMappings => CoverageRequirement::CompatibleMappings,
+            Self::RefmapLifecycle => CoverageRequirement::LocalArtifact,
+            Self::RuntimeNamespace => CoverageRequirement::AuthoritativeLoader,
+            Self::TargetClassCoverage
+            | Self::ExactTargetMethod
+            | Self::InstructionBody
+            | Self::HandlerSignature
+            | Self::LocalFrameAtInjectionPoint => CoverageRequirement::CompleteClasspath,
+        }
+    }
+}
+
+impl ApplyFailure {
+    /// Typed prerequisites for this exact failure family. Core trust assessment
+    /// consumes these instead of assigning one universal classpath contract to
+    /// every `mixin_apply_*` predicate.
+    #[must_use]
+    pub fn proof_requirements(&self) -> &'static [ApplyProofRequirement] {
+        self.kind.proof_requirements()
     }
 }
 
@@ -676,6 +1091,89 @@ fn at_member_simple_name(at_target: &str) -> &str {
         .split(['(', ':', ' '])
         .next()
         .unwrap_or(after_owner)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberSelector {
+    owner: Option<String>,
+    name: String,
+    descriptor: Option<String>,
+}
+
+/// Typed selector constraints carried from the parsed `@At` annotation into
+/// bytecode verification. The legacy verifier remains as a convenience wrapper,
+/// but production analysis uses this complete query.
+#[derive(Debug, Clone, Copy)]
+pub struct SelectorQuery<'a> {
+    pub kind: &'a str,
+    pub member: &'a str,
+    pub ordinal: Option<i32>,
+    pub slice: &'a str,
+    pub shift: &'a str,
+    pub by: Option<i32>,
+    pub opcode: Option<i32>,
+    pub args: &'a [String],
+    pub id: &'a str,
+}
+
+impl<'a> SelectorQuery<'a> {
+    #[must_use]
+    pub fn basic(kind: &'a str, member: &'a str, ordinal: Option<i32>) -> Self {
+        Self {
+            kind,
+            member,
+            ordinal,
+            slice: "",
+            shift: "",
+            by: None,
+            opcode: None,
+            args: &[],
+            id: "",
+        }
+    }
+}
+
+fn opcode_number(opcode: &str) -> Option<i32> {
+    Some(match opcode {
+        "getstatic" => 178,
+        "putstatic" => 179,
+        "getfield" => 180,
+        "putfield" => 181,
+        "invokevirtual" => 182,
+        "invokespecial" => 183,
+        "invokestatic" => 184,
+        "invokeinterface" => 185,
+        _ => return None,
+    })
+}
+
+impl MemberSelector {
+    fn parse(raw: &str) -> Option<Self> {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        let (owner, member) = if let Some(rest) = raw.strip_prefix('L') {
+            let semi = rest.find(';')?;
+            (Some(rest[..semi].replace('.', "/")), &rest[semi + 1..])
+        } else {
+            (None, raw)
+        };
+        let descriptor_start = member.find(['(', ':']);
+        let (name, descriptor) = descriptor_start.map_or((member, None), |index| {
+            let descriptor = &member[index..];
+            let descriptor = descriptor.strip_prefix(':').unwrap_or(descriptor);
+            (
+                &member[..index],
+                (!descriptor.is_empty()).then(|| descriptor.to_string()),
+            )
+        });
+        (!name.is_empty()).then(|| Self {
+            owner,
+            name: name.to_string(),
+            descriptor,
+        })
+    }
 }
 
 /// True for an internal class name in a Minecraft package (named or intermediary).
@@ -806,6 +1304,16 @@ fn method_simple_name(resolved: &str) -> &str {
         .unwrap_or(resolved)
 }
 
+/// Extract the descriptor from a `Lowner;name(args)ret` method reference, or
+/// empty string when there's no `(` (a plain name or a field reference).
+fn method_descriptor(resolved: &str) -> &str {
+    if let Some(start) = resolved.find('(') {
+        &resolved[start..]
+    } else {
+        ""
+    }
+}
+
 /// Resolve a mixin target to the slash form used by [`TargetClassIndex`].
 ///
 /// When global Yarn/Mojmap mappings are supplied, named Minecraft targets are
@@ -823,18 +1331,19 @@ fn resolve_target_slash(target: &str, mappings: Option<&TinyMappings>) -> String
 
 /// Detect apply-time failures across all mixin classes.
 ///
-/// `refmap_loaded` is the set of config paths that successfully loaded a refmap,
-/// used to avoid flagging `refmap_missing` when one is actually present.
+/// `refmap_statuses` maps stable artifact identities plus config paths to their
+/// refmap lifecycle state. Using content identity avoids mixing refmap state
+/// between two physical archives that happen to share a file name.
 /// `global_mappings` optionally supplies Yarn/Mojmap Tiny v2 for named targets.
 pub fn detect_apply_failures(
     classes: &[MixinClassRecord],
     index: &TargetClassIndex,
-    refmap_loaded: &BTreeSet<String>,
+    refmap_statuses: &std::collections::BTreeMap<(String, String), crate::refmap::RefmapStatus>,
     global_mappings: Option<&TinyMappings>,
 ) -> Vec<ApplyFailure> {
     let mut out = Vec::new();
     for class in classes {
-        detect_for_class(class, index, refmap_loaded, global_mappings, &mut out);
+        detect_for_class(class, index, refmap_statuses, global_mappings, &mut out);
     }
     out.sort_by(|a, b| {
         (
@@ -852,7 +1361,7 @@ pub fn detect_apply_failures(
 fn detect_for_class(
     class: &MixinClassRecord,
     index: &TargetClassIndex,
-    refmap_loaded: &BTreeSet<String>,
+    refmap_statuses: &std::collections::BTreeMap<(String, String), crate::refmap::RefmapStatus>,
     global_mappings: Option<&TinyMappings>,
     out: &mut Vec<ApplyFailure>,
 ) {
@@ -877,22 +1386,59 @@ fn detect_for_class(
     // mixin targeting them needs no refmap either.)
     let needs_refmap = class.runtime_namespace == Namespace::Intermediary
         && class.targets.iter().any(|t| needs_intermediary_bridge(t));
-    let has_refmap = class.refmap.is_some() || refmap_loaded.contains(&class.config);
-    if needs_refmap && !has_refmap {
+    let refmap_status = refmap_statuses
+        .get(&(class.artifact_id.clone(), class.config.clone()))
+        .cloned()
+        .unwrap_or(crate::refmap::RefmapStatus::NotDeclared);
+    if needs_refmap && !refmap_status.is_loaded() {
+        let (kind, detail) = match &refmap_status {
+            crate::refmap::RefmapStatus::NotDeclared => (
+                ApplyFailureKind::RefmapMissing,
+                "targets obfuscated Minecraft classes but declares no refmap".to_string(),
+            ),
+            crate::refmap::RefmapStatus::DeclaredMissing { declared_path } => (
+                ApplyFailureKind::RefmapUnavailable,
+                format!("declared refmap `{declared_path}` is absent from the artifact"),
+            ),
+            crate::refmap::RefmapStatus::DeclaredUnreadable { path, reason } => (
+                ApplyFailureKind::RefmapUnavailable,
+                format!("declared refmap `{path}` could not be read: {reason}"),
+            ),
+            crate::refmap::RefmapStatus::DeclaredTooLarge { path, cap_bytes } => (
+                ApplyFailureKind::RefmapUnavailable,
+                format!(
+                    "declared refmap `{path}` exceeds the bounded read limit ({cap_bytes} bytes)"
+                ),
+            ),
+            crate::refmap::RefmapStatus::DeclaredInvalid { path, reason } => (
+                ApplyFailureKind::RefmapUnavailable,
+                format!("declared refmap `{path}` is invalid: {reason}"),
+            ),
+            crate::refmap::RefmapStatus::DeclaredAndLoaded { .. } => unreachable!(),
+        };
         out.push(ApplyFailure {
-            kind: ApplyFailureKind::RefmapMissing,
+            kind,
             mod_id: class.mod_id.clone(),
             mixin: class.class_name.clone(),
             target: class.targets.first().cloned().unwrap_or_default(),
             member: String::new(),
-            detail: "targets obfuscated Minecraft classes but no refmap is present; \
-                     injection points may not resolve at load time"
-                .to_string(),
+            detail,
             confirmed: false,
         });
     }
 
     for inj in &class.injected_methods {
+        if inj
+            .meta
+            .constraints
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        {
+            // The constraint language is evaluated by Mixin at runtime. Until it
+            // is resolved for this target environment, absence cannot be an
+            // unconditional apply failure.
+            continue;
+        }
         let comparable = index.namespace_comparable(&inj.target, global_mappings);
         let slash = index.resolve_target_slash(&inj.target, global_mappings);
 
@@ -932,12 +1478,29 @@ fn detect_for_class(
             && ordinal >= 0
             && index.minecraft_class_namespace() != MinecraftClassNamespace::OfficialObfuscated
         {
-            let method = method_simple_name(&inj.resolved);
             let member = at_member_simple_name(&inj.at_target_member);
-            if let Some(count) = index.call_site_count(&slash, method, member)
-                && count >= 1
-                && ordinal as u32 >= count
-            {
+            let target_method = if inj.canonical.is_empty() {
+                inj.resolved.as_str()
+            } else {
+                inj.canonical.as_str()
+            };
+            let (verification, _) = index.verify_selector_query_with_offsets(
+                &inj.target,
+                target_method,
+                SelectorQuery {
+                    kind: &inj.at_target,
+                    member: &inj.at_target_member,
+                    ordinal: Some(ordinal),
+                    slice: &inj.at_constraints.slice,
+                    shift: &inj.at_constraints.shift,
+                    by: inj.at_constraints.by,
+                    opcode: inj.at_constraints.opcode,
+                    args: &inj.at_constraints.args,
+                    id: &inj.at_constraints.id,
+                },
+                global_mappings,
+            );
+            if verification == crate::selector::SelectorVerification::OrdinalOutOfRange {
                 out.push(ApplyFailure {
                     kind: ApplyFailureKind::OrdinalOutOfRange,
                     mod_id: class.mod_id.clone(),
@@ -945,8 +1508,8 @@ fn detect_for_class(
                     target: inj.target.clone(),
                     member: format!("{member}#{ordinal}"),
                     detail: format!(
-                        "@At(ordinal = {ordinal}) selects call site {ordinal} of `{member}` \
-                                 in `{}`, but only {count} matching site(s) exist",
+                        "@At(ordinal = {ordinal}) selects a non-existent fully matched \
+                         instruction for `{member}` in `{}`",
                         inj.resolved
                     ),
                     confirmed: true,
@@ -966,8 +1529,14 @@ fn detect_for_class(
             let resolved_name = if index.minecraft_class_namespace()
                 == MinecraftClassNamespace::OfficialObfuscated
             {
-                let Some(mapping) = global_mappings.filter(|mapping| mapping.target_compatible())
-                else {
+                // VersionUnverified means negative assertions (missing method,
+                // descriptor mismatch) after translation are unreliable.
+                let Some(mapping) = global_mappings.filter(|m| {
+                    matches!(
+                        m.mapping_compatibility(),
+                        crate::refmap::MappingCompatibility::Compatible
+                    )
+                }) else {
                     continue;
                 };
                 let Some(from_namespace) = mapping_source_namespace(mapping, &inj.target) else {
@@ -1079,7 +1648,9 @@ mod tests {
     fn record_targeting(mod_id: &str, target: &str, method: &str) -> MixinClassRecord {
         MixinClassRecord {
             archive: format!("{mod_id}.jar"),
+            artifact_id: "sha256:test".into(),
             mod_id: mod_id.into(),
+            identity_certainty: "confirmed".into(),
             config: "mixins.json".into(),
             class_name: format!("{mod_id}.Mixin"),
             class_path: format!("{mod_id}/Mixin.class"),
@@ -1107,6 +1678,7 @@ mod tests {
                 meta: Default::default(),
                 at_ordinal: None,
                 at_target_member: String::new(),
+                at_constraints: Default::default(),
             }],
             shadows: Vec::new(),
             added_members: Vec::new(),
@@ -1136,28 +1708,33 @@ mod tests {
 
         // HEAD on an existing method always matches.
         assert_eq!(
-            index.verify_selector("mod.Target", "handler", "HEAD", "", None, None),
-            SelectorVerification::MatchesByConstruction
-        );
-        // INVOKE on a call site that exists ⇒ matched.
-        assert_eq!(
             index.verify_selector(
                 "mod.Target",
-                "handler",
-                "INVOKE",
-                "Lx;cancel()V",
+                "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                "HEAD",
+                "",
                 None,
                 None
             ),
-            SelectorVerification::Matched
+            SelectorVerification::MatchesByConstruction
         );
+        // INVOKE on a call site that exists ⇒ matched.
+        let result = index.verify_selector(
+            "mod.Target",
+            "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+            "INVOKE",
+            "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;cancel()V",
+            None,
+            None,
+        );
+        assert_eq!(result, SelectorVerification::Matched);
         // ordinal past the single match ⇒ out of range.
         assert_eq!(
             index.verify_selector(
                 "mod.Target",
-                "handler",
+                "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
                 "INVOKE",
-                "Lx;cancel()V",
+                "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;cancel()V",
                 Some(3),
                 None
             ),
@@ -1167,7 +1744,7 @@ mod tests {
         assert_eq!(
             index.verify_selector(
                 "mod.Target",
-                "handler",
+                "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
                 "INVOKE",
                 "Lx;neverCalled()V",
                 None,
@@ -1177,13 +1754,68 @@ mod tests {
         );
         // A selector kind we do not verify.
         assert_eq!(
-            index.verify_selector("mod.Target", "handler", "CONSTANT", "", None, None),
+            index.verify_selector(
+                "mod.Target",
+                "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V",
+                "CONSTANT",
+                "",
+                None,
+                None
+            ),
             SelectorVerification::Unsupported
         );
         // Method absent ⇒ nothing to match.
         assert_eq!(
             index.verify_selector("mod.Target", "missing", "HEAD", "", None, None),
             SelectorVerification::TargetMethodMissing
+        );
+    }
+
+    #[test]
+    fn typed_selector_applies_opcode_shift_and_partial_slice_contracts() {
+        use crate::selector::SelectorVerification;
+        let mut index = TargetClassIndex::new();
+        index.ingest_class(&fixtures::mixin_class_with_handler_bytecode(
+            "mod/Target",
+            "net/minecraft/Foo",
+        ));
+        let method = "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
+        let member = "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;cancel()V";
+        let base = SelectorQuery::basic("INVOKE", member, None);
+        let (base_verdict, base_offsets) =
+            index.verify_selector_query_with_offsets("mod.Target", method, base, None);
+        assert_eq!(base_verdict, SelectorVerification::Matched);
+
+        let mut opcode = SelectorQuery::basic("INVOKE", member, None);
+        opcode.opcode = Some(182); // invokevirtual
+        assert_eq!(
+            index
+                .verify_selector_query_with_offsets("mod.Target", method, opcode, None)
+                .0,
+            SelectorVerification::Matched
+        );
+        opcode.opcode = Some(184); // invokestatic
+        assert_eq!(
+            index
+                .verify_selector_query_with_offsets("mod.Target", method, opcode, None)
+                .0,
+            SelectorVerification::NoMatch
+        );
+
+        let mut after = SelectorQuery::basic("INVOKE", member, None);
+        after.shift = "AFTER";
+        let (after_verdict, after_offsets) =
+            index.verify_selector_query_with_offsets("mod.Target", method, after, None);
+        assert_eq!(after_verdict, SelectorVerification::Matched);
+        assert_ne!(base_offsets, after_offsets);
+
+        let mut sliced = SelectorQuery::basic("INVOKE", member, None);
+        sliced.slice = "bounded";
+        assert_eq!(
+            index
+                .verify_selector_query_with_offsets("mod.Target", method, sliced, None)
+                .0,
+            SelectorVerification::MatchedPartial
         );
     }
 
@@ -1228,6 +1860,39 @@ mod tests {
     }
 
     #[test]
+    fn apply_failure_families_declare_distinct_proof_contracts() {
+        let failure = |kind| ApplyFailure {
+            kind,
+            mod_id: "m".into(),
+            mixin: "M".into(),
+            target: "T".into(),
+            member: String::new(),
+            detail: String::new(),
+            confirmed: false,
+        };
+        let class = failure(ApplyFailureKind::TargetClassMissing);
+        let ordinal = failure(ApplyFailureKind::OrdinalOutOfRange);
+        let refmap = failure(ApplyFailureKind::RefmapUnavailable);
+        assert!(
+            class
+                .proof_requirements()
+                .contains(&ApplyProofRequirement::TargetClassCoverage)
+        );
+        assert!(
+            ordinal
+                .proof_requirements()
+                .contains(&ApplyProofRequirement::InstructionBody)
+        );
+        assert!(
+            refmap
+                .proof_requirements()
+                .contains(&ApplyProofRequirement::RefmapLifecycle)
+        );
+        assert_ne!(class.proof_requirements(), ordinal.proof_requirements());
+        assert_ne!(ordinal.proof_requirements(), refmap.proof_requirements());
+    }
+
+    #[test]
     fn ordinal_out_of_range_is_flagged_when_sites_known() {
         // The fixture's `handler` method invokes `cancel` exactly once.
         let bytes = fixtures::mixin_class_with_handler_bytecode("mod/Target", "net/minecraft/Foo");
@@ -1235,10 +1900,16 @@ mod tests {
         index.ingest_class(&bytes);
 
         // ordinal 1 with only 1 matching site → out of range.
-        let mut rec = record_targeting("alpha", "mod.Target", "handler()V");
+        let target_method =
+            "handler(Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;)V";
+        let target_member =
+            "Lorg/spongepowered/asm/mixin/injection/callback/CallbackInfo;cancel()V";
+        let mut rec = record_targeting("alpha", "mod.Target", target_method);
+        rec.injected_methods[0].at_target = "INVOKE".into();
         rec.injected_methods[0].at_ordinal = Some(1);
-        rec.injected_methods[0].at_target_member = "Lx;cancel()V".into();
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        rec.injected_methods[0].at_target_member = target_member.into();
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1246,10 +1917,11 @@ mod tests {
         );
 
         // ordinal 0 is in range → not flagged.
-        let mut ok = record_targeting("alpha", "mod.Target", "handler()V");
+        let mut ok = record_targeting("alpha", "mod.Target", target_method);
+        ok.injected_methods[0].at_target = "INVOKE".into();
         ok.injected_methods[0].at_ordinal = Some(0);
-        ok.injected_methods[0].at_target_member = "Lx;cancel()V".into();
-        let failures = detect_apply_failures(&[ok], &index, &BTreeSet::new(), None);
+        ok.injected_methods[0].at_target_member = target_member.into();
+        let failures = detect_apply_failures(&[ok], &index, &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1266,7 +1938,8 @@ mod tests {
         let mut rec = record_targeting("alpha", "mod.Target", "handler()V");
         rec.injected_methods[0].at_ordinal = Some(5);
         rec.injected_methods[0].at_target_member = "Lx;neverCalled()V".into();
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1323,7 +1996,8 @@ mod tests {
         index.ingest_class(&bytes);
 
         let rec = record_targeting("alpha", "mod.Target", "absent()V");
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1337,7 +2011,8 @@ mod tests {
         let mut index = TargetClassIndex::new();
         index.ingest_class(&bytes);
         let rec = record_targeting("alpha", "mod.Target", "present()V");
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(failures.is_empty());
     }
 
@@ -1348,7 +2023,8 @@ mod tests {
         index.ingest_class(&bytes);
         let mut rec = record_targeting("alpha", "mod.Target", "absent()V");
         rec.injected_methods[0].meta.require = Some(1);
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1361,7 +2037,7 @@ mod tests {
         // Empty index → no class/method claims at all.
         let rec = record_targeting("alpha", "some.unindexed.Class", "whatever()V");
         let failures =
-            detect_apply_failures(&[rec], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[rec], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1381,7 +2057,8 @@ mod tests {
         assert_eq!(index.class_scope_counts(), (0, 1));
 
         let rec = record_targeting("legacy-coremod", "net.minecraft.client.Minecraft", "run()V");
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1428,7 +2105,7 @@ mod tests {
         )
         .unwrap();
         let record = record_targeting("consumer", "net.minecraft.world.entity.Entity", "tick()V");
-        let failures = detect_apply_failures(&[record], &index, &BTreeSet::new(), Some(&mappings));
+        let failures = detect_apply_failures(&[record], &index, &BTreeMap::new(), Some(&mappings));
         assert!(failures.iter().all(|failure| {
             failure.kind != ApplyFailureKind::TargetClassMissing
                 && failure.kind != ApplyFailureKind::TargetMethodMissing
@@ -1487,7 +2164,7 @@ mod tests {
             MinecraftClassNamespace::YarnNamed
         );
         let record = record_targeting("consumer", "net.minecraft.world.entity.Entity", "tick()V");
-        let failures = detect_apply_failures(&[record], &index, &BTreeSet::new(), None);
+        let failures = detect_apply_failures(&[record], &index, &BTreeMap::new(), None);
         assert!(failures.iter().all(|failure| {
             failure.kind != ApplyFailureKind::TargetClassMissing
                 && failure.kind != ApplyFailureKind::TargetMethodMissing
@@ -1518,7 +2195,8 @@ mod tests {
         assert_eq!(index.class_scope_counts(), (43, 0));
 
         let rec = record_targeting("alpha", "net.minecraft.client.Minecraft", "run()V");
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), None);
+        let failures =
+            detect_apply_failures(&[rec], &index, &std::collections::BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1574,7 +2252,7 @@ mod tests {
         fabric.runtime_namespace = Namespace::Intermediary;
         fabric.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1586,7 +2264,7 @@ mod tests {
         forge.runtime_namespace = Namespace::Named;
         forge.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1605,7 +2283,7 @@ mod tests {
         forge.runtime_namespace = Namespace::Named;
         forge.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1624,7 +2302,7 @@ mod tests {
         mixed.runtime_namespace = Namespace::Intermediary;
         mixed.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[mixed], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[mixed], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1638,7 +2316,7 @@ mod tests {
         fabric.runtime_namespace = Namespace::Intermediary;
         fabric.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1656,7 +2334,7 @@ mod tests {
         blaze.runtime_namespace = Namespace::Intermediary;
         blaze.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[blaze], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[blaze], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1670,7 +2348,7 @@ mod tests {
         unknown.runtime_namespace = Namespace::Unknown;
         unknown.injected_methods[0].meta.remap = Some(false);
         let failures =
-            detect_apply_failures(&[unknown], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[unknown], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1684,7 +2362,7 @@ mod tests {
         let mut forge = record_targeting("beta", "net.minecraft.client.Foo", "m()V");
         forge.runtime_namespace = Namespace::Named;
         let failures =
-            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[forge], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1695,12 +2373,27 @@ mod tests {
         let mut fabric = record_targeting("alpha", "net.minecraft.client.Foo", "m()V");
         fabric.runtime_namespace = Namespace::Intermediary;
         let failures =
-            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[fabric], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
                 .any(|f| f.kind == ApplyFailureKind::RefmapMissing)
         );
+
+        let mut invalid = record_targeting("broken", "net.minecraft.client.Foo", "m()V");
+        invalid.runtime_namespace = Namespace::Intermediary;
+        let statuses = BTreeMap::from([(
+            (invalid.artifact_id.clone(), invalid.config.clone()),
+            crate::refmap::RefmapStatus::DeclaredInvalid {
+                path: "broken.refmap.json".into(),
+                reason: "malformed JSON".into(),
+            },
+        )]);
+        let failures = detect_apply_failures(&[invalid], &TargetClassIndex::new(), &statuses, None);
+        assert!(failures.iter().any(|failure| {
+            failure.kind == ApplyFailureKind::RefmapUnavailable
+                && failure.detail.contains("malformed JSON")
+        }));
 
         // `com.mojang.*` target on Fabric, no refmap → real names, no bridge needed
         // (iris/sodium blaze3d mixins): must not flag refmap_missing.
@@ -1708,7 +2401,7 @@ mod tests {
             record_targeting("iris", "com.mojang.blaze3d.platform.GlStateManager", "m()V");
         mojang.runtime_namespace = Namespace::Intermediary;
         let failures =
-            detect_apply_failures(&[mojang], &TargetClassIndex::new(), &BTreeSet::new(), None);
+            detect_apply_failures(&[mojang], &TargetClassIndex::new(), &BTreeMap::new(), None);
         assert!(
             failures
                 .iter()
@@ -1732,13 +2425,13 @@ mod tests {
             "present()V",
         );
         rec.refmap = Some("alpha.refmap.json".into());
-        let failures = detect_apply_failures(&[rec], &index, &BTreeSet::new(), Some(&mappings));
+        let failures = detect_apply_failures(&[rec], &index, &BTreeMap::new(), Some(&mappings));
         assert!(failures.is_empty());
 
         let mut missing =
             record_targeting("alpha", "net.minecraft.client.MinecraftClient", "absent()V");
         missing.refmap = Some("alpha.refmap.json".into());
-        let failures = detect_apply_failures(&[missing], &index, &BTreeSet::new(), Some(&mappings));
+        let failures = detect_apply_failures(&[missing], &index, &BTreeMap::new(), Some(&mappings));
         assert!(
             failures
                 .iter()

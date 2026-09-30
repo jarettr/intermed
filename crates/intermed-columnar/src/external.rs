@@ -19,9 +19,9 @@
 //!   The deferred WASM backend adds the sandbox's own guarantees (fuel, memory limits,
 //!   no ambient capabilities) behind this same trait.
 //!
-//! When a `CallExternal` names a module that is *not* registered, the engine passes its
-//! input through unchanged (the historical behavior), so plans remain runnable without
-//! any functions installed.
+//! When a `CallExternal` names a module that is *not* registered, execution fails
+//! closed with [`ColumnarError::MissingExternalModule`]. An absent transform cannot
+//! be treated as the identity function without changing rule semantics.
 
 use crate::error::ColumnarError;
 use crate::value::Relation;
@@ -36,8 +36,7 @@ pub trait ExternalFunction: Send + Sync {
     fn call(&self, input: &Relation) -> Result<Relation, ColumnarError>;
 }
 
-/// A registry of external functions, keyed by module name. An empty registry makes
-/// every `CallExternal` a pass-through.
+/// A registry of external functions, keyed by module name.
 #[derive(Default)]
 pub struct FunctionRegistry {
     functions: Vec<Box<dyn ExternalFunction>>,
@@ -48,7 +47,7 @@ impl FunctionRegistry {
         Self::default()
     }
 
-    /// An empty registry (pass-through for all external calls).
+    /// An empty registry. Any attempted external call will fail closed.
     pub fn empty() -> Self {
         Self::default()
     }

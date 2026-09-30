@@ -1,0 +1,8 @@
+modLoader="javafml"
+loaderVersion="[2,)"
+license="MIT"
+
+[[mods]]
+modId="sanitized_universal"
+version="1.0.0"
+displayName="Sanitized Universal"

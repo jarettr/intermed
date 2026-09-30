@@ -41,8 +41,10 @@ CREATE OR REPLACE VIEW security_low_trust_capabilities AS
 WITH trust AS (
     SELECT
         f.run_id,
-        f.subject AS archive,
-        MAX(CASE WHEN a.key = 'trust_score' THEN a.val_int END) AS trust_score
+        f.subject AS artifact_id,
+        MAX(CASE WHEN a.key = 'archive' THEN a.val_str END) AS archive,
+        MAX(CASE WHEN a.key = 'trust_score' THEN a.val_int END) AS trust_score,
+        BOOL_OR(a.key = 'provenance_correlation_eligible' AND a.val_bool) AS correlation_eligible
     FROM facts f
     LEFT JOIN fact_attributes a
       ON f.run_id = a.run_id AND f.fact_id = a.fact_id
@@ -52,7 +54,8 @@ WITH trust AS (
 risky AS (
     SELECT
         f.run_id,
-        COALESCE(MAX(CASE WHEN a.key = 'archive' THEN a.val_str END), f.subject) AS archive,
+        MAX(CASE WHEN a.key = 'artifact_id' THEN a.val_str END) AS artifact_id,
+        MAX(CASE WHEN a.key = 'archive' THEN a.val_str END) AS archive,
         f.kind AS capability
     FROM facts f
     LEFT JOIN fact_attributes a
@@ -62,12 +65,13 @@ risky AS (
 )
 SELECT
     r.run_id,
-    r.archive,
+    r.artifact_id,
+    COALESCE(t.archive, r.archive, r.artifact_id) AS archive,
     r.capability,
     COALESCE(t.trust_score, 0) AS trust_score
 FROM risky r
-LEFT JOIN trust t ON r.run_id = t.run_id AND r.archive = t.archive
-WHERE COALESCE(t.trust_score, 0) < {well_identified_trust};
+LEFT JOIN trust t ON r.run_id = t.run_id AND r.artifact_id = t.artifact_id
+WHERE COALESCE(t.correlation_eligible, FALSE);
 
 CREATE OR REPLACE VIEW mixin_overlap_hotpaths AS
 SELECT
@@ -134,7 +138,7 @@ mod tests {
         let bundle = generate_analytics_bundle(&pack, 60);
         assert!(bundle.contains("CREATE OR REPLACE VIEW security_low_trust_capabilities"));
         assert!(bundle.contains("loader-mismatch"));
-        assert!(bundle.contains("60"));
+        assert!(bundle.contains("provenance_correlation_eligible"));
     }
 
     #[test]

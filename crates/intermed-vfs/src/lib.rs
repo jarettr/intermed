@@ -13,9 +13,10 @@ use rayon::prelude::*;
 use intermed_doctor_core::evidence::Finding;
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
-    CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
+    CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const EXTRACTOR: &str = "vfs-scanner";
@@ -27,7 +28,9 @@ const EXTRACTOR: &str = "vfs-scanner";
 // `-r5`: mods.toml writer-id parse scoped to `[[mods]]` + comment/quote-safe, so
 // cached writer names from the old parse (e.g. `x" # mandatory`) are invalidated.
 // `-r6`: pass 1 records central-directory size/CRC without inflating every resource.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r6");
+// `-r7`: canonical resource domains, content-addressed source identity, and
+// bounded descriptor reads change every cached writer record.
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r7");
 
 /// Implementation status for help text.
 pub const STATUS: &str = "active: Phase 3";
@@ -61,6 +64,9 @@ pub enum ConflictClass {
     /// Tag JSON where at least one writer sets `"replace": true`: the result
     /// depends on writer order, so it is **not** a safe CRDT merge.
     TagReplaceOrderDependent,
+    /// NeoForge tag patch using `remove`; its result depends on the resource
+    /// stack position and therefore cannot be materialized as a commutative union.
+    TagRemoveOrderDependent,
     /// Tag JSON whose object entries carry `required` flags — set union is
     /// possible but the optional/required semantics need review.
     TagMixedRequired,
@@ -72,10 +78,12 @@ pub enum ConflictClass {
     LangPropertiesMerge,
     /// The same locale is provided as both JSON and `.lang` (incompatible formats).
     LangFormatMismatch,
-    /// A JSON *object* whose writers' top-level keys are disjoint (or agree on
-    /// shared keys): a deterministic, order-independent key union — e.g. a
-    /// `sounds.json` where each mod registers its own sound events. Safe to merge.
+    /// Legacy serialized value retained for report compatibility. Generic JSON
+    /// objects are never classified as safe without domain-specific semantics.
     SafeJsonObjectMerge,
+    /// `sounds.json` definitions whose event-level append semantics are proven
+    /// order independent and can be materialized explicitly.
+    SoundEventMerge,
     /// A root pack descriptor (`pack.mcmeta`, root `pack.png`): every resource
     /// pack ships one. The override is expected, not a conflict — an overlay
     /// carries its own. Surfaced only for explain/overlay, not as a problem.
@@ -131,12 +139,14 @@ impl ConflictClass {
             ConflictClass::JsonOverride => "json-override",
             ConflictClass::SafeCrdtMerge => "safe-crdt-merge",
             ConflictClass::TagReplaceOrderDependent => "tag-replace-order-dependent",
+            ConflictClass::TagRemoveOrderDependent => "tag-remove-order-dependent",
             ConflictClass::TagMixedRequired => "tag-mixed-required",
             ConflictClass::TagInvalid => "tag-invalid",
             ConflictClass::LangJsonMerge => "lang-json-merge",
             ConflictClass::LangPropertiesMerge => "lang-properties-merge",
             ConflictClass::LangFormatMismatch => "lang-format-mismatch",
             ConflictClass::SafeJsonObjectMerge => "safe-json-object-merge",
+            ConflictClass::SoundEventMerge => "sound-event-merge",
             ConflictClass::RootMetadata => "root-metadata",
             ConflictClass::OrderDependentAtlas => "order-dependent-atlas",
             ConflictClass::OrderDependentSoundDef => "order-dependent-sound-def",
@@ -155,7 +165,7 @@ impl ConflictClass {
             self,
             ConflictClass::Identical
                 | ConflictClass::SafeCrdtMerge
-                | ConflictClass::SafeJsonObjectMerge
+                | ConflictClass::SoundEventMerge
         )
     }
 
@@ -166,6 +176,7 @@ impl ConflictClass {
             self,
             ConflictClass::JsonOverride
                 | ConflictClass::TagReplaceOrderDependent
+                | ConflictClass::TagRemoveOrderDependent
                 | ConflictClass::OrderDependentAtlas
                 | ConflictClass::OrderDependentSoundDef
                 | ConflictClass::OrderDependentShader
@@ -180,7 +191,7 @@ impl ConflictClass {
         match self {
             ConflictClass::Identical => "keep-any",
             ConflictClass::SafeCrdtMerge
-            | ConflictClass::SafeJsonObjectMerge
+            | ConflictClass::SoundEventMerge
             | ConflictClass::LangJsonMerge
             | ConflictClass::LangPropertiesMerge => "merge",
             // pack.mcmeta: an overlay must generate its *own*, not copy a writer's.
@@ -238,113 +249,11 @@ impl LoadOrderConfidence {
 /// The Minecraft data/asset domain of a resource path. Independent of merge
 /// safety (which is [`ConflictClass`]): the domain says *what kind of file* this
 /// is, so reports can explain a collision in the right vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum JsonDomain {
-    Recipe,
-    LootTable,
-    Advancement,
-    Tag,
-    Blockstate,
-    Model,
-    Atlas,
-    Sounds,
-    Shader,
-    Font,
-    Particle,
-    Lang,
-    PackMcmeta,
-    GenericJson,
-    BinaryAsset,
-}
-
-impl JsonDomain {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            JsonDomain::Recipe => "recipe",
-            JsonDomain::LootTable => "loot-table",
-            JsonDomain::Advancement => "advancement",
-            JsonDomain::Tag => "tag",
-            JsonDomain::Blockstate => "blockstate",
-            JsonDomain::Model => "model",
-            JsonDomain::Atlas => "atlas",
-            JsonDomain::Sounds => "sounds",
-            JsonDomain::Shader => "shader",
-            JsonDomain::Font => "font",
-            JsonDomain::Particle => "particle",
-            JsonDomain::Lang => "lang",
-            JsonDomain::PackMcmeta => "pack-mcmeta",
-            JsonDomain::GenericJson => "generic-json",
-            JsonDomain::BinaryAsset => "binary-asset",
-        }
-    }
-
-    /// A single-document JSON file: two writers at the same path is an override
-    /// decided by load order, never a mergeable union. (Atlas / sounds / shader /
-    /// pack.mcmeta have *dedicated* classes and are dispatched before this check.)
-    fn is_single_document(self) -> bool {
-        matches!(
-            self,
-            JsonDomain::Recipe
-                | JsonDomain::LootTable
-                | JsonDomain::Advancement
-                | JsonDomain::Blockstate
-                | JsonDomain::Model
-        )
-    }
-}
+pub type JsonDomain = intermed_resource_identity::ResourceDomain;
 
 /// Classify a resource path into its Minecraft domain.
 pub fn json_domain(path: &str) -> JsonDomain {
-    if path == "pack.mcmeta" {
-        return JsonDomain::PackMcmeta;
-    }
-    if !is_json_path(path) {
-        return JsonDomain::BinaryAsset;
-    }
-    if is_tag_json_path(path) {
-        return JsonDomain::Tag;
-    }
-    if is_lang_json_path(path) {
-        return JsonDomain::Lang;
-    }
-    // `data/<ns>/...` data-pack domains.
-    if path.starts_with("data/") {
-        if path.contains("/recipe/") || path.contains("/recipes/") {
-            return JsonDomain::Recipe;
-        }
-        if path.contains("/loot_table/") || path.contains("/loot_tables/") {
-            return JsonDomain::LootTable;
-        }
-        if path.contains("/advancement/") || path.contains("/advancements/") {
-            return JsonDomain::Advancement;
-        }
-    }
-    // `assets/<ns>/...` resource-pack domains.
-    if path.starts_with("assets/") {
-        if path.ends_with("/sounds.json") {
-            return JsonDomain::Sounds;
-        }
-        if path.contains("/blockstates/") {
-            return JsonDomain::Blockstate;
-        }
-        if path.contains("/models/") {
-            return JsonDomain::Model;
-        }
-        if path.contains("/atlases/") {
-            return JsonDomain::Atlas;
-        }
-        if path.contains("/shaders/") {
-            return JsonDomain::Shader;
-        }
-        if path.contains("/font/") {
-            return JsonDomain::Font;
-        }
-        if path.contains("/particles/") {
-            return JsonDomain::Particle;
-        }
-    }
-    JsonDomain::GenericJson
+    intermed_resource_identity::classify(path)
 }
 
 /// Classify *any* resource path (JSON or binary) into its asset domain. For JSON
@@ -352,20 +261,7 @@ pub fn json_domain(path: &str) -> JsonDomain {
 /// override severity differs (a texture override is cosmetic, a font/shader
 /// override is not). This is what the `domain` term of a collision fact carries.
 pub fn asset_domain(path: &str) -> JsonDomain {
-    if is_json_path(path) {
-        return json_domain(path);
-    }
-    if path.contains("/shaders/") {
-        return JsonDomain::Shader;
-    }
-    // `font/` providers, and bitmap font sheets under `textures/font/`.
-    if path.contains("/font/") {
-        return JsonDomain::Font;
-    }
-    if path.ends_with(".ogg") || path.contains("/sounds/") {
-        return JsonDomain::Sounds;
-    }
-    JsonDomain::BinaryAsset
+    intermed_resource_identity::classify(path)
 }
 
 /// A single resource writer.
@@ -374,12 +270,56 @@ pub struct ResourceWrite {
     pub path: String,
     pub writer: String,
     pub archive: String,
+    /// Content-addressed artifact identity (`sha256:<hex>`).
+    #[serde(default)]
+    pub artifact_id: String,
+    #[serde(default)]
+    pub source_kind: ResourceSourceKind,
+    /// Physical artifact locator. It is provenance, never identity.
+    #[serde(default)]
+    pub source_locator: String,
+    /// Canonical mod-instance attribution: `exact`, `shared`, or `unresolved`.
+    #[serde(default = "unresolved_ownership")]
+    pub ownership: String,
+    /// Every active mod id attributed to the artifact, deterministically sorted.
+    #[serde(default)]
+    pub mod_instances: Vec<String>,
     pub size: u64,
     /// ZIP central-directory CRC32. Used as a cheap content fingerprint; byte
     /// equality is still verified from pass-2 blobs before declaring `identical`.
     #[serde(default)]
     pub crc32: u32,
     pub json: bool,
+}
+
+/// Origin of a writer in the effective resource stack. Layer E currently
+/// materializes artifact packs; the remaining variants keep provenance typed
+/// when vanilla/external/overlay inputs are supplied by adjacent layers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceSourceKind {
+    #[default]
+    ArtifactPack,
+    VanillaBaseline,
+    ExternalResourcePack,
+    ExternalDatapack,
+    GeneratedOverlay,
+}
+
+impl ResourceSourceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ArtifactPack => "artifact-pack",
+            Self::VanillaBaseline => "vanilla-baseline",
+            Self::ExternalResourcePack => "external-resource-pack",
+            Self::ExternalDatapack => "external-datapack",
+            Self::GeneratedOverlay => "generated-overlay",
+        }
+    }
+}
+
+fn unresolved_ownership() -> String {
+    "unresolved".to_string()
 }
 
 /// A path written by more than one archive.
@@ -389,11 +329,43 @@ pub struct ResourceCollision {
     pub writers: Vec<String>,
     pub archives: Vec<String>,
     pub class: ConflictClass,
+    #[serde(default)]
+    pub topology: CollisionTopology,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language_merge_class: Option<LanguageMergeClass>,
     #[serde(default)]
     pub coverage: CollisionCoverage,
     pub reason: String,
+}
+
+/// Whether duplicate writes originate inside one artifact, across artifacts,
+/// or both. This is independent from the content conflict class.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CollisionTopology {
+    IntraArtifactDuplicate,
+    InterArtifactCollision,
+    #[default]
+    Mixed,
+}
+
+impl CollisionTopology {
+    fn from_archives(archives: &[String]) -> Self {
+        let unique = archives.iter().collect::<BTreeSet<_>>().len();
+        match (unique, archives.len()) {
+            (0 | 1, _) => Self::IntraArtifactDuplicate,
+            (n, total) if n == total => Self::InterArtifactCollision,
+            _ => Self::Mixed,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IntraArtifactDuplicate => "intra-artifact-duplicate",
+            Self::InterArtifactCollision => "inter-artifact-collision",
+            Self::Mixed => "mixed",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -448,33 +420,58 @@ pub struct ResourceScan {
     /// `(archive, reason)` for jars whose scan hit a resource limit (DoS guard).
     #[serde(default)]
     pub truncations: Vec<(String, String)>,
-    #[serde(skip)]
-    blobs: Vec<ResourceBlob>,
 }
 
 impl ResourceScan {
     /// Return resource bytes for the deterministic overlay winner.
-    pub fn winning_blob(&self, path: &str) -> Option<&[u8]> {
-        self.blobs
-            .iter()
+    pub fn winning_blob(&self, path: &str) -> Result<Vec<u8>, ScanError> {
+        let blobs = self.read_blobs_for_path(path)?;
+        blobs
+            .into_iter()
             .filter(|b| b.path == path)
             .max_by(|a, b| {
                 a.archive
                     .cmp(&b.archive)
                     .then_with(|| a.writer.cmp(&b.writer))
             })
-            .map(|b| b.bytes.as_slice())
+            .map(|b| b.bytes)
+            .ok_or_else(|| ScanError::new(format!("no resource bytes for {path}")))
     }
 
     /// Return all blobs for a resource path in deterministic order.
-    pub fn blobs_for_path(&self, path: &str) -> Vec<&[u8]> {
-        let mut blobs: Vec<&ResourceBlob> = self.blobs.iter().filter(|b| b.path == path).collect();
+    pub fn blobs_for_path(&self, path: &str) -> Result<Vec<Vec<u8>>, ScanError> {
+        let mut blobs = self.read_blobs_for_path(path)?;
         blobs.sort_by(|a, b| {
             a.archive
                 .cmp(&b.archive)
                 .then_with(|| a.writer.cmp(&b.writer))
         });
-        blobs.into_iter().map(|b| b.bytes.as_slice()).collect()
+        Ok(blobs.into_iter().map(|b| b.bytes).collect())
+    }
+
+    fn read_blobs_for_path(&self, path: &str) -> Result<Vec<ResourceBlob>, ScanError> {
+        let paths = BTreeSet::from([path.to_string()]);
+        let relevant_archives = self
+            .writes
+            .iter()
+            .filter(|write| write.path == path)
+            .map(|write| PathBuf::from(&write.source_locator))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let blobs = reread_collision_blobs(&relevant_archives, &paths);
+        let expected = self
+            .writes
+            .iter()
+            .filter(|write| write.path == path)
+            .count();
+        if blobs.len() != expected {
+            return Err(ScanError::new(format!(
+                "resource materialization incomplete for {path}: expected {expected} writer(s), read {}",
+                blobs.len()
+            )));
+        }
+        Ok(blobs)
     }
 }
 
@@ -483,6 +480,7 @@ struct ResourceBlob {
     path: String,
     writer: String,
     archive: String,
+    source_locator: String,
     bytes: Vec<u8>,
 }
 
@@ -517,22 +515,43 @@ impl Collector for ResourceCollector {
         intermed_doctor_core::CollectorScope::new(
             intermed_doctor_core::CompletenessModel::PerArtifact,
         )
-        .produces([kind::RESOURCE_WRITER, kind::RESOURCE_COLLISION])
+        .produces([
+            kind::RESOURCE_WRITER,
+            kind::RESOURCE_COLLISION,
+            kind::RESOURCE_OVERLAY_ACTION,
+            kind::JSON_MERGE_CANDIDATE,
+            kind::JSON_OVERRIDE_CONFLICT,
+            kind::SAFE_CRDT_MERGE,
+            kind::TAG_REPLACE_CONFLICT,
+            kind::TAG_MIXED_REQUIRED,
+            kind::TAG_INVALID,
+            kind::LANG_JSON_MERGE,
+            kind::LANG_PROPERTIES_MERGE,
+            kind::LANG_FORMAT_CONFLICT,
+            kind::UNSAFE_REPLACE_CONFLICT,
+            kind::SCAN_TRUNCATED,
+            kind::UNPARSEABLE_ARCHIVE,
+        ])
+        .consumes([kind::MOD, kind::PLUGIN, kind::ARTIFACT_ROLE])
         .regions([intermed_doctor_core::TargetRegion::ResourceBlobs])
     }
 
     fn applies(&self, target: &Target) -> bool {
-        mods_dir(target).is_some()
+        !target.artifact_roots().is_empty()
     }
 
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
-        let Some(dir) = mods_dir(ctx.target) else {
-            return CollectorOutcome::skipped("no mods directory for VFS scan");
-        };
-        match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan) {
-            Ok(scan) => {
+        match scan_target_filtered(ctx.target, ctx.jar_cache, &ctx.settings.scan) {
+            Ok(mut scan) => {
+                apply_canonical_metadata_identities(&mut scan, ctx.inputs);
                 let emitted = emit_scan(ctx, &scan);
-                let outcome = if scan.failures.is_empty() && scan.truncations.is_empty() {
+                let outcome = if scan.failures.is_empty()
+                    && scan.truncations.is_empty()
+                    && scan
+                        .collisions
+                        .iter()
+                        .all(|collision| collision.coverage == CollisionCoverage::Complete)
+                {
                     CollectorOutcome::active
                 } else {
                     CollectorOutcome::incomplete
@@ -548,6 +567,65 @@ impl Collector for ResourceCollector {
                 )
             }
             Err(e) => CollectorOutcome::failed(e.to_string()),
+        }
+    }
+}
+
+fn apply_canonical_metadata_identities(
+    scan: &mut ResourceScan,
+    facts: &dyn intermed_doctor_core::facts::FactRead,
+) {
+    let mut identities: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for fact in facts.by_kind(kind::ARTIFACT_ROLE) {
+        if !matches!(
+            fact.attr("activation"),
+            Some("active" | "self-loader-bootstrap")
+        ) || fact.attr("identity_certainty") != Some("confirmed")
+        {
+            continue;
+        }
+        let Some(declared_id) = fact.attr("declared_id") else {
+            continue;
+        };
+        identities
+            .entry(fact.subject.replace('\\', "/"))
+            .or_default()
+            .insert(declared_id.to_string());
+    }
+    for fact in facts.by_kind(kind::MOD).chain(facts.by_kind(kind::PLUGIN)) {
+        if fact.attr("identity_certainty") != Some("confirmed") {
+            continue;
+        }
+        let Some(file) = fact.attr("file") else {
+            continue;
+        };
+        identities
+            .entry(format!("name:{}", file_name_of(Path::new(file))))
+            .or_default()
+            .insert(fact.subject.to_string());
+    }
+    for write in &mut scan.writes {
+        let locator = write.source_locator.replace('\\', "/");
+        if let Some(mods) = identities
+            .get(&locator)
+            .or_else(|| identities.get(&format!("name:{}", write.archive)))
+        {
+            write.mod_instances = mods.iter().cloned().collect();
+            write.ownership = if mods.len() == 1 { "exact" } else { "shared" }.to_string();
+            if let Some(identity) = write.mod_instances.first() {
+                write.writer = identity.clone();
+            }
+        }
+    }
+    for collision in &mut scan.collisions {
+        let paths = scan
+            .writes
+            .iter()
+            .filter(|write| write.path == collision.path)
+            .flat_map(|write| write.mod_instances.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !paths.is_empty() {
+            collision.writers = paths.into_iter().collect();
         }
     }
 }
@@ -571,6 +649,11 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
             .subject(w.writer.clone())
             .attr("path", w.path.clone())
             .attr("archive", w.archive.clone())
+            .attr("artifact_id", w.artifact_id.clone())
+            .attr("source_kind", w.source_kind.as_str())
+            .attr("source_locator", w.source_locator.clone())
+            .attr("ownership", w.ownership.clone())
+            .attr("mod_instances", w.mod_instances.join(","))
             .attr("size", w.size as i64)
             .attr("json", w.json)
             .source(SourceRef::inside(w.archive.clone(), w.path.clone()))
@@ -591,6 +674,7 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
             .attr("writers", c.writers.join(","))
             .attr("archives", c.archives.join(","))
             .attr("class", c.class.as_str())
+            .attr("topology", c.topology.as_str())
             .attr("coverage", c.coverage.as_str())
             .attr("domain", asset_domain(&c.path).as_str())
             .attr("safe_merge", c.is_safe_merge())
@@ -614,6 +698,7 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &ResourceScan) -> usize {
             .attr("action", c.class.overlay_action())
             .attr("safety", if c.is_safe_merge() { "safe" } else { "manual" })
             .attr("class", c.class.as_str())
+            .attr("topology", c.topology.as_str())
             .attr("coverage", c.coverage.as_str())
             .attr("domain", asset_domain(&c.path).as_str())
             .attr("writers", c.writers.join(","))
@@ -678,7 +763,7 @@ impl Rule for ResourceConflictRule {
         intermed_doctor_core::RuleRequirements::default()
             .facts([kind::RESOURCE_WRITER, kind::RESOURCE_COLLISION])
             .layers([Layer::Resource])
-            .regions([intermed_doctor_core::TargetRegion::Artifacts])
+            .regions([intermed_doctor_core::TargetRegion::ResourceBlobs])
             .coverage([intermed_doctor_core::evidence::CoverageRequirement::CompleteResourceBlobs])
             .proofs([
                 intermed_doctor_core::evidence::ProofKind::Observation,
@@ -712,10 +797,27 @@ fn resource_conflict_pack() -> intermed_rules::RulePack {
 // ── Scanner ──────────────────────────────────────────────────────────────
 
 pub fn scan_target(target: &Target) -> Result<ResourceScan, ScanError> {
-    let Some(dir) = mods_dir(target) else {
-        return Err(ScanError::new("target has no mods directory"));
-    };
-    scan_mods_dir(&dir)
+    scan_target_filtered(target, None, &intermed_doctor_core::ScanSettings::default())
+}
+
+fn scan_target_filtered(
+    target: &Target,
+    cache: Option<&JarCache>,
+    scan: &intermed_doctor_core::ScanSettings,
+) -> Result<ResourceScan, ScanError> {
+    let roots = target.artifact_roots();
+    if roots.is_empty() {
+        return Err(ScanError::new("target has no artifact roots"));
+    }
+    let mut jars = Vec::new();
+    for root in roots {
+        let mut root_jars = intermed_doctor_core::list_jar_archives(&root.path, scan)
+            .map_err(|e| ScanError::new(format!("read {}: {e}", root.path.display())))?;
+        jars.append(&mut root_jars);
+    }
+    jars.sort();
+    jars.dedup();
+    scan_jars(&jars, cache, &target.path.display().to_string())
 }
 
 pub fn scan_mods_dir(dir: &Path) -> Result<ResourceScan, ScanError> {
@@ -745,17 +847,26 @@ pub fn scan_mods_dir_filtered(
     let jars = intermed_doctor_core::list_jar_archives(dir, scan)
         .map_err(|e| ScanError::new(format!("read {}: {e}", dir.display())))?;
 
+    scan_jars(&jars, cache, &dir.display().to_string())
+}
+
+fn scan_jars(
+    jars: &[PathBuf],
+    cache: Option<&JarCache>,
+    target_label: &str,
+) -> Result<ResourceScan, ScanError> {
     // Independent per-jar resource enumeration; fan out across cores.
     // `par_iter().map()` preserves order for deterministic aggregation.
-    let scanned: Vec<(String, CachedVfsJar)> = jars
+    let scanned: Vec<(String, String, String, CachedVfsJar)> = jars
         .par_iter()
         .map(|jar| {
             let archive = file_name_of(jar);
+            let artifact_id = artifact_id(jar);
             let cached = match cache {
                 Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || scan_jar_cached(jar)),
                 None => scan_jar_cached(jar),
             };
-            (archive, cached)
+            (archive, jar.display().to_string(), artifact_id, cached)
         })
         .collect();
 
@@ -763,11 +874,13 @@ pub fn scan_mods_dir_filtered(
     let mut writes = Vec::new();
     let mut failures = Vec::new();
     let mut truncations = Vec::new();
-    for (archive, cached) in scanned {
+    for (archive, source_locator, artifact_id, cached) in scanned {
         match cached {
             CachedVfsJar::Ok(mut partial) => {
                 for write in &mut partial.writes {
                     write.archive = archive.clone();
+                    write.source_locator = source_locator.clone();
+                    write.artifact_id = artifact_id.clone();
                 }
                 writes.extend(partial.writes);
                 for reason in partial.truncations {
@@ -791,21 +904,59 @@ pub fn scan_mods_dir_filtered(
         .map(|(p, _)| p.to_string())
         .collect();
 
-    // Pass 2: re-read resource bytes for collision paths only. This is the sole
-    // retained byte buffer, bounded by the colliding-resource volume rather than
-    // every resource in every jar.
-    let blobs = reread_collision_blobs(&jars, &collision_paths);
-    let mut collisions = classify_observed_collisions(&writes, &blobs, &collision_paths);
+    // Pass 2 uses deterministic size-bounded path batches. Each relevant archive
+    // is opened once per batch, classifications are emitted, then the batch bytes
+    // are released. This bounds memory without the O(paths × all-jars) rescan that
+    // a naïve one-path-at-a-time implementation would cause.
+    let mut collisions = Vec::new();
+    for batch in collision_batches(&writes, &collision_paths) {
+        let relevant_archives = writes
+            .iter()
+            .filter(|write| batch.contains(&write.path))
+            .map(|write| PathBuf::from(&write.source_locator))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let blobs = reread_collision_blobs(&relevant_archives, &batch);
+        collisions.extend(classify_observed_collisions(&writes, &blobs, &batch));
+    }
     collisions.extend(detect_cross_format_lang_collisions(&writes));
     collisions.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(ResourceScan {
-        target: dir.display().to_string(),
+        target: target_label.to_string(),
         writes,
         collisions,
         failures,
         truncations,
-        blobs,
     })
+}
+
+fn collision_batches(writes: &[ResourceWrite], paths: &BTreeSet<String>) -> Vec<BTreeSet<String>> {
+    let mut batches = Vec::new();
+    let mut current = BTreeSet::new();
+    let mut current_bytes = 0u64;
+    for path in paths {
+        let path_bytes = writes
+            .iter()
+            .filter(|write| write.path == *path)
+            .fold(0u64, |total, write| total.saturating_add(write.size));
+        if !current.is_empty()
+            && current_bytes.saturating_add(path_bytes) > MAX_COLLISION_PATH_BYTES
+        {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+        current.insert(path.clone());
+        current_bytes = current_bytes.saturating_add(path_bytes);
+        if current_bytes >= MAX_COLLISION_PATH_BYTES {
+            batches.push(std::mem::take(&mut current));
+            current_bytes = 0;
+        }
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
 }
 
 /// Preserve pass-1 collision observations even if bounded pass 2 cannot recover
@@ -839,13 +990,7 @@ fn classify_observed_collisions(
             (actual_counts.get(path).copied().unwrap_or(0) < *expected).then_some(*path)
         })
         .collect();
-    let complete_blobs: Vec<ResourceBlob> = blobs
-        .iter()
-        .filter(|blob| !incomplete_paths.contains(blob.path.as_str()))
-        .cloned()
-        .collect();
-
-    let mut collisions = classify_collisions(&complete_blobs);
+    let mut collisions = classify_collisions_excluding(blobs, &incomplete_paths);
     for path in incomplete_paths {
         let path_writes: Vec<&ResourceWrite> =
             writes.iter().filter(|write| write.path == path).collect();
@@ -862,6 +1007,12 @@ fn classify_observed_collisions(
                 .map(|write| write.archive.clone())
                 .collect(),
             class: ConflictClass::ClassificationUnavailable,
+            topology: CollisionTopology::from_archives(
+                &path_writes
+                    .iter()
+                    .map(|write| write.artifact_id.clone())
+                    .collect::<Vec<_>>(),
+            ),
             language_merge_class: None,
             coverage: CollisionCoverage::Partial,
             reason: "second-pass-read-failure: pass 1 observed multiple writers but not every collision blob could be read".to_string(),
@@ -906,8 +1057,8 @@ fn scan_jar_cached(jar: &Path) -> CachedVfsJar {
 /// Mirrors `scan_jar`'s path normalization, writer detection, and per-entry cap so
 /// the produced blobs line up with the pass-1 [`ResourceWrite`] records. Not cached
 /// (collision membership depends on the whole jar set, not one jar), but cheap: it
-/// touches only the small subset of entries whose path collides. Runs per jar in
-/// parallel; `classify_collisions` re-sorts each group, so blob order is irrelevant.
+/// touches only the small subset of entries whose path collides. It is sequential
+/// across archives so a single hot path has a deterministic aggregate memory cap.
 fn reread_collision_blobs(
     jars: &[PathBuf],
     collision_paths: &BTreeSet<String>,
@@ -915,21 +1066,33 @@ fn reread_collision_blobs(
     if collision_paths.is_empty() {
         return Vec::new();
     }
-    jars.par_iter()
-        .flat_map_iter(|jar| reread_collision_blobs_one(jar, collision_paths))
-        .collect()
+    let mut out = Vec::new();
+    let mut total = 0u64;
+    for jar in jars {
+        reread_collision_blobs_one(jar, collision_paths, &mut total, &mut out);
+        if total >= MAX_COLLISION_PATH_BYTES {
+            break;
+        }
+    }
+    out
 }
 
-fn reread_collision_blobs_one(jar: &Path, collision_paths: &BTreeSet<String>) -> Vec<ResourceBlob> {
-    let mut out = Vec::new();
+fn reread_collision_blobs_one(
+    jar: &Path,
+    collision_paths: &BTreeSet<String>,
+    total: &mut u64,
+    out: &mut Vec<ResourceBlob>,
+) {
     let Ok(file) = std::fs::File::open(jar) else {
-        return out;
+        return;
     };
     let Ok(mut archive) = zip::ZipArchive::new(file) else {
-        return out;
+        return;
     };
     let archive_name = file_name_of(jar);
-    let writer = detect_writer_id(&mut archive).unwrap_or_else(|| archive_stem(&archive_name));
+    let mut identity_gaps = Vec::new();
+    let writer = detect_writer_id(&mut archive, &mut identity_gaps)
+        .unwrap_or_else(|| archive_stem(&archive_name));
     for i in 0..archive.len() {
         let Ok(mut entry) = archive.by_index(i) else {
             continue;
@@ -945,6 +1108,12 @@ fn reread_collision_blobs_one(jar: &Path, collision_paths: &BTreeSet<String>) ->
         {
             continue;
         }
+        let Some(next_total) = total.checked_add(entry.size()) else {
+            return;
+        };
+        if next_total > MAX_COLLISION_PATH_BYTES {
+            return;
+        }
         let mut bytes = Vec::new();
         let read_cap = MAX_RESOURCE_ENTRY_BYTES.saturating_add(1);
         if std::io::Read::take(&mut entry, read_cap)
@@ -954,14 +1123,35 @@ fn reread_collision_blobs_one(jar: &Path, collision_paths: &BTreeSet<String>) ->
         {
             continue;
         }
+        *total = (*total).saturating_add(bytes.len() as u64);
         out.push(ResourceBlob {
             path,
             writer: writer.clone(),
             archive: archive_name.clone(),
+            source_locator: jar.display().to_string(),
             bytes,
         });
     }
-    out
+}
+
+fn artifact_id(path: &Path) -> String {
+    let locator = path.display().to_string();
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return intermed_doctor_core::evidence::ArtifactId::unresolved(&locator).to_string();
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => digest.update(&buffer[..read]),
+            Err(_) => {
+                return intermed_doctor_core::evidence::ArtifactId::unresolved(&locator)
+                    .to_string();
+            }
+        }
+    }
+    format!("sha256:{:x}", digest.finalize())
 }
 
 /// Per-jar resource scan limits. Minecraft jars are untrusted input: a malicious
@@ -969,6 +1159,7 @@ fn reread_collision_blobs_one(jar: &Path, collision_paths: &BTreeSet<String>) ->
 /// These caps bound memory and time; exceeding one records a `scan_truncated`
 /// diagnostic rather than silently dropping evidence.
 const MAX_RESOURCE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_COLLISION_PATH_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_RESOURCE_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RESOURCE_ENTRIES: usize = 50_000;
 
@@ -987,7 +1178,8 @@ fn scan_jar(
         .and_then(|n| n.to_str())
         .unwrap_or("?")
         .to_string();
-    let writer = detect_writer_id(&mut archive).unwrap_or_else(|| archive_stem(&archive_name));
+    let writer =
+        detect_writer_id(&mut archive, truncations).unwrap_or_else(|| archive_stem(&archive_name));
 
     let mut total_bytes: u64 = 0;
     let mut resource_entries = 0usize;
@@ -1035,6 +1227,11 @@ fn scan_jar(
             path,
             writer: writer.clone(),
             archive: archive_name.clone(),
+            artifact_id: String::new(),
+            source_kind: ResourceSourceKind::ArtifactPack,
+            source_locator: jar.display().to_string(),
+            ownership: unresolved_ownership(),
+            mod_instances: Vec::new(),
             size: entry.size(),
             crc32: entry.crc32(),
             json: is_json_path(entry.name()),
@@ -1045,7 +1242,15 @@ fn scan_jar(
     Ok(())
 }
 
+#[cfg(test)]
 fn classify_collisions(blobs: &[ResourceBlob]) -> Vec<ResourceCollision> {
+    classify_collisions_excluding(blobs, &BTreeSet::new())
+}
+
+fn classify_collisions_excluding(
+    blobs: &[ResourceBlob],
+    excluded: &BTreeSet<&str>,
+) -> Vec<ResourceCollision> {
     let mut by_path: BTreeMap<&str, Vec<&ResourceBlob>> = BTreeMap::new();
     for blob in blobs {
         by_path.entry(blob.path.as_str()).or_default().push(blob);
@@ -1053,7 +1258,7 @@ fn classify_collisions(blobs: &[ResourceBlob]) -> Vec<ResourceCollision> {
 
     let mut out = Vec::new();
     for (path, mut group) in by_path {
-        if group.len() < 2 {
+        if group.len() < 2 || excluded.contains(path) {
             continue;
         }
         group.sort_by(|a, b| {
@@ -1068,6 +1273,12 @@ fn classify_collisions(blobs: &[ResourceBlob]) -> Vec<ResourceCollision> {
             .into_iter()
             .collect();
         let archives: Vec<String> = group.iter().map(|b| b.archive.clone()).collect();
+        let topology = CollisionTopology::from_archives(
+            &group
+                .iter()
+                .map(|blob| blob.source_locator.clone())
+                .collect::<Vec<_>>(),
+        );
 
         let (class, language_merge_class, reason) = classify_group(path, &group);
         out.push(ResourceCollision {
@@ -1075,6 +1286,7 @@ fn classify_collisions(blobs: &[ResourceBlob]) -> Vec<ResourceCollision> {
             writers,
             archives,
             class,
+            topology,
             language_merge_class,
             coverage: CollisionCoverage::Complete,
             reason,
@@ -1195,11 +1407,7 @@ fn classify_group(
             // sounds.json is an object keyed by sound event: disjoint events merge
             // safely; the same event defined differently is an order-dependent pick.
             JsonDomain::Sounds => {
-                let (class, reason) = classify_object_merge_group(
-                    group,
-                    ConflictClass::OrderDependentSoundDef,
-                    "sound event(s)",
-                );
+                let (class, reason) = classify_sound_group(group);
                 return (class, None, reason);
             }
             // Single-document data files: the runtime keeps one by load order.
@@ -1214,7 +1422,8 @@ fn classify_group(
                     ),
                 );
             }
-            // Font providers / generic JSON objects: disjoint keys union safely.
+            // Fonts are single documents; arbitrary JSON stays unmodelled. A
+            // top-level object shape alone does not prove runtime merge semantics.
             JsonDomain::Font => {
                 return (
                     ConflictClass::JsonOverride,
@@ -1222,11 +1431,12 @@ fn classify_group(
                     "font provider definition kept as one document by load order".to_string(),
                 );
             }
-            _ => {
-                let (class, reason) =
-                    classify_object_merge_group(group, ConflictClass::JsonMergeCandidate, "key(s)");
-                return (class, None, reason);
-            }
+            _ => return (
+                ConflictClass::JsonMergeCandidate,
+                None,
+                "valid JSON in an unmodelled domain; no domain-specific commutative merge is proven safe"
+                    .to_string(),
+            ),
         }
     }
 
@@ -1252,63 +1462,99 @@ fn classify_group(
 }
 
 /// Classify a collision of JSON *objects* by their top-level key sets. Writers
-/// whose keys are disjoint (or agree on shared keys) form a deterministic union
-/// ([`ConflictClass::SafeJsonObjectMerge`]); a shared key bound to *different*
-/// values is resolved by load order (`conflicting_class`).
-fn classify_object_merge_group(
-    group: &[&ResourceBlob],
-    conflicting_class: ConflictClass,
-    unit: &str,
-) -> (ConflictClass, String) {
-    let mut merged: BTreeMap<String, String> = BTreeMap::new();
-    let mut conflicts: BTreeSet<String> = BTreeSet::new();
+/// Classify `sounds.json` with Minecraft's event-level append/replace semantics.
+/// Generic object union is deliberately not used here: safety is earned only by
+/// this domain-specific parser and its matching materializer.
+fn classify_sound_group(group: &[&ResourceBlob]) -> (ConflictClass, String) {
+    let mut seen = BTreeMap::<String, SoundEvent>::new();
     for blob in group {
         let Some(obj) = serde_json::from_slice::<serde_json::Value>(&blob.bytes)
             .ok()
             .and_then(|v| v.as_object().cloned())
         else {
-            // Not a flat object on every writer — fall back to "needs review".
             return (
-                ConflictClass::JsonMergeCandidate,
-                "writers provide valid JSON but not all are objects; a commutative merge is not \
-                 proven safe"
+                ConflictClass::OrderDependentSoundDef,
+                "a sounds.json writer is not an event object; merge semantics are unavailable"
                     .to_string(),
             );
         };
         for (k, v) in obj {
-            let canonical = v.to_string();
-            match merged.get(&k) {
-                Some(prev) if prev != &canonical => {
-                    conflicts.insert(k);
+            let Some(event) = SoundEvent::parse(&v) else {
+                return (
+                    ConflictClass::OrderDependentSoundDef,
+                    format!("sound event `{k}` uses an unsupported definition shape"),
+                );
+            };
+            if let Some(previous) = seen.get_mut(&k) {
+                if event.replace || previous.replace {
+                    return (
+                        ConflictClass::OrderDependentSoundDef,
+                        format!(
+                            "sound event `{k}` uses `replace`; its result depends on pack order"
+                        ),
+                    );
                 }
-                _ => {
-                    merged.insert(k, canonical);
+                if previous.subtitle != event.subtitle
+                    && previous.subtitle.is_some()
+                    && event.subtitle.is_some()
+                {
+                    return (
+                        ConflictClass::OrderDependentSoundDef,
+                        format!(
+                            "sound event `{k}` has conflicting subtitles resolved by pack order"
+                        ),
+                    );
                 }
+                if previous.extra != event.extra {
+                    return (
+                        ConflictClass::OrderDependentSoundDef,
+                        format!("sound event `{k}` has unsupported conflicting metadata"),
+                    );
+                }
+                if previous.subtitle.is_none() {
+                    previous.subtitle = event.subtitle;
+                }
+                previous.sounds.extend(event.sounds);
+            } else {
+                seen.insert(k, event);
             }
         }
     }
-    if conflicts.is_empty() {
-        (
-            ConflictClass::SafeJsonObjectMerge,
-            "writers define disjoint (or identical) top-level keys — a deterministic, \
-             order-independent object union"
-                .to_string(),
-        )
-    } else {
-        (
-            conflicting_class,
-            format!(
-                "writers disagree on {} {}: {} — resolved by load order",
-                conflicts.len(),
-                unit,
-                conflicts
-                    .iter()
-                    .take(6)
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        )
+    (
+        ConflictClass::SoundEventMerge,
+        "sound events are disjoint or append sound entries without replace/conflicting metadata"
+            .to_string(),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SoundEvent {
+    sounds: Vec<serde_json::Value>,
+    replace: bool,
+    subtitle: Option<serde_json::Value>,
+    extra: BTreeMap<String, serde_json::Value>,
+}
+
+impl SoundEvent {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let sounds = object.get("sounds")?.as_array()?.clone();
+        let replace = object
+            .get("replace")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let subtitle = object.get("subtitle").cloned();
+        let extra = object
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "sounds" | "replace" | "subtitle"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        Some(Self {
+            sounds,
+            replace,
+            subtitle,
+            extra,
+        })
     }
 }
 
@@ -1325,6 +1571,13 @@ fn classify_tag_group(group: &[&ResourceBlob]) -> (ConflictClass, String) {
                 .to_string(),
         );
     };
+    if docs.iter().any(|d| d.has_remove) {
+        return (
+            ConflictClass::TagRemoveOrderDependent,
+            "at least one writer uses NeoForge `remove`; patch application depends on resource-pack order and is not a set union"
+                .to_string(),
+        );
+    }
     if docs.iter().any(|d| d.replace) {
         return (
             ConflictClass::TagReplaceOrderDependent,
@@ -1348,26 +1601,23 @@ fn classify_tag_group(group: &[&ResourceBlob]) -> (ConflictClass, String) {
     )
 }
 
-/// Merge Minecraft tag JSON blobs in deterministic writer order.
+/// Merge Minecraft tag JSON blobs only when every writer is a pure append.
 ///
-/// When a writer sets `"replace": true`, it **replaces** the accumulated value
-/// set from earlier writers (vanilla / Forge tag merge semantics) before its own
-/// `values` are applied. The output carries `"replace": true` when any writer in
-/// the chain used replace mode.
+/// `replace` and NeoForge `remove` operations are order-dependent, so this
+/// fail-closed materializer rejects them instead of manufacturing an overlay
+/// whose behavior would depend on pack order.
 pub fn merge_tag_values(blobs: &[&[u8]]) -> Option<Vec<u8>> {
-    let mut replace_seen = false;
     let mut values = BTreeSet::new();
     for blob in blobs {
-        let (blob_replace, blob_values) = tag_values(blob)?;
-        if blob_replace {
-            values.clear();
-            replace_seen = true;
+        let (blob_replace, has_remove, blob_values) = tag_values(blob)?;
+        if blob_replace || has_remove {
+            return None;
         }
         values.extend(blob_values);
     }
 
     let out = serde_json::json!({
-        "replace": replace_seen,
+        "replace": false,
         "values": values.into_iter().collect::<Vec<_>>(),
     });
     serde_json::to_vec_pretty(&out).ok()
@@ -1399,11 +1649,61 @@ pub fn merge_lang_properties(blobs: &[&[u8]]) -> Option<Vec<u8>> {
     Some(lines.join("\n").into_bytes())
 }
 
+/// Materialize a collision proven safe by [`ConflictClass::SoundEventMerge`].
+pub fn merge_sound_definitions(blobs: &[&[u8]]) -> Option<Vec<u8>> {
+    let mut events = BTreeMap::<String, SoundEvent>::new();
+    for blob in blobs {
+        let object = serde_json::from_slice::<serde_json::Value>(blob).ok()?;
+        for (name, value) in object.as_object()? {
+            let event = SoundEvent::parse(value)?;
+            if event.replace {
+                return None;
+            }
+            match events.get_mut(name) {
+                Some(existing) => {
+                    if existing.subtitle != event.subtitle
+                        && existing.subtitle.is_some()
+                        && event.subtitle.is_some()
+                    {
+                        return None;
+                    }
+                    if existing.extra != event.extra {
+                        return None;
+                    }
+                    if existing.subtitle.is_none() {
+                        existing.subtitle = event.subtitle;
+                    }
+                    existing.sounds.extend(event.sounds);
+                }
+                None => {
+                    events.insert(name.clone(), event);
+                }
+            }
+        }
+    }
+    let output = events
+        .into_iter()
+        .map(|(name, event)| {
+            let mut object = serde_json::Map::new();
+            object.insert("sounds".to_string(), serde_json::Value::Array(event.sounds));
+            if let Some(subtitle) = event.subtitle {
+                object.insert("subtitle".to_string(), subtitle);
+            }
+            for (key, value) in event.extra {
+                object.insert(key, value);
+            }
+            (name, serde_json::Value::Object(object))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::to_vec_pretty(&serde_json::Value::Object(output)).ok()
+}
+
 /// Parsed shape of a tag document, used for *classification* (whether the
 /// collision is a safe append, an order-dependent replace, or carries
 /// optional/required entries). The actual merge uses [`tag_values`].
 struct TagDoc {
     replace: bool,
+    has_remove: bool,
     has_required_flag: bool,
 }
 
@@ -1428,13 +1728,32 @@ fn parse_tag_doc(bytes: &[u8]) -> Option<TagDoc> {
         .get("replace")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
+    let has_remove = match obj.get("remove") {
+        None => false,
+        Some(value) => {
+            let values = value.as_array()?;
+            for entry in values {
+                if entry.as_str().is_none()
+                    && entry
+                        .as_object()
+                        .and_then(|object| object.get("id"))
+                        .and_then(|id| id.as_str())
+                        .is_none()
+                {
+                    return None;
+                }
+            }
+            !values.is_empty()
+        }
+    };
     Some(TagDoc {
         replace,
+        has_remove,
         has_required_flag,
     })
 }
 
-fn tag_values(bytes: &[u8]) -> Option<(bool, Vec<String>)> {
+fn tag_values(bytes: &[u8]) -> Option<(bool, bool, Vec<String>)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     let obj = value.as_object()?;
     let values = obj.get("values")?.as_array()?;
@@ -1451,21 +1770,11 @@ fn tag_values(bytes: &[u8]) -> Option<(bool, Vec<String>)> {
         .get("replace")
         .and_then(|x| x.as_bool())
         .unwrap_or(false);
-    Some((replace, out))
-}
-
-fn mods_dir(target: &Target) -> Option<PathBuf> {
-    if let Some(dir) = &target.mods_dir {
-        return Some(dir.clone());
-    }
-    if matches!(target.kind, TargetKind::ModsDir) {
-        return Some(target.path.clone());
-    }
-    let direct = target.path.join("mods");
-    if direct.is_dir() {
-        return Some(direct);
-    }
-    None
+    let has_remove = obj
+        .get("remove")
+        .and_then(|value| value.as_array())
+        .is_some_and(|values| !values.is_empty());
+    Some((replace, has_remove, out))
 }
 
 fn is_resource_path(path: &str) -> bool {
@@ -1531,12 +1840,19 @@ fn detect_cross_format_lang_collisions(writes: &[ResourceWrite]) -> Vec<Resource
         }
         archives.sort_unstable();
         archives.dedup();
+        let artifact_ids = writes
+            .iter()
+            .filter(|write| lang_locale_key(&write.path).is_some_and(|(key, _)| key == locale_key))
+            .map(|write| write.artifact_id.clone())
+            .collect::<Vec<_>>();
+        let topology = CollisionTopology::from_archives(&artifact_ids);
         let writers_vec: Vec<String> = writers.into_iter().collect();
         out.push(ResourceCollision {
             path: locale_key.clone(),
             writers: writers_vec,
             archives,
             class: ConflictClass::LangFormatMismatch,
+            topology,
             language_merge_class: None,
             coverage: CollisionCoverage::Complete,
             reason: format!(
@@ -1647,15 +1963,18 @@ fn archive_stem(name: &str) -> String {
     name.strip_suffix(".jar").unwrap_or(name).to_string()
 }
 
-fn detect_writer_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<String> {
-    read_zip_text(archive, "fabric.mod.json")
+fn detect_writer_id(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    gaps: &mut Vec<String>,
+) -> Option<String> {
+    read_zip_text(archive, "fabric.mod.json", gaps)
         .and_then(|text| {
             serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|v| v.get("id").and_then(|x| x.as_str()).map(str::to_string))
         })
         .or_else(|| {
-            read_zip_text(archive, "quilt.mod.json").and_then(|text| {
+            read_zip_text(archive, "quilt.mod.json", gaps).and_then(|text| {
                 serde_json::from_str::<serde_json::Value>(&text)
                     .ok()
                     .and_then(|v| {
@@ -1667,13 +1986,13 @@ fn detect_writer_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Stri
             })
         })
         .or_else(|| {
-            read_zip_text(archive, "META-INF/mods.toml")
-                .or_else(|| read_zip_text(archive, "META-INF/neoforge.mods.toml"))
+            read_zip_text(archive, "META-INF/mods.toml", gaps)
+                .or_else(|| read_zip_text(archive, "META-INF/neoforge.mods.toml", gaps))
                 .and_then(|text| intermed_resource_identity::mod_id_from_mods_toml(&text))
         })
         .or_else(|| {
-            read_zip_text(archive, "plugin.yml")
-                .or_else(|| read_zip_text(archive, "paper-plugin.yml"))
+            read_zip_text(archive, "plugin.yml", gaps)
+                .or_else(|| read_zip_text(archive, "paper-plugin.yml", gaps))
                 .and_then(|text| {
                     text.lines()
                         .find_map(|line| line.trim().strip_prefix("name:"))
@@ -1682,16 +2001,67 @@ fn detect_writer_id(archive: &mut zip::ZipArchive<std::fs::File>) -> Option<Stri
         })
 }
 
-fn read_zip_text(archive: &mut zip::ZipArchive<std::fs::File>, name: &str) -> Option<String> {
-    let mut entry = archive.by_name(name).ok()?;
-    let mut text = String::new();
-    entry.read_to_string(&mut text).ok()?;
-    Some(text)
+fn read_zip_text(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    name: &str,
+    gaps: &mut Vec<String>,
+) -> Option<String> {
+    match intermed_doctor_core::bounded_zip::read_zip_text_bounded(
+        archive,
+        name,
+        intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            gaps.push(format!(
+                "writer identity metadata incomplete: {}",
+                error.reason()
+            ));
+            None
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn target_scan_includes_plugin_artifact_root() {
+        let root = std::env::temp_dir().join(format!(
+            "intermed-vfs-plugin-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let mut zip =
+            zip::ZipWriter::new(std::fs::File::create(plugins.join("plugin.jar")).unwrap());
+        zip.start_file(
+            "assets/plugin/lang/en_us.json",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"{"plugin.enabled":"Enabled"}"#).unwrap();
+        zip.finish().unwrap();
+        let target = Target {
+            path: root.clone(),
+            kind: intermed_doctor_core::TargetKind::Server,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let scan = scan_target(&target).unwrap();
+        assert_eq!(scan.writes.len(), 1);
+        assert_eq!(scan.writes[0].archive, "plugin.jar");
+        std::fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn merges_tag_values_as_set() {
@@ -1704,14 +2074,10 @@ mod tests {
     }
 
     #[test]
-    fn replace_true_clears_prior_tag_values() {
+    fn safe_tag_materializer_rejects_replace() {
         let base = br#"{"values":["minecraft:stone","minecraft:dirt"]}"#;
         let wipe = br#"{"replace":true,"values":["minecraft:granite"]}"#;
-        let merged = merge_tag_values(&[base.as_slice(), wipe.as_slice()]).unwrap();
-        let text = String::from_utf8(merged).unwrap();
-        assert!(text.contains("minecraft:granite"));
-        assert!(!text.contains("minecraft:stone"));
-        assert!(text.contains(r#""replace": true"#));
+        assert!(merge_tag_values(&[base.as_slice(), wipe.as_slice()]).is_none());
     }
 
     #[test]
@@ -1733,12 +2099,14 @@ mod tests {
                 path: "data/minecraft/tags/items/axes.json".into(),
                 writer: "a".into(),
                 archive: "a.jar".into(),
+                source_locator: "a.jar".into(),
                 bytes: br#"{"values":["a:x"]}"#.to_vec(),
             },
             ResourceBlob {
                 path: "data/minecraft/tags/items/axes.json".into(),
                 writer: "b".into(),
                 archive: "b.jar".into(),
+                source_locator: "b.jar".into(),
                 bytes: br#"{"values":["b:y"]}"#.to_vec(),
             },
         ];
@@ -1752,31 +2120,31 @@ mod tests {
             path: path.into(),
             writer: writer.into(),
             archive: format!("{writer}.jar"),
+            source_locator: format!("{writer}.jar"),
             bytes: bytes.to_vec(),
+        }
+    }
+
+    fn write(path: &str, writer: &str, crc32: u32) -> ResourceWrite {
+        ResourceWrite {
+            path: path.into(),
+            writer: writer.into(),
+            archive: format!("{writer}.jar"),
+            artifact_id: format!("sha256:{writer}"),
+            source_kind: ResourceSourceKind::ArtifactPack,
+            source_locator: format!("{writer}.jar"),
+            ownership: unresolved_ownership(),
+            mod_instances: Vec::new(),
+            size: 2,
+            crc32,
+            json: true,
         }
     }
 
     #[test]
     fn pass_two_read_failure_preserves_observed_collision() {
         let path = "data/example/recipes/conflict.json";
-        let writes = vec![
-            ResourceWrite {
-                path: path.into(),
-                writer: "a".into(),
-                archive: "a.jar".into(),
-                size: 2,
-                crc32: 1,
-                json: true,
-            },
-            ResourceWrite {
-                path: path.into(),
-                writer: "b".into(),
-                archive: "b.jar".into(),
-                size: 2,
-                crc32: 2,
-                json: true,
-            },
-        ];
+        let writes = vec![write(path, "a", 1), write(path, "b", 2)];
         let paths = BTreeSet::from([path.to_string()]);
         // Only one of the two pass-1 writers could be materialized in pass 2.
         let blobs = vec![blob(path, "a", b"{}")];
@@ -1793,6 +2161,39 @@ mod tests {
     }
 
     #[test]
+    fn one_pass_two_failure_does_not_hide_complete_sibling_collision() {
+        let incomplete = "data/example/recipes/incomplete.json";
+        let complete = "data/example/recipes/complete.json";
+        let writes = vec![
+            write(incomplete, "a", 1),
+            write(incomplete, "b", 2),
+            write(complete, "a", 3),
+            write(complete, "b", 4),
+        ];
+        let paths = BTreeSet::from([incomplete.to_string(), complete.to_string()]);
+        let blobs = vec![
+            blob(incomplete, "a", br#"{"type":"a"}"#),
+            blob(complete, "a", br#"{"type":"a"}"#),
+            blob(complete, "b", br#"{"type":"b"}"#),
+        ];
+
+        let collisions = classify_observed_collisions(&writes, &blobs, &paths);
+        assert_eq!(collisions.len(), 2);
+        let unavailable = collisions
+            .iter()
+            .find(|collision| collision.path == incomplete)
+            .unwrap();
+        assert_eq!(unavailable.class, ConflictClass::ClassificationUnavailable);
+        assert_eq!(unavailable.coverage, CollisionCoverage::Partial);
+        let classified = collisions
+            .iter()
+            .find(|collision| collision.path == complete)
+            .unwrap();
+        assert_eq!(classified.class, ConflictClass::JsonOverride);
+        assert_eq!(classified.coverage, CollisionCoverage::Complete);
+    }
+
+    #[test]
     fn tag_replace_is_order_dependent_not_safe() {
         let blobs = vec![
             blob("data/c/tags/items/t.json", "a", br#"{"values":["a:x"]}"#),
@@ -1804,6 +2205,22 @@ mod tests {
         ];
         let collisions = classify_collisions(&blobs);
         assert_eq!(collisions[0].class, ConflictClass::TagReplaceOrderDependent);
+    }
+
+    #[test]
+    fn neoforge_tag_remove_is_order_dependent_not_safe() {
+        let blobs = vec![
+            blob("data/c/tags/items/x.json", "a", br#"{"values":["a:x"]}"#),
+            blob(
+                "data/c/tags/items/x.json",
+                "b",
+                br#"{"values":["b:y"],"remove":["a:x"]}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::TagRemoveOrderDependent);
+        assert!(!collisions[0].is_safe_merge());
+        assert!(merge_tag_values(&[&blobs[0].bytes, &blobs[1].bytes]).is_none());
     }
 
     #[test]
@@ -1842,7 +2259,7 @@ mod tests {
     }
 
     #[test]
-    fn sounds_with_disjoint_events_is_safe_object_merge() {
+    fn sounds_with_disjoint_events_use_typed_safe_merge() {
         // Each mod registers its own sound event → deterministic object union.
         let blobs = vec![
             blob(
@@ -1857,14 +2274,14 @@ mod tests {
             ),
         ];
         let collisions = classify_collisions(&blobs);
-        assert_eq!(collisions[0].class, ConflictClass::SafeJsonObjectMerge);
+        assert_eq!(collisions[0].class, ConflictClass::SoundEventMerge);
         assert!(collisions[0].class.is_safe_merge());
         assert_eq!(json_domain("assets/c/sounds.json"), JsonDomain::Sounds);
     }
 
     #[test]
-    fn sounds_with_conflicting_event_is_order_dependent() {
-        // Same event, different definition → resolved by load order.
+    fn sounds_with_shared_event_append_safely() {
+        // Same event without replace appends sounds across packs.
         let blobs = vec![
             blob(
                 "assets/c/sounds.json",
@@ -1878,8 +2295,31 @@ mod tests {
             ),
         ];
         let collisions = classify_collisions(&blobs);
+        assert_eq!(collisions[0].class, ConflictClass::SoundEventMerge);
+        assert!(collisions[0].class.is_safe_merge());
+    }
+
+    #[test]
+    fn sounds_replace_is_order_dependent_and_safe_materializer_refuses_it() {
+        let blobs = vec![
+            blob(
+                "assets/c/sounds.json",
+                "a",
+                br#"{"shared":{"sounds":["x"]}}"#,
+            ),
+            blob(
+                "assets/c/sounds.json",
+                "b",
+                br#"{"shared":{"replace":true,"sounds":["y"]}}"#,
+            ),
+        ];
+        let collisions = classify_collisions(&blobs);
         assert_eq!(collisions[0].class, ConflictClass::OrderDependentSoundDef);
-        assert!(collisions[0].class.is_order_dependent());
+        let refs = blobs
+            .iter()
+            .map(|blob| blob.bytes.as_slice())
+            .collect::<Vec<_>>();
+        assert!(merge_sound_definitions(&refs).is_none());
     }
 
     #[test]
@@ -1980,13 +2420,14 @@ mod tests {
     }
 
     #[test]
-    fn generic_object_disjoint_keys_is_safe_merge() {
+    fn generic_object_disjoint_keys_remain_unproven() {
         let blobs = vec![
             blob("assets/c/custom.json", "a", br#"{"a":1}"#),
             blob("assets/c/custom.json", "b", br#"{"b":2}"#),
         ];
         let collisions = classify_collisions(&blobs);
-        assert_eq!(collisions[0].class, ConflictClass::SafeJsonObjectMerge);
+        assert_eq!(collisions[0].class, ConflictClass::JsonMergeCandidate);
+        assert!(!collisions[0].class.is_safe_merge());
     }
 
     #[test]

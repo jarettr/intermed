@@ -140,7 +140,7 @@ fn scan_dataframe(kind: &str, facts: &[Fact]) -> Result<DataFrame, crate::error:
     for f in &rows {
         for k in f.attributes.keys() {
             if !BASE_COLS.contains(&k.as_str()) {
-                attr_keys.insert(k.clone());
+                attr_keys.insert(k.to_string());
             }
         }
     }
@@ -171,9 +171,9 @@ fn scan_dataframe(kind: &str, facts: &[Fact]) -> Result<DataFrame, crate::error:
 fn base_value(f: &Fact, base: &str) -> String {
     match base {
         "fact_id" => f.id.0.to_string(),
-        "kind" => f.kind.clone(),
-        "subject" => f.subject.clone(),
-        "extractor" => f.extractor.clone(),
+        "kind" => f.kind.to_string(),
+        "subject" => f.subject.to_string(),
+        "extractor" => f.extractor.to_string(),
         "confidence" => f.confidence.to_string(),
         _ => String::new(),
     }

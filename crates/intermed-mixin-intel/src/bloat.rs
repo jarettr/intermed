@@ -172,7 +172,9 @@ mod tests {
     fn class(mod_id: &str, handlers: Vec<HandlerBodySummary>) -> MixinClassRecord {
         MixinClassRecord {
             archive: format!("{mod_id}.jar"),
+            artifact_id: "sha256:test".into(),
             mod_id: mod_id.into(),
+            identity_certainty: "confirmed".into(),
             config: "m.json".into(),
             class_name: format!("{mod_id}.Mix"),
             class_path: "x.class".into(),

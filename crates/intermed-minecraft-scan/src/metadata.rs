@@ -2,10 +2,11 @@
 //!
 //! For every jar under the target's mods (and `plugins/`) directory, open the
 //! archive (a zip) and parse whatever manifest it contains. This is the
-//! Tier-1, JVM-free port of the old `ModMetadataParser`'s **JSON path**: we
-//! read `fabric.mod.json` / `quilt.mod.json` / `mods.toml` / `plugin.yml`, not
-//! bytecode. Annotation-based (Forge `@Mod`) discovery is Tier-2 / Layer F and
-//! deliberately not done here.
+//! JVM-free discovery of loader descriptors and structural identity evidence.
+//! Basic/standard modes parse manifests; full mode also performs bounded class
+//! scanning for Forge annotations, package ownership, capabilities and targeted
+//! bytecode references. Layer F remains responsible for Mixin transformation
+//! semantics rather than ordinary artifact identity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Seek};
@@ -19,17 +20,26 @@ use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::jar_meta;
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, CollectorScope, CompletenessModel, Layer, Loader,
-    MetadataLevel, Target, TargetRegion, list_jar_archives,
+    MetadataLevel, Target, TargetRegion, environment::resolve_environment_field,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::access;
 use crate::forge_annotation;
+use crate::identity::DescriptorKind as Descriptor;
+
+mod plugin;
+mod quilt;
+mod roles;
+mod roots;
+
+use plugin::parse_plugin_yml;
+use roles::ArtifactRole;
 
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// scan/parse logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r27");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r36");
 const MAX_PACK_CALL_EDGES: usize = 20_000;
 const MAX_FABRIC_DEPENDENCY_OVERRIDES_BYTES: u64 = 1024 * 1024;
 
@@ -254,6 +264,11 @@ fn add_override_dependencies(
             mandatory,
             relation: entry.relation,
             feature: None,
+            lifecycle: None,
+            ordering: None,
+            join_classpath: None,
+            condition: None,
+            side: None,
         });
         added.insert((entry.relation.to_string(), id.clone()));
     }
@@ -272,27 +287,49 @@ impl Collector for MetadataCollector {
         CollectorScope::new(CompletenessModel::PerArtifact)
             .produces([
                 kind::MOD,
+                kind::PLUGIN,
+                kind::INVALID_METADATA,
+                kind::SECONDARY_IDENTITY,
+                kind::ARTIFACT_ROLE,
                 kind::MOD_METADATA,
                 kind::MOD_CAPABILITY,
+                kind::MOD_SIDE,
+                kind::ENTRYPOINT,
+                kind::ENTRYPOINT_DETAIL,
                 kind::DEPENDENCY,
+                kind::DEPENDENCY_EXPRESSION,
                 kind::PROVIDED_DEPENDENCY,
+                kind::BYTECODE_REFERENCE,
+                kind::BYTECODE_CALL_EDGE,
+                kind::CALL_SLICE_COVERAGE,
+                kind::PACKAGE_OWNER,
+                kind::MOD_RELATIONSHIP,
+                kind::NESTED_JAR,
+                kind::COMPATIBILITY_BRIDGE,
+                kind::ACCESS_TRANSFORM,
+                kind::COREMOD,
+                kind::MIXIN_CONFIG,
                 kind::CHECKSUM,
+                kind::SCAN_TRUNCATED,
                 kind::UNPARSEABLE_ARCHIVE,
             ])
             .regions([TargetRegion::Artifacts, TargetRegion::Metadata])
+            .consumes([kind::ENVIRONMENT])
     }
     fn applies(&self, target: &Target) -> bool {
         target.kind.has_mods()
     }
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
-        let jars = gather_jars(ctx.target, &ctx.settings.scan);
+        let jars = roots::gather_jars(ctx.target, &ctx.settings.scan);
         if jars.is_empty() {
             return CollectorOutcome::active(0, "no jar archives found");
         }
 
         let mut emitted = 0usize;
         let mut parsed = 0usize;
-        let mut failed = 0usize;
+        let mut no_manifest = 0usize;
+        let mut invalid_or_unreadable = 0usize;
+        let mut coverage_gaps = 0usize;
         let mut incomplete = false;
 
         // Parse jars in parallel (independent archive reads), then emit facts
@@ -301,16 +338,22 @@ impl Collector for MetadataCollector {
         let cache = ctx.jar_cache;
         let collector_id = self.id();
         let metadata_level = ctx.settings.metadata.level;
-        let expected_loader = ctx
-            .store
-            .by_kind(kind::ENVIRONMENT)
-            .find_map(|fact| fact.attr("loader").and_then(Loader::parse))
-            .or_else(|| crate::env::loader_for_target(ctx.target));
-        let expected_minecraft = ctx
-            .store
-            .by_kind(kind::ENVIRONMENT)
-            .find_map(|fact| fact.attr("mc_version"))
-            .map(str::to_string);
+        let loader_resolution =
+            resolve_environment_field(ctx.inputs, "loader", &["loader_source", "evidence_source"]);
+        let expected_loader = loader_resolution.value.and_then(Loader::parse).or_else(|| {
+            loader_resolution
+                .conflicts
+                .is_empty()
+                .then(|| crate::env::loader_for_target(ctx.target))
+                .flatten()
+        });
+        let expected_minecraft = resolve_environment_field(
+            ctx.inputs,
+            "mc_version",
+            &["mc_version_source", "evidence_source"],
+        )
+        .value
+        .map(str::to_string);
         let mut dependency_overrides_invalid = false;
         let dependency_overrides = if expected_loader == Some(Loader::Fabric) {
             match load_fabric_dependency_overrides(ctx.target) {
@@ -318,7 +361,7 @@ impl Collector for MetadataCollector {
                 Err((path, reason)) => {
                     dependency_overrides_invalid = true;
                     incomplete = true;
-                    failed += 1;
+                    invalid_or_unreadable += 1;
                     ctx.store
                         .fact(self.id(), kind::INVALID_METADATA)
                         .subject("fabric_loader_dependencies.json")
@@ -383,12 +426,30 @@ impl Collector for MetadataCollector {
             match outcome {
                 CachedJarOutcome::Parsed {
                     artifacts,
+                    roles,
                     detached_providers,
+                    inactive_nested,
                     truncations,
                     identity_certainty,
                     descriptor_candidates,
                 } => {
                     parsed += 1;
+                    for role in roles {
+                        ctx.store
+                            .fact(self.id(), kind::ARTIFACT_ROLE)
+                            .subject(jar.display().to_string())
+                            .attr("declared_id", role.declared_id)
+                            .attr("version", role.version)
+                            .attr("loader", role.loader)
+                            .attr("descriptor", role.descriptor)
+                            .attr("ordinal", i64::from(role.ordinal))
+                            .attr("activation", role.activation)
+                            .attr("identity_certainty", identity_certainty.clone())
+                            .source(SourceRef::file(jar.display().to_string()))
+                            .confidence(1.0)
+                            .emit();
+                        emitted += 1;
+                    }
                     for mut m in artifacts.into_iter().map(cached_to_artifact) {
                         let applied_override = dependency_overrides
                             .as_ref()
@@ -413,11 +474,30 @@ impl Collector for MetadataCollector {
                     for provider in detached_providers {
                         emitted += emit_detached_provider(ctx, &name, &provider);
                     }
+                    for nested in inactive_nested {
+                        let mut fact = ctx
+                            .store
+                            .fact(self.id(), kind::NESTED_JAR)
+                            .subject(format!("container:{name}"))
+                            .attr("container", name.clone())
+                            .attr("nested_path", nested.path.clone())
+                            .attr("activation", nested.activation)
+                            .source(SourceRef::inside(name.clone(), nested.path));
+                        if let Some(id) = nested.id {
+                            fact = fact.attr("nested", id);
+                        }
+                        if let Some(version) = nested.version {
+                            fact = fact.attr("version", version);
+                        }
+                        fact.confidence(1.0).emit();
+                        emitted += 1;
+                    }
                     // Surface per-entry caps that fired while scanning this jar
                     // (oversized/crafted archive), consistent with the VFS /
                     // security / resource-AST layers.
                     for reason in truncations {
                         incomplete = true;
+                        coverage_gaps += 1;
                         ctx.store
                             .fact(self.id(), kind::SCAN_TRUNCATED)
                             .subject(name.clone())
@@ -430,7 +510,7 @@ impl Collector for MetadataCollector {
                     }
                 }
                 CachedJarOutcome::NoManifest => {
-                    failed += 1;
+                    no_manifest += 1;
                     // A jar without a recognised mod manifest is usually benign
                     // (a bundled library/dependency jar), so it is tagged
                     // `no-manifest` and does not raise a finding on its own.
@@ -445,7 +525,7 @@ impl Collector for MetadataCollector {
                     emitted += 1;
                 }
                 CachedJarOutcome::InvalidDescriptor { manifest, reason } => {
-                    failed += 1;
+                    invalid_or_unreadable += 1;
                     incomplete = true;
                     let active_for_instance = expected_loader.is_none_or(|loader| {
                         descriptor_for_manifest(&manifest)
@@ -463,7 +543,7 @@ impl Collector for MetadataCollector {
                     emitted += 1;
                 }
                 CachedJarOutcome::Error(reason) => {
-                    failed += 1;
+                    invalid_or_unreadable += 1;
                     incomplete = true;
                     // A genuine read error (corrupt/truncated zip, unreadable
                     // entry) means the archive cannot load — tagged `corrupt`
@@ -482,10 +562,12 @@ impl Collector for MetadataCollector {
         }
 
         let summary = format!(
-            "{} jar(s): {} parsed, {} unparseable",
+            "{} jar(s): {} recognized, {} without a mod/plugin manifest, {} invalid or unreadable, {} bounded coverage gap(s)",
             jars.len(),
             parsed,
-            failed
+            no_manifest,
+            invalid_or_unreadable,
+            coverage_gaps
         );
         if incomplete {
             CollectorOutcome::incomplete(emitted, summary)
@@ -508,9 +590,13 @@ fn emit_detached_provider(
         .attr("version", provider.version.clone())
         .attr("bundled", true)
         .attr("scope", "classpath")
-        .attr("identity_certainty", "confirmed")
+        // The nested descriptor is exact, but a descriptorless outer archive's
+        // own activation is not. Keep it as a plausible provider so it blocks a
+        // false "not installed" without claiming satisfaction as hard truth.
+        .attr("identity_certainty", "plausible-unresolved")
         .attr("container", container)
         .attr("nested_path", provider.path.clone())
+        .attr("activation", "loader-declared")
         .source(SourceRef::inside(container, provider.path.clone()))
         .emit();
     ctx.store
@@ -520,6 +606,7 @@ fn emit_detached_provider(
         .attr("version", provider.version.clone())
         .attr("container", container)
         .attr("nested_path", provider.path.clone())
+        .attr("activation", "loader-declared")
         .source(SourceRef::inside(container, provider.path.clone()))
         .emit();
     2
@@ -825,6 +912,21 @@ fn emit_artifact(
         if let Some(feature) = &dep.feature {
             builder = builder.attr("feature", feature.as_str());
         }
+        if let Some(lifecycle) = &dep.lifecycle {
+            builder = builder.attr("lifecycle", lifecycle.as_str());
+        }
+        if let Some(ordering) = &dep.ordering {
+            builder = builder.attr("ordering", ordering.as_str());
+        }
+        if let Some(join_classpath) = dep.join_classpath {
+            builder = builder.attr("join_classpath", join_classpath);
+        }
+        if let Some(condition) = &dep.condition {
+            builder = builder.attr("condition", condition.as_str());
+        }
+        if let Some(side) = &dep.side {
+            builder = builder.attr("side", side.as_str());
+        }
         builder.emit();
         emitted += 1;
         if ctx.settings.metadata.level != MetadataLevel::Basic {
@@ -868,6 +970,22 @@ fn emit_artifact(
         }
     }
 
+    if dependency_policy.authoritative {
+        for expression in &m.dependency_expressions {
+            ctx.store
+                .fact("metadata-scanner", kind::DEPENDENCY_EXPRESSION)
+                .subject(m.id.clone())
+                .attr("relation", expression.relation.clone())
+                .attr("expression", expression.expression.clone())
+                .attr("version_dialect", version_dialect_for_loader(m.loader))
+                .attr("identity_certainty", identity_certainty)
+                .source(SourceRef::inside(file, m.manifest_name))
+                .confidence(1.0)
+                .emit();
+            emitted += 1;
+        }
+    }
+
     for config in &m.mixin_configs {
         ctx.store
             .fact("metadata-scanner", kind::MIXIN_CONFIG)
@@ -880,15 +998,28 @@ fn emit_artifact(
     }
 
     for p in &m.provides {
-        ctx.store
+        let mut provider = ctx
+            .store
             .fact("metadata-scanner", kind::PROVIDED_DEPENDENCY)
             .subject(m.id.clone())
             .attr("provides", p.clone())
             // A manifest `provides` is a loader-registered alias id, globally
             // visible to other mods' dependency resolution.
             .attr("scope", "metadata-alias")
-            .source(SourceRef::inside(file, m.manifest_name))
-            .emit();
+            .attr("identity_certainty", identity_certainty)
+            .attr(
+                "activation",
+                if dependency_policy.authoritative {
+                    "active-descriptor"
+                } else {
+                    "descriptor-unresolved"
+                },
+            )
+            .source(SourceRef::inside(file, m.manifest_name));
+        if let Some(version) = m.provided_versions.get(p) {
+            provider = provider.attr("version", version.clone());
+        }
+        provider.emit();
         emitted += 1;
         if ctx.settings.metadata.level != MetadataLevel::Basic {
             ctx.store
@@ -914,9 +1045,11 @@ fn emit_artifact(
             .attr("provides", id.clone())
             .attr("version", version.clone())
             .attr("bundled", true)
+            .attr("activation", "loader-declared")
             // Jar-in-Jar libraries are added to the mod classpath by the loader,
             // so they are visible to every mod (global classpath scope).
             .attr("scope", "classpath")
+            .attr("identity_certainty", identity_certainty)
             .source(SourceRef::inside(file, m.manifest_name))
             .emit();
         ctx.store
@@ -924,6 +1057,7 @@ fn emit_artifact(
             .subject(m.id.clone())
             .attr("nested", id.clone())
             .attr("version", version.clone())
+            .attr("activation", "loader-declared")
             .source(SourceRef::inside(file, m.manifest_name))
             .emit();
         emitted += 2;
@@ -1066,31 +1200,6 @@ fn version_dialect_for_loader(loader: Loader) -> &'static str {
     }
 }
 
-/// Collect candidate jars from the mods dir and a sibling `plugins/` dir.
-fn gather_jars(target: &Target, scan: &intermed_doctor_core::ScanSettings) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(md) = &target.mods_dir {
-        dirs.push(md.clone());
-    }
-    let plugins = target.path.join("plugins");
-    if plugins.is_dir() {
-        dirs.push(plugins);
-    }
-    if dirs.is_empty() && target.path.is_dir() {
-        dirs.push(target.path.clone());
-    }
-
-    let mut out = Vec::new();
-    for d in dirs {
-        if let Ok(mut jars) = list_jar_archives(&d, scan) {
-            out.append(&mut jars);
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
 // ── Parsed model ───────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1101,6 +1210,16 @@ struct CachedDep {
     relation: String,
     #[serde(default)]
     feature: Option<String>,
+    #[serde(default)]
+    lifecycle: Option<String>,
+    #[serde(default)]
+    ordering: Option<String>,
+    #[serde(default)]
+    join_classpath: Option<bool>,
+    #[serde(default)]
+    condition: Option<String>,
+    #[serde(default)]
+    side: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1110,7 +1229,11 @@ struct CachedArtifact {
     loader: String,
     side: Option<String>,
     deps: Vec<CachedDep>,
+    #[serde(default)]
+    dependency_expressions: Vec<quilt::DependencyExpression>,
     provides: Vec<String>,
+    #[serde(default)]
+    provided_versions: BTreeMap<String, String>,
     is_plugin: bool,
     manifest_name: String,
     api_version: Option<String>,
@@ -1154,12 +1277,26 @@ struct NestedProvider {
     path: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InactiveNested {
+    path: String,
+    activation: String,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 enum CachedJarOutcome {
     Parsed {
         artifacts: Vec<CachedArtifact>,
         #[serde(default)]
+        roles: Vec<ArtifactRole>,
+        #[serde(default)]
         detached_providers: Vec<NestedProvider>,
+        #[serde(default)]
+        inactive_nested: Vec<InactiveNested>,
         #[serde(default)]
         truncations: Vec<String>,
         #[serde(default = "confirmed_identity_certainty")]
@@ -1190,13 +1327,16 @@ fn scan_jar_cached(
         Ok(parsed)
             if parsed.artifacts.is_empty()
                 && parsed.detached_providers.is_empty()
+                && parsed.inactive_nested.is_empty()
                 && parsed.truncations.is_empty() =>
         {
             CachedJarOutcome::NoManifest
         }
         Ok(parsed) => CachedJarOutcome::Parsed {
             artifacts: parsed.artifacts.iter().map(artifact_to_cached).collect(),
+            roles: parsed.roles,
             detached_providers: parsed.detached_providers,
+            inactive_nested: parsed.inactive_nested,
             truncations: parsed.truncations,
             identity_certainty: parsed.identity_certainty.to_string(),
             descriptor_candidates: parsed.descriptor_candidates,
@@ -1226,10 +1366,17 @@ fn artifact_to_cached(m: &Artifact) -> CachedArtifact {
                 mandatory: d.mandatory,
                 relation: d.relation.to_string(),
                 feature: d.feature.clone(),
+                lifecycle: d.lifecycle.clone(),
+                ordering: d.ordering.clone(),
+                join_classpath: d.join_classpath,
+                condition: d.condition.clone(),
+                side: d.side.clone(),
             })
             .collect(),
+        dependency_expressions: m.dependency_expressions.clone(),
         mixin_configs: m.mixin_configs.clone(),
         provides: m.provides.clone(),
+        provided_versions: m.provided_versions.clone(),
         is_plugin: m.is_plugin,
         manifest_name: m.manifest_name.to_string(),
         api_version: m.api_version.clone(),
@@ -1266,10 +1413,17 @@ fn cached_to_artifact(c: CachedArtifact) -> Artifact {
                 mandatory: d.mandatory,
                 relation: relation_static(&d.relation),
                 feature: d.feature,
+                lifecycle: d.lifecycle,
+                ordering: d.ordering,
+                join_classpath: d.join_classpath,
+                condition: d.condition,
+                side: d.side,
             })
             .collect(),
+        dependency_expressions: c.dependency_expressions,
         mixin_configs: c.mixin_configs,
         provides: c.provides,
+        provided_versions: c.provided_versions,
         is_plugin: c.is_plugin,
         manifest_name: manifest_static(&c.manifest_name),
         api_version: c.api_version,
@@ -1365,6 +1519,10 @@ fn parse_forge_dep_entry(entry: &toml::Value) -> Dep {
         .get("feature")
         .and_then(|x| x.as_str())
         .map(str::to_string);
+    let side = entry
+        .get("side")
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_ascii_lowercase());
     let (mut mandatory, relation) = forge_dependency_semantics(entry);
     // Feature-gated deps are optional until the feature is known enabled.
     if feature.is_some() {
@@ -1376,6 +1534,11 @@ fn parse_forge_dep_entry(entry: &toml::Value) -> Dep {
         mandatory,
         relation,
         feature,
+        lifecycle: None,
+        ordering: None,
+        join_classpath: None,
+        condition: None,
+        side,
     }
 }
 
@@ -1433,6 +1596,16 @@ pub(crate) struct Dep {
     relation: &'static str,
     /// NeoForge `feature = "modid:feature"` — dependency applies only when enabled.
     feature: Option<String>,
+    /// Loader lifecycle in which the relation applies (`bootstrap`/`server`).
+    lifecycle: Option<String>,
+    /// Relative load order (`before`/`after`/`omit`).
+    ordering: Option<String>,
+    /// Paper classloader visibility, independent of dependency presence.
+    join_classpath: Option<bool>,
+    /// Serialized loader condition when the dependency is not unconditional.
+    condition: Option<String>,
+    /// Loader side on which the dependency applies (`client`, `server`, `both`).
+    side: Option<String>,
 }
 
 /// A loader entrypoint declared by a mod manifest: a class the loader will load
@@ -1469,7 +1642,15 @@ pub(crate) struct Artifact {
     pub(crate) loader: Loader,
     pub(crate) side: Option<&'static str>,
     pub(crate) deps: Vec<Dep>,
+    /// Lossless loader-native dependency groups. Ordinary edges remain as a
+    /// compatibility projection, while Layer C evaluates these expressions as
+    /// groups so `any`/`unless` do not become false independent requirements.
+    pub(crate) dependency_expressions: Vec<quilt::DependencyExpression>,
     pub(crate) provides: Vec<String>,
+    /// Loader aliases and their independently declared versions. Quilt's
+    /// `provides` objects may expose a compatibility API version that differs
+    /// from the containing module version.
+    pub(crate) provided_versions: BTreeMap<String, String>,
     pub(crate) is_plugin: bool,
     pub(crate) manifest_name: &'static str,
     pub(crate) api_version: Option<String>,
@@ -1591,19 +1772,13 @@ const MAX_NEST_DEPTH: u8 = 4;
 
 use bounded_zip::cap_for_entry as cap_for;
 
-/// Bounded text read: an oversized or unreadable entry yields `None` instead of
-/// driving unbounded decompression. The per-jar oversized-entry sweep in
-/// [`parse_jar`] surfaces the truncation as a `scan_truncated` diagnostic.
+/// Best-effort bounded read used only while probing an *inactive* secondary
+/// descriptor. Failures here deliberately do not make the selected descriptor
+/// incomplete: a broken foreign descriptor must not poison an otherwise valid
+/// active plugin identity. Reads which affect active metadata use the typed
+/// bounded API directly and surface a coverage gap.
 fn read_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
     bounded_zip::read_zip_text_opt(archive, name, cap_for(name))
-}
-
-/// Bounded byte read; truncation semantics mirror [`read_entry`].
-fn read_entry_bytes<R: Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    name: &str,
-) -> Option<Vec<u8>> {
-    bounded_zip::read_zip_bytes_bounded(archive, name, cap_for(name)).unwrap_or_default()
 }
 
 /// Whether this collector can consume an entry as metadata or bytecode input.
@@ -1664,6 +1839,8 @@ struct ParsedArchive {
     artifacts: Vec<Artifact>,
     identity_certainty: &'static str,
     descriptor_candidates: Vec<String>,
+    roles: Vec<ArtifactRole>,
+    truncations: Vec<String>,
 }
 
 /// Parse every descriptor before choosing an active identity. This prevents the
@@ -1683,31 +1860,44 @@ fn parse_archive_for_instance<R: Read + Seek>(
     let preferred = preferred_descriptor(expected_loader, prefer_legacy_forge);
     let mut first_inactive_error = None;
     let mut parsed_candidates: Vec<(Descriptor, Vec<Artifact>)> = Vec::new();
+    let mut truncations = Vec::new();
     for descriptor in descriptor_order(expected_loader, prefer_legacy_forge) {
+        let manifest = descriptor.manifest_name();
+        let text_result = if descriptor == Descriptor::LegacyForge {
+            bounded_zip::read_zip_bytes_bounded(archive, manifest, cap_for(manifest))
+                .map(|bytes| bytes.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        } else {
+            bounded_zip::read_zip_text_bounded(archive, manifest, cap_for(manifest))
+        };
+        let text = match text_result {
+            Ok(text) => text,
+            Err(error) => {
+                if expected_loader.is_none_or(|loader| descriptor.matches_loader(loader)) {
+                    truncations.push(error.reason());
+                }
+                continue;
+            }
+        };
         let parsed = match descriptor {
-            Descriptor::Paper => read_entry(archive, "paper-plugin.yml").map(|text| {
+            Descriptor::Paper => text.map(|text| {
                 parse_plugin_yml(&text, Loader::Paper, "paper-plugin.yml").map(|mut artifact| {
                     artifact.secondary = detect_secondary_mod(archive);
                     vec![artifact]
                 })
             }),
-            Descriptor::Bukkit => read_entry(archive, "plugin.yml").map(|text| {
+            Descriptor::Bukkit => text.map(|text| {
                 parse_plugin_yml(&text, Loader::Bukkit, "plugin.yml").map(|mut artifact| {
                     artifact.secondary = detect_secondary_mod(archive);
                     vec![artifact]
                 })
             }),
-            Descriptor::Fabric => read_entry(archive, "fabric.mod.json")
-                .map(|text| parse_fabric(&text).map(|artifact| vec![artifact])),
-            Descriptor::Quilt => read_entry(archive, "quilt.mod.json")
-                .map(|text| parse_quilt(&text).map(|artifact| vec![artifact])),
-            Descriptor::NeoForge => read_entry(archive, "META-INF/neoforge.mods.toml")
-                .map(|text| parse_forge_toml(&text, Loader::NeoForge)),
-            Descriptor::Forge => read_entry(archive, "META-INF/mods.toml")
-                .map(|text| parse_forge_toml(&text, Loader::Forge)),
-            Descriptor::LegacyForge => {
-                read_entry(archive, "mcmod.info").map(|text| parse_legacy_forge(&text))
+            Descriptor::Fabric => {
+                text.map(|text| parse_fabric(&text).map(|artifact| vec![artifact]))
             }
+            Descriptor::Quilt => text.map(|text| parse_quilt(&text).map(|artifact| vec![artifact])),
+            Descriptor::NeoForge => text.map(|text| parse_forge_toml(&text, Loader::NeoForge)),
+            Descriptor::Forge => text.map(|text| parse_forge_toml(&text, Loader::Forge)),
+            Descriptor::LegacyForge => text.map(|text| parse_legacy_forge(&text)),
         };
         if let Some(result) = parsed {
             match result {
@@ -1734,6 +1924,8 @@ fn parse_archive_for_instance<R: Read + Seek>(
                     artifacts: Vec::new(),
                     identity_certainty: "confirmed",
                     descriptor_candidates: Vec::new(),
+                    roles: Vec::new(),
+                    truncations,
                 })
             },
             Err,
@@ -1766,56 +1958,25 @@ fn parse_archive_for_instance<R: Read + Seek>(
             // matching descriptor. Preserve the candidate for loader/bridge
             // diagnosis without treating its dependency declarations as active.
             "cross-loader-unresolved"
-        } else if parsed_candidates.len() == 1
-            || matches!(selected_descriptor, Descriptor::Paper | Descriptor::Bukkit)
-        {
+        } else if parsed_candidates.len() == 1 {
             "confirmed"
         } else {
             "undecidable"
         };
+    let roles = roles::classify(
+        &parsed_candidates,
+        selected,
+        expected_loader,
+        identity_certainty,
+    );
     let (_, artifacts) = parsed_candidates.swap_remove(selected);
     Ok(ParsedArchive {
         artifacts,
         identity_certainty,
         descriptor_candidates,
+        roles,
+        truncations,
     })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Descriptor {
-    Paper,
-    Bukkit,
-    Fabric,
-    Quilt,
-    NeoForge,
-    Forge,
-    LegacyForge,
-}
-
-impl Descriptor {
-    fn manifest_name(self) -> &'static str {
-        match self {
-            Self::Paper => "paper-plugin.yml",
-            Self::Bukkit => "plugin.yml",
-            Self::Fabric => "fabric.mod.json",
-            Self::Quilt => "quilt.mod.json",
-            Self::NeoForge => "META-INF/neoforge.mods.toml",
-            Self::Forge => "META-INF/mods.toml",
-            Self::LegacyForge => "mcmod.info",
-        }
-    }
-
-    fn matches_loader(self, loader: Loader) -> bool {
-        matches!(
-            (self, loader),
-            (Self::Paper, Loader::Paper | Loader::Spigot)
-                | (Self::Bukkit, Loader::Bukkit)
-                | (Self::Fabric, Loader::Fabric)
-                | (Self::Quilt, Loader::Quilt)
-                | (Self::NeoForge, Loader::NeoForge)
-                | (Self::Forge | Self::LegacyForge, Loader::Forge)
-        )
-    }
 }
 
 /// Active-instance descriptor first, then deterministic fallbacks. A malformed
@@ -1848,8 +2009,8 @@ fn preferred_descriptor(
     prefer_legacy_forge: bool,
 ) -> Option<Descriptor> {
     match expected_loader {
-        Some(Loader::Paper | Loader::Spigot) => Some(Descriptor::Paper),
-        Some(Loader::Bukkit) => Some(Descriptor::Bukkit),
+        Some(Loader::Paper) => Some(Descriptor::Paper),
+        Some(Loader::Spigot | Loader::Bukkit) => Some(Descriptor::Bukkit),
         Some(Loader::Fabric) => Some(Descriptor::Fabric),
         Some(Loader::Quilt) => Some(Descriptor::Quilt),
         Some(Loader::NeoForge) => Some(Descriptor::NeoForge),
@@ -1908,67 +2069,241 @@ fn is_nested_jar(name: &str) -> bool {
         && name.ends_with(".jar")
 }
 
+fn physical_nested_paths<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Vec<String> {
+    (0..archive.len())
+        .filter_map(|index| {
+            let name = archive.by_index(index).ok()?.name().to_string();
+            is_nested_jar(&name).then_some(name)
+        })
+        .collect()
+}
+
+fn declared_nested_paths<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    loader: Option<Loader>,
+) -> (BTreeSet<String>, Vec<String>) {
+    let mut paths = BTreeSet::new();
+    let descriptor = match loader {
+        Some(Loader::Fabric) => "fabric.mod.json",
+        Some(Loader::Quilt) => "quilt.mod.json",
+        Some(Loader::Forge | Loader::NeoForge) => "META-INF/jarjar/metadata.json",
+        _ => return (paths, Vec::new()),
+    };
+    let text = match bounded_zip::read_zip_text_bounded(archive, descriptor, cap_for(descriptor)) {
+        Ok(Some(text)) => text,
+        Ok(None) => return (paths, Vec::new()),
+        Err(error) => return (paths, vec![error.reason()]),
+    };
+    let parsed = if loader == Some(Loader::Fabric) {
+        // The active Fabric descriptor was parsed with Loader-compatible Gson
+        // semantics above.  Reusing strict serde_json here would make nested
+        // discovery disagree with artifact identity for otherwise valid files
+        // containing literal control characters or other supported leniency.
+        intermed_doctor_core::fabric_json::parse_value(&text)
+    } else {
+        serde_json::from_str::<serde_json::Value>(&text)
+    };
+    let value = match parsed {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                paths,
+                vec![format!(
+                    "{descriptor}: nested declaration is invalid: {error}"
+                )],
+            );
+        }
+    };
+    // Nested-archive declarations live at loader-specific locations.  Do not
+    // recursively search the entire descriptor: an unrelated custom metadata
+    // object is allowed to contain a `jars` key and must not activate archives.
+    // Quilt, in particular, nests the declaration below `quilt_loader`, unlike
+    // Fabric and Forge/NeoForge which place it at the descriptor root.
+    let declaration = match loader {
+        Some(Loader::Fabric | Loader::Forge | Loader::NeoForge) => value.get("jars"),
+        Some(Loader::Quilt) => value.pointer("/quilt_loader/jars"),
+        _ => None,
+    };
+    if let Some(declaration) = declaration {
+        collect_declared_jar_strings(declaration, &mut paths);
+    }
+    (paths, Vec::new())
+}
+
+fn collect_declared_jar_strings(value: &serde_json::Value, paths: &mut BTreeSet<String>) {
+    match value {
+        serde_json::Value::String(path) if path.ends_with(".jar") => {
+            paths.insert(path.trim_start_matches('/').to_string());
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_declared_jar_strings(value, paths);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(key.as_str(), "file" | "path" | "jars" | "jar") {
+                    collect_declared_jar_strings(value, paths);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Recursively collect `(id, version)` for every bundled (Jar-in-Jar) module, so
 /// dependencies satisfied by a nested library are not reported missing.
+#[derive(Clone, Copy)]
+struct BundledScanContext {
+    expected_loader: Option<Loader>,
+    prefer_legacy_forge: bool,
+}
+
 fn collect_bundled<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     depth: u8,
-    expected_loader: Option<Loader>,
-    prefer_legacy_forge: bool,
+    context: BundledScanContext,
     parent_path: &str,
     out: &mut Vec<NestedProvider>,
+    inactive: &mut Vec<InactiveNested>,
+    gaps: &mut Vec<String>,
 ) {
+    let BundledScanContext {
+        expected_loader,
+        prefer_legacy_forge,
+    } = context;
     if depth == 0 {
+        let (declared, declaration_gaps) = declared_nested_paths(archive, expected_loader);
+        gaps.extend(declaration_gaps);
+        if !declared.is_empty() {
+            gaps.push(format!(
+                "{parent_path}: nested archive depth exceeds {MAX_NEST_DEPTH}"
+            ));
+        }
         return;
     }
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| {
-            let name = archive.by_index(i).ok()?.name().to_string();
-            is_nested_jar(&name).then_some(name)
-        })
-        .collect();
+    let (declared, declaration_gaps) = declared_nested_paths(archive, expected_loader);
+    gaps.extend(declaration_gaps);
+    // Activation is driven by the descriptor, not a conventional directory.
+    // Fabric/Quilt may legally declare a nested archive outside META-INF/jars.
+    let names = declared.into_iter().collect::<Vec<_>>();
     for name in names {
         let nested_path = if parent_path.is_empty() {
             name.clone()
         } else {
             format!("{parent_path}!/{name}")
         };
-        let Some(bytes) = read_entry_bytes(archive, &name) else {
-            continue;
-        };
-        let Ok(mut inner) = zip::ZipArchive::new(Cursor::new(bytes)) else {
-            continue;
-        };
-        if let Ok(parsed) =
-            parse_archive_for_instance(&mut inner, expected_loader, prefer_legacy_forge)
-        {
-            for a in parsed.artifacts {
-                if !a.id.is_empty() {
-                    // Resolve the nested jar's own `${file.jarVersion}` against
-                    // its manifest, so a bundled provider carries a real version.
-                    let version = jar_meta::resolve_jar_version(&a.version, &mut inner);
-                    out.push(NestedProvider {
-                        id: a.id,
-                        version,
-                        path: nested_path.clone(),
-                    });
-                }
+        let bytes = match bounded_zip::read_zip_bytes_bounded(archive, &name, cap_for(&name)) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                gaps.push(format!(
+                    "{nested_path}: loader-declared nested archive is missing"
+                ));
+                continue;
             }
-        }
+            Err(error) => {
+                gaps.push(error.reason());
+                continue;
+            }
+        };
+        let mut inner = match zip::ZipArchive::new(Cursor::new(bytes)) {
+            Ok(inner) => inner,
+            Err(error) => {
+                gaps.push(format!(
+                    "{nested_path}: nested archive is unreadable: {error}"
+                ));
+                continue;
+            }
+        };
+        let recursive_loader =
+            match parse_archive_for_instance(&mut inner, expected_loader, prefer_legacy_forge) {
+                Ok(parsed) => {
+                    gaps.extend(
+                        parsed
+                            .truncations
+                            .iter()
+                            .map(|gap| format!("{nested_path}!/{gap}")),
+                    );
+                    if parsed.identity_certainty == "cross-loader-unresolved" {
+                        for artifact in parsed.artifacts {
+                            inactive.push(InactiveNested {
+                                path: nested_path.clone(),
+                                activation: "classpath-only-cross-loader-descriptor".to_string(),
+                                id: (!artifact.id.is_empty()).then_some(artifact.id),
+                                version: (!artifact.version.is_empty()).then_some(artifact.version),
+                            });
+                        }
+                        // A loader-declared foreign-descriptor library is visible on
+                        // the parent's classpath but is not an active mod provider.
+                        // Its own loader-specific nested declarations are therefore
+                        // not activation instructions for the target loader.
+                        continue;
+                    }
+                    if parsed.identity_certainty != "confirmed" {
+                        gaps.push(format!(
+                            "{nested_path}: loader-declared nested identity is {}",
+                            parsed.identity_certainty
+                        ));
+                        continue;
+                    }
+                    let recursive_loader = parsed
+                        .artifacts
+                        .first()
+                        .map(|artifact| artifact.loader)
+                        .or(expected_loader);
+                    for a in parsed.artifacts {
+                        if !a.id.is_empty() {
+                            // Resolve the nested jar's own `${file.jarVersion}` against
+                            // its manifest, so a bundled provider carries a real version.
+                            let version = jar_meta::resolve_jar_version(&a.version, &mut inner);
+                            out.push(NestedProvider {
+                                id: a.id,
+                                version,
+                                path: nested_path.clone(),
+                            });
+                        }
+                        for alias in a.provides {
+                            out.push(NestedProvider {
+                                version: a
+                                    .provided_versions
+                                    .get(&alias)
+                                    .cloned()
+                                    .unwrap_or_default(),
+                                id: alias,
+                                path: nested_path.clone(),
+                            });
+                        }
+                    }
+                    recursive_loader
+                }
+                Err(error) => {
+                    gaps.push(format!(
+                        "{nested_path}: nested descriptor is invalid: {}",
+                        error.as_str()
+                    ));
+                    expected_loader
+                }
+            };
         collect_bundled(
             &mut inner,
             depth - 1,
-            expected_loader,
-            prefer_legacy_forge,
+            BundledScanContext {
+                expected_loader: recursive_loader,
+                prefer_legacy_forge,
+            },
             &nested_path,
             out,
+            inactive,
+            gaps,
         );
     }
 }
 
 struct ParsedJar {
     artifacts: Vec<Artifact>,
+    roles: Vec<ArtifactRole>,
     detached_providers: Vec<NestedProvider>,
+    inactive_nested: Vec<InactiveNested>,
     truncations: Vec<String>,
     identity_certainty: &'static str,
     descriptor_candidates: Vec<String>,
@@ -1999,7 +2334,9 @@ fn parse_jar_for_instance(
 
     let parsed_archive =
         parse_archive_for_instance(&mut archive, expected_loader, prefer_legacy_forge)?;
+    truncations.extend(parsed_archive.truncations);
     let mut artifacts = parsed_archive.artifacts;
+    let roles = parsed_archive.roles;
     let mut identity_certainty = parsed_archive.identity_certainty;
     let mut descriptor_candidates = parsed_archive.descriptor_candidates;
     if identity_certainty == "cross-loader-unresolved"
@@ -2049,15 +2386,49 @@ fn parse_jar_for_instance(
         }
     }
 
-    // Attach bundled Jar-in-Jar providers to the primary artifact.
+    // Physical containment is not loader activation. Only descriptor/JarJar
+    // declared nested paths may enter the provider universe.
+    let nested_loader = if identity_certainty == "confirmed" {
+        // The declaration syntax belongs to the selected descriptor, not to the
+        // host loader. Quilt can activate a Fabric descriptor, whose nested jars
+        // remain declared under `fabric.mod.json#jars`.
+        artifacts
+            .first()
+            .map(|artifact| artifact.loader)
+            .or(expected_loader)
+    } else {
+        // A foreign or ambiguous descriptor is not authoritative activation
+        // evidence. Keep using the target loader's declaration mechanism so a
+        // co-present foreign descriptor cannot smuggle providers into the graph.
+        expected_loader.or_else(|| artifacts.first().map(|artifact| artifact.loader))
+    };
+    let physical_nested = physical_nested_paths(&mut archive);
+    let (declared_nested, declaration_gaps) = declared_nested_paths(&mut archive, nested_loader);
+    truncations.extend(declaration_gaps);
+    let mut inactive_nested = physical_nested
+        .into_iter()
+        .filter(|path| !declared_nested.contains(path))
+        .map(|path| InactiveNested {
+            path,
+            activation: "not-loader-declared".to_string(),
+            id: None,
+            version: None,
+        })
+        .collect::<Vec<_>>();
+
+    // Attach loader-active Jar-in-Jar providers to the primary artifact.
     let mut bundled = Vec::new();
     collect_bundled(
         &mut archive,
         MAX_NEST_DEPTH,
-        expected_loader,
-        prefer_legacy_forge,
+        BundledScanContext {
+            expected_loader: nested_loader,
+            prefer_legacy_forge,
+        },
         "",
         &mut bundled,
+        &mut inactive_nested,
+        &mut truncations,
     );
     let mut detached_providers = Vec::new();
     if !bundled.is_empty() {
@@ -2076,16 +2447,41 @@ fn parse_jar_for_instance(
         }
     }
 
-    enrich_access_and_coremods(&mut archive, &mut artifacts);
+    truncations.extend(enrich_access_and_coremods(&mut archive, &mut artifacts));
     if metadata_level == MetadataLevel::Full {
         truncations.extend(enrich_entrypoint_intelligence(&mut archive, &mut artifacts));
     }
 
-    if let Some(text) = read_entry(&mut archive, "META-INF/neoforge.mods.toml")
-        .or_else(|| read_entry(&mut archive, "META-INF/mods.toml"))
-        && let Ok(v) = text.parse::<toml::Value>()
+    let forge_descriptor = if artifacts
+        .iter()
+        .any(|artifact| artifact.loader == Loader::NeoForge)
+        && archive.by_name("META-INF/neoforge.mods.toml").is_ok()
     {
-        enrich_forge_toml_extras(&mut archive, &mut artifacts, &v);
+        Some("META-INF/neoforge.mods.toml")
+    } else if artifacts
+        .iter()
+        .any(|artifact| artifact.loader == Loader::Forge)
+        && archive.by_name("META-INF/mods.toml").is_ok()
+    {
+        Some("META-INF/mods.toml")
+    } else {
+        None
+    };
+    if let Some(descriptor) = forge_descriptor {
+        match bounded_zip::read_zip_text_bounded(&mut archive, descriptor, cap_for(descriptor)) {
+            Ok(Some(text)) => match text.parse::<toml::Value>() {
+                Ok(value) => truncations.extend(enrich_forge_toml_extras(
+                    &mut archive,
+                    &mut artifacts,
+                    &value,
+                )),
+                Err(error) => truncations.push(format!(
+                    "{descriptor}: cannot enrich malformed active descriptor: {error}"
+                )),
+            },
+            Ok(None) => {}
+            Err(error) => truncations.push(error.reason()),
+        }
     }
 
     // Forge substitutes `${file.jarVersion}` in `mods.toml` with the jar
@@ -2114,9 +2510,14 @@ fn parse_jar_for_instance(
         }
     }
 
+    truncations.sort();
+    truncations.dedup();
+
     Ok(ParsedJar {
         artifacts,
+        roles,
         detached_providers,
+        inactive_nested,
         truncations,
         identity_certainty,
         descriptor_candidates,
@@ -2189,7 +2590,9 @@ fn discover_bootstrap_bridge<R: Read + Seek>(
         loader,
         side: Some("both"),
         deps: Vec::new(),
+        dependency_expressions: Vec::new(),
         provides: vec!["fabric-loader".to_string()],
+        provided_versions: BTreeMap::new(),
         is_plugin: false,
         manifest_name: "META-INF/MANIFEST.MF",
         api_version: None,
@@ -2313,28 +2716,58 @@ fn collect_data_signals<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Dat
 fn enrich_access_and_coremods<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     artifacts: &mut [Artifact],
-) {
+) -> Vec<String> {
+    let mut gaps = Vec::new();
     // Access wideners are listed per-artifact by the Fabric/Quilt manifest.
     for art in artifacts.iter_mut() {
         let files = std::mem::take(&mut art.access_widener_files);
         for file in files {
-            if let Some(text) = read_entry(archive, &file) {
-                for d in access::parse_access_widener(&text) {
-                    art.access_transforms.push(directive_to_transform(&d));
+            let text = match bounded_zip::read_zip_text_bounded(archive, &file, cap_for(&file)) {
+                Ok(Some(text)) => text,
+                Ok(None) => {
+                    gaps.push(format!("loader-declared access widener {file} is missing"));
+                    continue;
                 }
+                Err(error) => {
+                    gaps.push(error.reason());
+                    continue;
+                }
+            };
+            for d in access::parse_access_widener(&text) {
+                art.access_transforms.push(directive_to_transform(&d));
             }
         }
     }
 
     // Forge / NeoForge Access Transformer + coremods live at fixed paths and apply
     // to the jar as a whole — attach to the primary artifact.
-    let at_text = read_entry(archive, "META-INF/accesstransformer.cfg");
-    let coremods_text = read_entry(archive, "META-INF/coremods.json");
+    let at_text = match bounded_zip::read_zip_text_bounded(
+        archive,
+        "META-INF/accesstransformer.cfg",
+        cap_for("META-INF/accesstransformer.cfg"),
+    ) {
+        Ok(text) => text,
+        Err(error) => {
+            gaps.push(error.reason());
+            None
+        }
+    };
+    let coremods_text = match bounded_zip::read_zip_text_bounded(
+        archive,
+        "META-INF/coremods.json",
+        cap_for("META-INF/coremods.json"),
+    ) {
+        Ok(text) => text,
+        Err(error) => {
+            gaps.push(error.reason());
+            None
+        }
+    };
     if at_text.is_none() && coremods_text.is_none() {
-        return;
+        return gaps;
     }
     let Some(primary) = artifacts.first_mut() else {
-        return;
+        return gaps;
     };
     if let Some(text) = at_text {
         for d in access::parse_access_transformer(&text) {
@@ -2342,8 +2775,12 @@ fn enrich_access_and_coremods<R: Read + Seek>(
         }
     }
     if let Some(text) = coremods_text {
-        primary.coremods.extend(parse_coremods(&text));
+        match parse_coremods(&text) {
+            Ok(coremods) => primary.coremods.extend(coremods),
+            Err(error) => gaps.push(error),
+        }
     }
+    gaps
 }
 
 /// Inspect only declared entrypoint classes. This keeps full metadata analysis
@@ -2353,6 +2790,7 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     artifacts: &mut [Artifact],
 ) -> Vec<String> {
+    let mut coverage_gaps = Vec::new();
     // Per-entrypoint detail: precise type / events / priority for each declared
     // entrypoint class (drives `entrypoint_detail`).
     for artifact in artifacts.iter_mut() {
@@ -2363,8 +2801,16 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
                 .next()
                 .unwrap_or(&entrypoint.class);
             let path = format!("{}.class", class_name.replace('.', "/"));
-            let Some(bytes) = read_entry_bytes(archive, &path) else {
-                continue;
+            let bytes = match bounded_zip::read_zip_bytes_bounded(archive, &path, cap_for(&path)) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    coverage_gaps.push(format!("declared entrypoint class {path} is missing"));
+                    continue;
+                }
+                Err(error) => {
+                    coverage_gaps.push(error.reason());
+                    continue;
+                }
             };
             let Some(analysis) = crate::entrypoint_analysis::analyze_entrypoint_class(&bytes)
             else {
@@ -2400,8 +2846,8 @@ fn enrich_entrypoint_intelligence<R: Read + Seek>(
         artifact.bytecode.call_edges = intel.call_edges.clone();
         artifact.bytecode.call_edges_truncated = intel.call_edges_truncated;
     }
-    intel
-        .coverage_gaps
+    coverage_gaps.extend(intel.coverage_gaps);
+    coverage_gaps
         .into_iter()
         .map(|gap| {
             format!(
@@ -2424,13 +2870,16 @@ fn directive_to_transform(d: &access::AccessDirective) -> AccessTransform {
 
 /// Forge `META-INF/coremods.json` maps coremod name → JS script path; return the
 /// declared coremod names.
-fn parse_coremods(text: &str) -> Vec<String> {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.as_object())
-        .map(|o| o.keys().cloned().collect())
-        .unwrap_or_default()
+fn parse_coremods(text: &str) -> Result<Vec<String>, String> {
+    // ModLauncher uses a Gson-compatible reader; real coremods manifests often
+    // retain commented-out entries. Treat those comments as inactive entries,
+    // not as corruption of otherwise valid loader metadata.
+    let value = intermed_doctor_core::fabric_json::parse_value(text)
+        .map_err(|error| format!("META-INF/coremods.json is invalid: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "META-INF/coremods.json root is not an object".to_string())?;
+    Ok(object.keys().cloned().collect())
 }
 
 fn parse_fabric(text: &str) -> Result<Artifact, ParseErr> {
@@ -2455,6 +2904,7 @@ fn parse_fabric(text: &str) -> Result<Artifact, ParseErr> {
     let mut deps = Vec::new();
     push_fabric_dep_map(&mut deps, v.get("depends"), "depends", true);
     push_fabric_dep_map(&mut deps, v.get("breaks"), "breaks", true);
+    push_fabric_dep_map(&mut deps, v.get("conflicts"), "conflicts", false);
     push_fabric_dep_map(&mut deps, v.get("suggests"), "suggests", false);
     push_fabric_dep_map(&mut deps, v.get("recommends"), "recommends", false);
     let provides = v
@@ -2478,7 +2928,9 @@ fn parse_fabric(text: &str) -> Result<Artifact, ParseErr> {
         loader: Loader::Fabric,
         side,
         deps,
+        dependency_expressions: Vec::new(),
         provides,
+        provided_versions: BTreeMap::new(),
         is_plugin: false,
         manifest_name: "fabric.mod.json",
         api_version: None,
@@ -2561,6 +3013,11 @@ fn push_fabric_dep_map(
             mandatory,
             relation,
             feature: None,
+            lifecycle: None,
+            ordering: None,
+            join_classpath: None,
+            condition: None,
+            side: None,
         });
     }
 }
@@ -2583,14 +3040,38 @@ fn parse_quilt(text: &str) -> Result<Artifact, ParseErr> {
         .to_string();
     let side = quilt_environment(v.get("environment").or_else(|| ql.get("environment")));
     let mut deps = Vec::new();
-    push_quilt_dep_array(&mut deps, ql.get("depends"), "depends", true);
-    push_quilt_dep_array(&mut deps, ql.get("breaks"), "breaks", true);
-    push_quilt_dep_array(&mut deps, ql.get("suggests"), "suggests", false);
-    push_quilt_dep_array(&mut deps, ql.get("recommends"), "recommends", false);
+    let mut dependency_expressions = Vec::new();
+    for (field, relation, mandatory) in [
+        ("depends", "depends", true),
+        ("breaks", "breaks", true),
+        ("suggests", "suggests", false),
+        ("recommends", "recommends", false),
+    ] {
+        let (mut projected, mut expressions) =
+            quilt::parse_array(ql.get(field), relation, mandatory);
+        deps.append(&mut projected);
+        dependency_expressions.append(&mut expressions);
+    }
     let provides = ql
         .get("provides")
         .and_then(|x| x.as_array())
         .map(|a| a.iter().filter_map(quilt_provides_id).collect())
+        .unwrap_or_default();
+    let provided_versions = ql
+        .get("provides")
+        .and_then(|x| x.as_array())
+        .map(|aliases| {
+            aliases
+                .iter()
+                .filter_map(|alias| {
+                    let object = alias.as_object()?;
+                    Some((
+                        object.get("id")?.as_str()?.to_string(),
+                        object.get("version")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
         .unwrap_or_default();
     let entrypoints = parse_quilt_entrypoints(ql.get("entrypoints"));
     let access_widener_files = quilt_string_or_array(ql.get("access_widener"));
@@ -2600,7 +3081,9 @@ fn parse_quilt(text: &str) -> Result<Artifact, ParseErr> {
         loader: Loader::Quilt,
         side,
         deps,
+        dependency_expressions,
         provides,
+        provided_versions,
         is_plugin: false,
         manifest_name: "quilt.mod.json",
         api_version: None,
@@ -2677,47 +3160,9 @@ fn quilt_string_or_array(value: Option<&serde_json::Value>) -> Vec<String> {
 fn quilt_environment(value: Option<&serde_json::Value>) -> Option<&'static str> {
     match value.and_then(|x| x.as_str()) {
         Some("client") => Some("client"),
-        Some("server") => Some("server"),
+        Some("server" | "dedicated_server") => Some("server"),
         Some("*") => Some("both"),
         _ => None,
-    }
-}
-
-fn push_quilt_dep_array(
-    deps: &mut Vec<Dep>,
-    value: Option<&serde_json::Value>,
-    relation: &'static str,
-    mandatory: bool,
-) {
-    let Some(arr) = value.and_then(|x| x.as_array()) else {
-        return;
-    };
-    for d in arr {
-        match d {
-            serde_json::Value::String(s) => deps.push(Dep {
-                id: s.clone(),
-                range: "*".into(),
-                mandatory,
-                relation,
-                feature: None,
-            }),
-            serde_json::Value::Object(o) => {
-                if let Some(dep_id) = o.get("id").and_then(|x| x.as_str()) {
-                    let range = o
-                        .get("versions")
-                        .map(json_range)
-                        .unwrap_or_else(|| "*".into());
-                    deps.push(Dep {
-                        id: dep_id.to_string(),
-                        range,
-                        mandatory,
-                        relation,
-                        feature: None,
-                    });
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -2747,7 +3192,9 @@ fn parse_legacy_forge(text: &str) -> Result<Vec<Artifact>, ParseErr> {
                 .iter()
                 .filter_map(|requirement| parse_legacy_forge_requirement(requirement))
                 .collect(),
+            dependency_expressions: Vec::new(),
             provides: Vec::new(),
+            provided_versions: BTreeMap::new(),
             is_plugin: false,
             manifest_name: "mcmod.info",
             api_version: None,
@@ -2807,6 +3254,11 @@ fn parse_legacy_forge_requirement(requirement: &str) -> Option<Dep> {
         mandatory: true,
         relation: "depends",
         feature: None,
+        lifecycle: None,
+        ordering: None,
+        join_classpath: None,
+        condition: None,
+        side: None,
     })
 }
 
@@ -2853,7 +3305,9 @@ fn parse_forge_toml(text: &str, loader: Loader) -> Result<Vec<Artifact>, ParseEr
             loader,
             side: None,
             deps,
+            dependency_expressions: Vec::new(),
             provides,
+            provided_versions: BTreeMap::new(),
             is_plugin: false,
             manifest_name,
             api_version: None,
@@ -2903,9 +3357,10 @@ fn enrich_forge_toml_extras<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     artifacts: &mut [Artifact],
     toml_root: &toml::Value,
-) {
+) -> Vec<String> {
+    let mut gaps = Vec::new();
     if artifacts.is_empty() {
-        return;
+        return gaps;
     }
 
     let default_owner = artifacts.first().map(|a| a.id.clone());
@@ -2941,125 +3396,50 @@ fn enrich_forge_toml_extras<R: Read + Seek>(
         .unwrap_or_default();
 
     if at_entries.is_empty() {
-        return;
+        return gaps;
     }
     let Some(primary) = artifacts.first_mut() else {
-        return;
+        return gaps;
     };
     for file in at_entries {
-        let Some(text) = read_entry(archive, &file) else {
-            continue;
+        let fallback = (!file.contains('/')).then(|| format!("META-INF/{file}"));
+        let read = bounded_zip::read_zip_text_bounded(archive, &file, cap_for(&file));
+        let text = match read {
+            Ok(Some(text)) => text,
+            Ok(None) if fallback.is_some() => {
+                let Some(fallback) = fallback.as_deref() else {
+                    unreachable!("guard guarantees a fallback path")
+                };
+                match bounded_zip::read_zip_text_bounded(archive, fallback, cap_for(fallback)) {
+                    Ok(Some(text)) => text,
+                    Ok(None) => {
+                        gaps.push(format!(
+                            "loader-declared access transformer {file} is missing"
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        gaps.push(error.reason());
+                        continue;
+                    }
+                }
+            }
+            Ok(None) => {
+                gaps.push(format!(
+                    "loader-declared access transformer {file} is missing"
+                ));
+                continue;
+            }
+            Err(error) => {
+                gaps.push(error.reason());
+                continue;
+            }
         };
         for d in access::parse_access_transformer(&text) {
             primary.access_transforms.push(directive_to_transform(&d));
         }
     }
-}
-
-fn parse_plugin_yml(
-    text: &str,
-    loader: Loader,
-    manifest_name: &'static str,
-) -> Result<Artifact, ParseErr> {
-    let v: serde_yaml::Value = serde_yaml::from_str(text)
-        .map_err(|e| ParseErr::descriptor(manifest_name, e.to_string()))?;
-    let id = v
-        .get("name")
-        .and_then(|x| x.as_str())
-        .unwrap_or("?")
-        .to_string();
-    let version = yaml_scalar(v.get("version")).unwrap_or_else(|| "0".to_string());
-    let api_version = yaml_scalar(v.get("api-version"));
-    let load_order = v
-        .get("load")
-        .and_then(|x| x.as_str())
-        .and_then(load_order_static);
-    let mut deps = Vec::new();
-    for (key, mandatory, relation) in [
-        ("depend", true, "depends"),
-        ("softdepend", false, "suggests"),
-        ("loadbefore", true, "loadbefore"),
-    ] {
-        if let Some(arr) = v.get(key).and_then(|x| x.as_sequence()) {
-            for d in arr {
-                if let Some(s) = d.as_str() {
-                    deps.push(Dep {
-                        id: s.to_string(),
-                        range: "*".into(),
-                        mandatory,
-                        relation,
-                        feature: None,
-                    });
-                }
-            }
-        }
-    }
-    if let Some(paper_deps) = v.get("dependencies") {
-        push_paper_plugin_deps(&mut deps, paper_deps);
-    }
-    Ok(Artifact {
-        id,
-        version,
-        loader,
-        side: Some("server"),
-        deps,
-        provides: Vec::new(),
-        is_plugin: true,
-        manifest_name,
-        api_version,
-        load_order,
-        bundled: Vec::new(),
-        entrypoints: yaml_scalar(v.get("main"))
-            .map(|class| {
-                vec![Entrypoint {
-                    phase: "main".to_string(),
-                    class,
-                    entrypoint_type: "main".to_string(),
-                    events: Vec::new(),
-                    priority: 0,
-                }]
-            })
-            .unwrap_or_default(),
-        access_widener_files: Vec::new(),
-        access_transforms: Vec::new(),
-        coremods: Vec::new(),
-        mixin_configs: Vec::new(),
-        name: yaml_scalar(v.get("name")),
-        description: yaml_scalar(v.get("description")),
-        authors: yaml_people(v.get("authors").or_else(|| v.get("author"))),
-        license: yaml_scalar(v.get("license")),
-        icon: None,
-        update_json: yaml_scalar(v.get("website")),
-        data_signals: DataSignals::default(),
-        bytecode: BytecodeSignals::default(),
-        secondary: None,
-        package_roots: Vec::new(),
-    })
-}
-
-fn push_paper_plugin_deps(deps: &mut Vec<Dep>, root: &serde_yaml::Value) {
-    let Some(server) = root.get("server").and_then(|x| x.as_mapping()) else {
-        return;
-    };
-    for (key, mandatory, relation) in [
-        ("required", true, "depends"),
-        ("optional", false, "suggests"),
-        ("join-classpath", true, "depends"),
-    ] {
-        if let Some(arr) = server.get(key).and_then(|x| x.as_sequence()) {
-            for d in arr {
-                if let Some(s) = d.as_str() {
-                    deps.push(Dep {
-                        id: s.to_string(),
-                        range: "*".into(),
-                        mandatory,
-                        relation,
-                        feature: None,
-                    });
-                }
-            }
-        }
-    }
+    gaps
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────
@@ -3081,16 +3461,6 @@ fn json_range(v: &serde_json::Value) -> String {
             }
         }
         _ => "*".into(),
-    }
-}
-
-/// YAML versions are often unquoted numbers; coerce to string.
-fn yaml_scalar(v: Option<&serde_yaml::Value>) -> Option<String> {
-    match v? {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
-        _ => None,
     }
 }
 
@@ -3154,17 +3524,6 @@ fn json_paths(v: Option<&serde_json::Value>) -> Vec<String> {
                         .map(str::to_string)
                 })
             })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn yaml_people(v: Option<&serde_yaml::Value>) -> Vec<String> {
-    match v {
-        Some(serde_yaml::Value::String(s)) => split_people(s),
-        Some(serde_yaml::Value::Sequence(values)) => values
-            .iter()
-            .filter_map(|x| x.as_str().map(str::to_string))
             .collect(),
         _ => Vec::new(),
     }
@@ -3750,11 +4109,35 @@ mod fabric_json_compat_tests {
         assert!(parse_fabric("{\"schemaVersion\":1,\"id\":}").is_err());
         assert!(parse_fabric("{not valid json").is_err());
     }
+
+    #[test]
+    fn fabric_soft_conflicts_are_preserved_separately_from_breaks() {
+        let artifact = parse_fabric(
+            r#"{"schemaVersion":1,"id":"a","version":"1.0.0",
+                 "conflicts":{"b":">=2"},"breaks":{"c":"<1"}}"#,
+        )
+        .expect("fabric metadata");
+        assert!(
+            artifact
+                .deps
+                .iter()
+                .any(|dependency| dependency.id == "b" && dependency.relation == "conflicts")
+        );
+        assert!(
+            artifact
+                .deps
+                .iter()
+                .any(|dependency| dependency.id == "c" && dependency.relation == "breaks")
+        );
+    }
 }
 
 #[cfg(test)]
 mod jar_version_tests {
-    use super::{MetadataLevel, bounded_zip, parse_jar, parse_jar_for_instance};
+    use super::{
+        MetadataLevel, bounded_zip, parse_jar, parse_jar_for_instance, parse_plugin_yml,
+        parse_quilt,
+    };
     use intermed_doctor_core::Loader;
     use std::io::Write;
 
@@ -3778,6 +4161,116 @@ mod jar_version_tests {
         }
         zip.finish().unwrap();
         path
+    }
+
+    #[test]
+    fn quilt_optional_unless_complex_versions_and_server_side_are_preserved() {
+        let artifact = parse_quilt(
+            r#"{
+              "quilt_loader": {
+                "id": "quilt_case",
+                "version": "1.0.0",
+                "depends": [
+                  {"id":"optional_api","optional":true,"versions":">=1"},
+                  {"id":"conditional_api","unless":"alternative","versions":{"all":[">=2","<3"]}},
+                  {"id":"required_a","versions":">=1"},
+                  {"id":"required_b","versions":"<2"},
+                  [{"id":"choice_a"},{"id":"choice_b"}]
+                ]
+              },
+              "environment": "dedicated_server"
+            }"#,
+        )
+        .expect("Quilt descriptor");
+        assert_eq!(artifact.side, Some("server"));
+        let optional = artifact
+            .deps
+            .iter()
+            .find(|dep| dep.id == "optional_api")
+            .unwrap();
+        assert!(!optional.mandatory);
+        let conditional = artifact
+            .deps
+            .iter()
+            .find(|dep| dep.id == "conditional_api")
+            .unwrap();
+        assert!(!conditional.mandatory);
+        assert!(
+            conditional
+                .condition
+                .as_deref()
+                .is_some_and(|value| value.contains("unless"))
+        );
+        assert!(conditional.range.contains("\"all\""));
+        assert!(
+            artifact
+                .deps
+                .iter()
+                .find(|dep| dep.id == "required_a")
+                .unwrap()
+                .mandatory
+        );
+        assert!(
+            !artifact
+                .deps
+                .iter()
+                .find(|dep| dep.id == "choice_a")
+                .unwrap()
+                .mandatory
+        );
+    }
+
+    #[test]
+    fn modern_paper_dependencies_and_legacy_provides_keep_their_semantics() {
+        let paper = parse_plugin_yml(
+            "name: ModernPaper\nversion: 1.0\ndependencies:\n  bootstrap:\n    RegistryPlugin:\n      load: BEFORE\n      required: true\n      join-classpath: false\n  server:\n    OptionalPlugin:\n      load: AFTER\n      required: false\n",
+            Loader::Paper,
+            "paper-plugin.yml",
+        )
+        .expect("Paper descriptor");
+        let required = paper
+            .deps
+            .iter()
+            .find(|dep| dep.id == "RegistryPlugin")
+            .unwrap();
+        assert!(required.mandatory);
+        assert_eq!(required.lifecycle.as_deref(), Some("bootstrap"));
+        assert_eq!(required.ordering.as_deref(), Some("before"));
+        assert_eq!(required.join_classpath, Some(false));
+        assert!(
+            !paper
+                .deps
+                .iter()
+                .find(|dep| dep.id == "OptionalPlugin")
+                .unwrap()
+                .mandatory
+        );
+
+        let legacy = parse_plugin_yml(
+            "name: LegacyPlugin\nversion: 1.0\nprovides: [VaultCompat]\nloadbefore: [WorldEdit]\n",
+            Loader::Bukkit,
+            "plugin.yml",
+        )
+        .expect("Bukkit descriptor");
+        assert_eq!(legacy.provides, vec!["VaultCompat"]);
+        assert!(
+            !legacy.deps[0].mandatory,
+            "loadbefore is ordering, not presence"
+        );
+    }
+
+    #[test]
+    fn bukkit_plugin_is_active_on_paper_but_paper_plugin_is_not_active_on_spigot() {
+        let bukkit = write_jar(&[("plugin.yml", "name: BukkitPlugin\nversion: 1.0\n")]);
+        let parsed = parse_jar(&bukkit, MetadataLevel::Basic, Some(Loader::Paper)).unwrap();
+        assert_eq!(parsed.identity_certainty, "confirmed");
+        assert_eq!(parsed.artifacts[0].id, "BukkitPlugin");
+
+        let paper = write_jar(&[("paper-plugin.yml", "name: PaperPlugin\nversion: 1.0\n")]);
+        let parsed = parse_jar(&paper, MetadataLevel::Basic, Some(Loader::Spigot)).unwrap();
+        assert_eq!(parsed.identity_certainty, "cross-loader-unresolved");
+        std::fs::remove_dir_all(bukkit.parent().unwrap()).ok();
+        std::fs::remove_dir_all(paper.parent().unwrap()).ok();
     }
 
     #[test]

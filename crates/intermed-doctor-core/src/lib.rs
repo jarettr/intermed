@@ -3,13 +3,15 @@
 //! The diagnosis pipeline and its contracts. Everything else plugs in here:
 //!
 //! ```text
-//!   Target ──▶ [Collectors] ──▶ FactStore ──▶ [Rules] ──▶ Findings ──▶ DoctorReport
+//!   Target ─▶ Collectors ─▶ Facts ─▶ Rules ─▶ Assessment
+//!          ─▶ Reconciliation ─▶ Triage ─▶ DoctorReport
 //! ```
 //!
 //! * [`Collector`] — observes a [`Target`], writes facts. One per layer.
 //! * [`Rule`] — reads facts, emits [`Finding`](intermed_evidence::Finding)s.
-//! * [`DiagnosticEngine`] — orchestrates the two and assembles a
-//!   [`DoctorReport`].
+//! * [`Reconciler`] — resolves cross-layer contradictions on canonical entities.
+//! * [`FindingPostProcessor`] — aggregates and prioritizes assessed findings.
+//! * [`DiagnosticEngine`] — validates and orchestrates the complete pipeline.
 //!
 //! The engine depends on neither Minecraft nor logs nor any concrete layer; the
 //! composition root (`intermed-cli`) registers the collectors and rules. This is
@@ -18,10 +20,12 @@
 
 pub mod assessment;
 pub mod bootstrap_bridge;
+pub mod bounded_text;
 pub mod bounded_zip;
 pub mod coherence;
 pub mod collector;
 pub mod engine;
+pub mod environment;
 pub mod fabric_json;
 pub mod instance_layout;
 pub mod io_util;
@@ -32,6 +36,7 @@ pub mod legacy_forge;
 pub mod modpack;
 pub mod modpack_manifest;
 pub mod profile;
+pub mod reconciler;
 pub mod report;
 pub mod rule;
 pub mod scan_filter;
@@ -39,13 +44,16 @@ pub mod scope;
 pub mod settings;
 pub mod suppression;
 pub mod target;
+pub mod triage;
 
 pub use collector::{
     CollectCtx, Collector, CollectorOutcome, CollectorStatus, DeferredCollector, GatedCollector,
 };
-pub use engine::{DiagnosticEngine, DiagnosticRun, EngineBuilder};
+pub use engine::{DiagnosticEngine, DiagnosticRun, EngineBuilder, EngineConfigError};
 pub use instance_layout::{
-    LayoutKind, ResolvedLayout, find_mods_directory, resolve_game_root, resolve_layout,
+    InstanceResolutionCertainty, InstanceTypeResolution, LauncherKind, LayoutKind, LayoutTopology,
+    ModsDirectoryResolution, PathResolutionCertainty, ResolvedLayout, find_mods_directory,
+    find_mods_directory_resolution, resolve_game_root, resolve_instance_type, resolve_layout,
 };
 pub use io_util::write_atomic;
 pub use jar_cache::{
@@ -57,6 +65,9 @@ pub use layer::Layer;
 pub use modpack::{ModpackError, ModpackMount, materialize_modpack_archive};
 pub use modpack_manifest::{ModpackIntegrityRule, ModpackManifestCollector};
 pub use profile::{DiagnosticProfile, PROFILE_SCHEMA, PhaseTiming};
+pub use reconciler::{
+    CrossLayerReconciler, Reconciler, ReconciliationError, ReconciliationOutcome,
+};
 pub use report::{
     DoctorReport, OperationalError, REPORT_SCHEMA, REPORT_SCHEMA_V1, REPORT_SCHEMA_V2,
 };
@@ -72,8 +83,10 @@ pub use settings::{
     SecuritySettings, default_settings,
 };
 pub use target::{
-    Environment, InstanceType, Loader, Side, Target, TargetKind, detect_target, target_from_layout,
+    ArtifactRoot, ArtifactRootRole, Environment, InstanceType, Loader, Side, Target, TargetKind,
+    detect_target, portable_artifact_locator, target_from_layout,
 };
+pub use triage::{DefaultTriage, FindingPostProcessor, TriageOutcome};
 
 // Re-export the foundational crates so collector/rule crates can depend on just
 // `intermed-doctor-core` and still speak facts/findings.

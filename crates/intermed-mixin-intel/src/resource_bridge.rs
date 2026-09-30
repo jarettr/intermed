@@ -157,6 +157,28 @@ pub struct RuntimeResourceMutation {
     pub effect: String,
     /// 0–100 confidence this is a genuine runtime mutation of that subsystem.
     pub confidence: u8,
+    pub evidence_kind: ResourceEffectEvidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceEffectEvidence {
+    MutationProven,
+    MutationPossible,
+    HookOnly,
+}
+
+impl ResourceEffectEvidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MutationProven => "mutation-proven",
+            Self::MutationPossible => "mutation-possible",
+            Self::HookOnly => "hook-only",
+        }
+    }
+    pub fn is_mutation(self) -> bool {
+        !matches!(self, Self::HookOnly)
+    }
 }
 
 /// Detect every site that hooks a Minecraft data-loader, as a runtime-resource
@@ -168,8 +190,49 @@ pub fn detect_resource_mutations(sites: &[ApplicationSite]) -> Vec<RuntimeResour
             continue;
         };
         let (effect, base) = mutation_strength(&s.operation);
+        let semantic = match s.operation.as_str() {
+            "overwrite"
+            | "redirect"
+            | "modify-return-value"
+            | "modify-expression-value"
+            | "modify-arg"
+            | "modify-args"
+            | "modify-variable" => ResourceEffectEvidence::MutationProven,
+            "wrap-operation"
+                if s.handler_effect.as_ref().is_some_and(|effect| {
+                    effect.bytecode_observed
+                        && (effect.original_call_count != 1
+                            || effect.modifies_return
+                            || effect.writes_target_state)
+                }) =>
+            {
+                ResourceEffectEvidence::MutationProven
+            }
+            "wrap-operation"
+                if s.handler_effect
+                    .as_ref()
+                    .is_none_or(|effect| !effect.bytecode_observed) =>
+            {
+                ResourceEffectEvidence::MutationPossible
+            }
+            "inject"
+                if s.handler_effect.as_ref().is_some_and(|effect| {
+                    effect.bytecode_observed
+                        && (effect.cancels
+                            || effect.sets_return_value
+                            || effect.modifies_return
+                            || effect.writes_target_state)
+                }) =>
+            {
+                ResourceEffectEvidence::MutationProven
+            }
+            "inject" => ResourceEffectEvidence::HookOnly,
+            _ if s.handler_effect.is_some() => ResourceEffectEvidence::HookOnly,
+            _ => ResourceEffectEvidence::MutationPossible,
+        };
         // A site we couldn't even resolve gets a confidence haircut.
-        let confidence = if s.confidence < 60 {
+        let evidence_precision = s.precision.verification.min(s.precision.effect);
+        let confidence = if evidence_precision < 60 {
             base.saturating_sub(15)
         } else {
             base
@@ -184,6 +247,7 @@ pub fn detect_resource_mutations(sites: &[ApplicationSite]) -> Vec<RuntimeResour
             operation: s.operation.clone(),
             effect: effect.to_string(),
             confidence,
+            evidence_kind: semantic,
         });
     }
     out.sort_by(|a, b| a.site_id.cmp(&b.site_id));
@@ -200,6 +264,8 @@ mod tests {
         ApplicationSite {
             site_id: format!("mod::M::h->{target_class}#apply@HEAD"),
             mod_id: "mod".into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: "mod.jar".into(),
             config_path: "m.json".into(),
             mixin_class: "mod.M".into(),
@@ -223,6 +289,7 @@ mod tests {
             },
             target_resolution: crate::target_res::TargetResolution::Unchecked,
             selector_verification: crate::selector::SelectorVerification::Unchecked,
+            selector_offsets: Vec::new(),
             signature_check: crate::signature::SignatureCheck::Unchecked,
             local_capture_status: crate::locals::LocalCaptureStatus::NoLocalCapture,
             side: crate::model::Side::Both,
@@ -232,8 +299,15 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence: 100,
             imprecision_reasons: Vec::new(),
+            precision: crate::site::SitePrecision {
+                identity: 100,
+                activation: 100,
+                verification: 100,
+                effect: 100,
+            },
         }
     }
 
@@ -290,6 +364,16 @@ mod tests {
         let m = detect_resource_mutations(&[site("net.minecraft.loot.LootManager", "inject")]);
         assert_eq!(m[0].confidence, 55);
         assert_eq!(m[0].effect, "hooks-loader");
+        assert_eq!(m[0].evidence_kind, ResourceEffectEvidence::HookOnly);
+    }
+
+    #[test]
+    fn wrap_without_decoded_bytecode_is_possible_not_proven_mutation() {
+        let m = detect_resource_mutations(&[site(
+            "net.minecraft.recipe.RecipeManager",
+            "wrap-operation",
+        )]);
+        assert_eq!(m[0].evidence_kind, ResourceEffectEvidence::MutationPossible);
     }
 
     #[test]

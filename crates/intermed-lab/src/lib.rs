@@ -62,14 +62,15 @@ pub use campaign_report::{
 };
 pub use classify::{FailureCategory, FailureFamily, classify_log, classify_log_all};
 pub use corpus::{
-    CORPUS_CANDIDATES_SCHEMA, CORPUS_LOCK_SCHEMA, CORPUS_LOCK_SCHEMA_V1, CandidateMod,
-    CandidateProvider, CorpusCandidates, CorpusEnvironment, CorpusLock, FileCandidateProvider,
-    LockedMod, discover_lock, read_lock,
+    CORPUS_CANDIDATES_SCHEMA, CORPUS_LOCK_SCHEMA, CORPUS_LOCK_SCHEMA_V1, CORPUS_LOCK_SCHEMA_V2,
+    CandidateMod, CandidateProvider, CorpusCandidates, CorpusEnvironment, CorpusLock,
+    FileCandidateProvider, LockedMod, VerificationCompleteness, discover_lock, read_lock,
 };
 pub use eval::{
     CategoryAccuracy, EVAL_MANIFEST_SCHEMA, FindingAccuracy, FindingLevelAccuracy,
-    RULE_ACCURACY_SCHEMA, RuleAccuracy, RuleAccuracyReport, case_from_observation_files, evaluate,
-    evaluate_manifest, evaluate_observation_pair, evaluate_pair,
+    MilestoneRequirement, RULE_ACCURACY_SCHEMA, RuleAccuracy, RuleAccuracyReport,
+    case_from_observation_files, cases_from_files, evaluate, evaluate_manifest,
+    evaluate_observation_pair, evaluate_pair,
 };
 pub use execution::{
     CommandExecutionBackend, EnvironmentRunner, EnvironmentSpec, ExecutionLimits, ExecutionPlan,
@@ -78,16 +79,16 @@ pub use execution::{
 };
 pub use modrinth::lock_modrinth_manifest;
 pub use observation::{
-    ExecutionCoverage, ExecutionObservation, IncidentObservation, OBSERVATION_SCHEMA,
-    ObservationStatus, RuntimeMilestone, observe_smoke,
+    EvidenceState, ExecutionCoverage, ExecutionObservation, IncidentObservation,
+    OBSERVATION_SCHEMA, ObservationStatus, RuntimeMilestone, observe_smoke,
 };
 pub use report::{
     COMPAT_MATRIX_SCHEMA, CompatibilityMatrix, MatrixCell, render_html, write_report,
 };
 pub use run::{
-    CapturedLogRunner, DEFAULT_EXCERPT_MAX, LAB_RUN_SCHEMA, LabRun, LabRunOptions, RawSmokeOutput,
-    SMOKE_OUTPUT_SCHEMA, SmokeResult, SmokeRunner, SmokeStatus, capture_log, classify_with_options,
-    read_run, run_lab, run_lab_with, run_with,
+    CapturedLogRunner, DEFAULT_EXCERPT_MAX, LAB_RUN_SCHEMA, LAB_RUN_SCHEMA_V1, LabRun,
+    LabRunOptions, RawSmokeOutput, SMOKE_OUTPUT_SCHEMA, SmokeResult, SmokeRunner, SmokeStatus,
+    capture_log, classify_with_options, read_run, run_lab, run_lab_with, run_with,
 };
 pub use store::{
     ArtifactStore, MaterializationRecord, STORE_MANIFEST_SCHEMA, TARGET_VERIFICATION_SCHEMA,

@@ -49,6 +49,9 @@ pub fn site_trace(site: &ApplicationSite) -> PrecisionTrace {
             not_checked.push("selector (target bytecode unavailable)")
         }
         SelectorVerification::Unsupported => not_checked.push("selector (unsupported @At kind)"),
+        SelectorVerification::MatchedPartial => {
+            not_checked.push("selector constraints (slice/args/shift only partially verified)")
+        }
         _ => checked.push("selector"),
     }
 
@@ -67,6 +70,9 @@ pub fn site_trace(site: &ApplicationSite) -> PrecisionTrace {
         LocalCaptureStatus::Unchecked => not_checked.push("local-capture (frame unavailable)"),
         LocalCaptureStatus::FrameUnavailable => {
             not_checked.push("local-capture (no LVT/StackMapTable)")
+        }
+        LocalCaptureStatus::PartialAcrossInjectionPoints => {
+            not_checked.push("local-capture (selected offsets have partial/mixed frame evidence)")
         }
         _ => checked.push("local-capture"),
     }
@@ -92,6 +98,8 @@ mod tests {
         ApplicationSite {
             site_id: "s".into(),
             mod_id: "m".into(),
+            artifact_id: "sha256:test".into(),
+            identity_certainty: "confirmed".into(),
             archive: "m.jar".into(),
             config_path: "m.json".into(),
             mixin_class: "m.M".into(),
@@ -115,7 +123,8 @@ mod tests {
             },
             target_resolution: TargetResolution::ExactMatch,
             selector_verification: SelectorVerification::MatchesByConstruction,
-            signature_check: SignatureCheck::Valid,
+            selector_offsets: vec![0],
+            signature_check: SignatureCheck::CompatibleShape,
             local_capture_status: LocalCaptureStatus::NoLocalCapture,
             side: crate::model::Side::Both,
             activation: crate::model::ActivationStatus::ActiveAssumed,
@@ -124,8 +133,10 @@ mod tests {
             expect: None,
             allow: None,
             cancellable: false,
+            handler_effect: None,
             confidence: 100,
             imprecision_reasons: Vec::new(),
+            precision: Default::default(),
         }
     }
 

@@ -44,8 +44,8 @@ it looks.
 
 ### Now — Hardening · *currency: correctness & hygiene*
 
-Goal: ship a 0.1.x worth trusting, and quietly start the clock on the one thing
-that compounds with time (data).
+Goal: harden the 0.2.x alpha line into a foundation worth trusting, and quietly
+keep the clock running on the one thing that compounds with time (data).
 
 - [x] **Keep correctness parity covered.** (The three latent parser panics from the
   bug hunt are already fixed and fuzz-guarded.) Nullable join-key behavior is
@@ -76,8 +76,9 @@ that compounds with time (data).
 - [x] **Begin consented telemetry**: per-run outcome export/HTTPS delivery is
   disabled by default; logs require a second explicit flag and are bounded and
   redacted. No default project endpoint or stable user/install id exists.
-- [x] **Release 0.1.x publicly.** Release archives, checksums, man pages,
-  and completions are available from the public releases page.
+- [x] **Release the alpha line publicly.** Release archives, checksums, man
+  pages, and completions through 0.2.0-alpha are available from the public
+  releases page.
 
 ### Near — Trust, product, and a gradual engine restructure · *currency: usefulness*
 

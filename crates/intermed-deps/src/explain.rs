@@ -16,6 +16,7 @@ use intermed_doctor_core::facts::FactStore;
 use serde::{Deserialize, Serialize};
 
 use crate::effective::EffectiveModel;
+use crate::relation::DependencyRelation;
 
 /// How one dependency edge was established.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,6 +34,7 @@ pub struct DepEdge {
     pub kind: EdgeKind,
     /// Human label: a version range for declared edges, the `via` for implicit ones.
     pub detail: String,
+    pub relation: DependencyRelation,
     /// True when this edge expresses a hard requirement (mandatory / unconditioned).
     pub required: bool,
 }
@@ -42,8 +44,11 @@ impl DepEdge {
     pub fn render(&self) -> String {
         match self.kind {
             EdgeKind::Declared => format!(
-                "{} -> declared dependency -> {} {}",
-                self.from, self.to, self.detail
+                "{} -> {} -> {} {}",
+                self.from,
+                self.relation.canonical_token(),
+                self.to,
+                self.detail
             ),
             EdgeKind::Implicit => format!(
                 "{} -> {} -> namespace {} -> provider {}",
@@ -71,7 +76,8 @@ impl DependencyIndex {
                 to: d.to.clone(),
                 kind: EdgeKind::Declared,
                 detail: d.range.clone(),
-                required: d.mandatory,
+                relation: d.relation.clone(),
+                required: d.mandatory && d.relation.requires_presence(),
             });
         }
         let mut present = model.providers;
@@ -92,6 +98,7 @@ impl DependencyIndex {
                 to,
                 kind: EdgeKind::Implicit,
                 detail: format!("{} {}", i.via, i.provider_ns),
+                relation: DependencyRelation::Requires,
                 required: i.required,
             });
         }
@@ -129,7 +136,7 @@ impl WhyReport {
             );
         }
         let mut lines = vec![format!(
-            "{} is {} — required by:",
+            "{} is {} — related through:",
             self.id,
             if self.present { "installed" } else { "ABSENT" }
         )];
@@ -198,7 +205,11 @@ pub fn path(store: &FactStore, from: &str, to: &str) -> Option<Vec<DepEdge>> {
     let index = DependencyIndex::from_store(store);
     // Adjacency: from → outgoing edges.
     let mut adj: BTreeMap<&str, Vec<&DepEdge>> = BTreeMap::new();
-    for e in &index.edges {
+    for e in index
+        .edges
+        .iter()
+        .filter(|edge| edge.kind == EdgeKind::Implicit || edge.relation.requires_presence())
+    {
         adj.entry(e.from.as_str()).or_default().push(e);
     }
     // BFS, tracking the edge used to reach each node.

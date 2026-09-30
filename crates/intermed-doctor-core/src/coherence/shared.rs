@@ -23,6 +23,66 @@ pub(super) fn unresolved_mod_entity(mod_id: &str) -> EntityRef {
         ordinal: 0,
     })
 }
+
+pub(super) fn fact_subject_entity(
+    fact: &Fact,
+    schema: &intermed_facts::schema_contract::FactSchema,
+) -> Option<EntityRef> {
+    use intermed_facts::schema_contract::SubjectEntity;
+
+    let subject_entity = schema.kind(&fact.kind)?.subject_entity;
+    Some(match subject_entity {
+        SubjectEntity::Artifact => EntityRef::Artifact(
+            fact.attr("artifact_id")
+                .or_else(|| {
+                    fact.subject
+                        .starts_with("sha256:")
+                        .then_some(fact.subject.as_str())
+                })
+                .and_then(parse_artifact_id)
+                .or_else(|| fact.attr("sha256").and_then(ArtifactId::from_sha256))
+                .or_else(|| {
+                    (fact.attr("algorithm") == Some("sha256"))
+                        .then(|| fact.attr("hex"))
+                        .flatten()
+                        .and_then(ArtifactId::from_sha256)
+                })
+                .unwrap_or_else(|| ArtifactId::unresolved(&fact.subject)),
+        ),
+        SubjectEntity::ModInstance => unresolved_mod_entity(&fact.subject),
+        SubjectEntity::Dependency => EntityRef::Dependency(DependencyEdgeId::new(format!(
+            "fact:{}:{}",
+            fact.id.0, fact.subject
+        ))),
+        SubjectEntity::Resource => {
+            EntityRef::Resource(ResourceKey::new(fact.attr("path").unwrap_or(&fact.subject)))
+        }
+        SubjectEntity::RuntimeEvent => {
+            EntityRef::RuntimeEvent(RuntimeOccurrenceId::new(&fact.subject))
+        }
+        SubjectEntity::Throwable => EntityRef::Throwable(ThrowableId::new(
+            fact.attr("throwable_id").unwrap_or(&fact.subject),
+        )),
+        SubjectEntity::Environment => EntityRef::Environment(EnvironmentId::new(
+            if fact.kind == kind::ANALYSIS_ENVIRONMENT {
+                "analysis-environment"
+            } else {
+                "target-environment"
+            },
+        )),
+        SubjectEntity::JavaRuntime => EntityRef::JavaRuntime(JavaRuntimeId::new(
+            fact.attr("version").unwrap_or("target-java-runtime"),
+        )),
+        SubjectEntity::Unknown => return None,
+    })
+}
+
+pub(super) fn parse_artifact_id(value: &str) -> Option<ArtifactId> {
+    value
+        .strip_prefix("sha256:")
+        .and_then(ArtifactId::from_sha256)
+        .or_else(|| ArtifactId::from_sha256(value))
+}
 pub(super) fn artifact_for(
     locator: &str,
     by_locator: &mut BTreeMap<String, ArtifactId>,

@@ -581,6 +581,10 @@ pub fn recommend_for_apply_failures(
                  references will not resolve to the runtime (intermediary) namespace. Ensure the \
                  mixin annotation processor runs and the refmap is bundled.",
             ),
+            K::RefmapUnavailable => (
+                "Repair the declared refmap",
+                "The config declares a refmap, but the entry is missing, unreadable, oversized, or invalid. Rebuild the artifact and verify the declared path and JSON payload.",
+            ),
             K::RemapFalseSuspicious => (
                 "Review remap = false on a Minecraft target",
                 "remap = false uses the reference unmapped; on a Minecraft target it only works if \
@@ -1048,7 +1052,9 @@ mod tests {
     fn sample_class(ops: Vec<MixinOperation>, hot: bool) -> MixinClassRecord {
         MixinClassRecord {
             archive: "a.jar".into(),
+            artifact_id: "sha256:test".into(),
             mod_id: "alpha".into(),
+            identity_certainty: "confirmed".into(),
             config: "m.json".into(),
             class_name: "alpha.Mixin".into(),
             class_path: "a.class".into(),
@@ -1080,11 +1086,13 @@ mod tests {
             target: "T".into(),
             method: "tick()V".into(),
             handler_method: "handler".into(),
+            handler_descriptor: "()V".into(),
             operation: op,
             effect_kinds: vec![EffectiveEffectKind::FullMethodReplacement],
             effect_description: "effect".into(),
             handler_effect: Some(HandlerEffect {
                 handler_method: "handler".into(),
+                bytecode_observed: true,
                 handler_local_store: false,
                 modifies_return: false,
                 early_return: true,
@@ -1273,6 +1281,7 @@ mod tests {
                 meta: Default::default(),
                 at_ordinal: None,
                 at_target_member: String::new(),
+                at_constraints: Default::default(),
             },
             ResolvedInjectionPoint {
                 target: "T".into(),
@@ -1294,6 +1303,7 @@ mod tests {
                 meta: Default::default(),
                 at_ordinal: None,
                 at_target_member: String::new(),
+                at_constraints: Default::default(),
             },
         ];
         let counts = redirect_counts_by_method(&[class]);

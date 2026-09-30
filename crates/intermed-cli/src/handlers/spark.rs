@@ -27,7 +27,7 @@ fn print_spark_import(import: &intermed_spark_bridge::SparkImport) {
     println!("Import failures: {}", import.failures.len());
     for (i, report) in import.reports.iter().enumerate() {
         println!();
-        println!("Report #{i}");
+        println!("Report #{i}: {}", report.source_locator);
         println!("  tick spikes: {}", report.tick_spikes_ms.len());
         println!("  gc pauses: {}", report.gc_pauses_ms.len());
         println!("  hot methods: {}", report.hot_methods.len());

@@ -5,13 +5,15 @@
 //! fewer facts rather than a hard failure.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 use std::{fs::File, io::Read};
 
 use intermed_doctor_core::facts::kind;
 use intermed_doctor_core::{
     CollectCtx, Collector, CollectorOutcome, CollectorScope, CompletenessModel, InstanceType,
-    Layer, LayoutKind, Loader, Side, Target, TargetKind, TargetRegion,
+    Layer, LayoutKind, Loader, PathResolutionCertainty, Side, Target, TargetKind, TargetRegion,
+    environment::EnvironmentEvidenceSource, resolve_layout,
 };
 
 pub struct EnvironmentCollector;
@@ -24,11 +26,16 @@ impl Collector for EnvironmentCollector {
         Layer::TargetDetection
     }
     fn scope(&self) -> CollectorScope {
-        CollectorScope::new(CompletenessModel::AllOrNothing)
+        // Loader, Minecraft version, runtime Java, launcher and side are
+        // independent evidence fields; one missing field must not erase the
+        // fields that were established.
+        CollectorScope::new(CompletenessModel::BoundedPartial)
             .produces([
                 kind::ENVIRONMENT,
+                kind::ANALYSIS_ENVIRONMENT,
                 kind::JAVA_RUNTIME,
                 kind::PROVIDED_DEPENDENCY,
+                kind::SCAN_TRUNCATED,
             ])
             .regions([TargetRegion::Manifest])
     }
@@ -40,21 +47,25 @@ impl Collector for EnvironmentCollector {
         let mut emitted = 0;
         let surface = &ctx.target.path;
         let game_root = ctx.target.game_root.as_deref().unwrap_or(surface.as_path());
+        let resolved_layout = surface.is_dir().then(|| resolve_layout(surface));
 
         let layout = ctx.target.layout;
-        let instance_type = ctx
-            .target
-            .instance_type
-            .or_else(|| Some(detect_instance_type_fallback(ctx.target)));
+        let declared_instance_type = ctx.target.instance_type;
+        let instance_type =
+            declared_instance_type.or_else(|| Some(detect_instance_type_fallback(ctx.target)));
 
         let (loader_info, loader_source) = ctx
             .settings
             .pack_manifest
             .as_deref()
             .and_then(loader_from_manifest_locator)
-            .map(|info| (info, "explicit-pack-manifest"))
+            .map(|info| (info, EnvironmentEvidenceSource::ExplicitPackManifest))
             .unwrap_or_else(|| detect_loader_with_source(game_root, surface, ctx.target));
-        let host_launcher = detect_host_launcher(surface, layout);
+        let host_launcher = resolved_layout
+            .as_ref()
+            .and_then(|resolved| resolved.launcher)
+            .map(|launcher| launcher.as_str().to_string())
+            .or_else(|| detect_host_launcher(surface, layout));
         let runtime_evidence = detect_runtime_environment(surface, game_root);
         let explicit_mc = ctx
             .settings
@@ -77,7 +88,7 @@ impl Collector for EnvironmentCollector {
 
         if let Some(l) = loader_info.loader {
             b = b.attr("loader", l.as_str());
-            b = b.attr("loader_source", loader_source);
+            b = b.attr("loader_source", loader_source.as_str());
         }
         if let Some(component) = &loader_info.component {
             b = b.attr("launcher", component.as_str());
@@ -87,18 +98,51 @@ impl Collector for EnvironmentCollector {
         }
         if let Some(it) = instance_type {
             b = b.attr("instance_type", it.as_str());
-            b = b.attr("side", it.to_side().as_str());
+            if let Some(side) = it.to_side() {
+                b = b.attr("side", side.as_str()).attr(
+                    "side_source",
+                    if resolved_layout.is_some() {
+                        EnvironmentEvidenceSource::FilesystemHeuristic.as_str()
+                    } else {
+                        EnvironmentEvidenceSource::InstanceManifest.as_str()
+                    },
+                );
+            }
+        }
+        if let Some(resolved) = &resolved_layout {
+            b = b
+                .attr("layout_topology", resolved.topology.as_str())
+                .attr(
+                    "instance_type_certainty",
+                    match resolved.instance_resolution.certainty {
+                        intermed_doctor_core::InstanceResolutionCertainty::Confirmed => "confirmed",
+                        intermed_doctor_core::InstanceResolutionCertainty::Inferred => "inferred",
+                        intermed_doctor_core::InstanceResolutionCertainty::Conflict => "conflict",
+                        intermed_doctor_core::InstanceResolutionCertainty::Unknown => "unknown",
+                    },
+                )
+                .attr("instance_type_reason", resolved.instance_resolution.reason)
+                .attr(
+                    "server_markers_present",
+                    resolved.instance_resolution.server_markers,
+                )
+                .attr(
+                    "client_markers_present",
+                    resolved.instance_resolution.client_markers,
+                );
         }
         if let Some(m) = &mc {
             b = b.attr("mc_version", m.as_str());
             b = b.attr(
                 "mc_version_source",
                 if explicit_mc.is_some() {
-                    "explicit-pack-manifest"
+                    EnvironmentEvidenceSource::ExplicitPackManifest.as_str()
                 } else if instance_mc.is_some() {
-                    "instance-manifest"
+                    EnvironmentEvidenceSource::InstanceManifest.as_str()
+                } else if runtime_evidence.as_ref().is_some_and(|e| e.is_recent()) {
+                    EnvironmentEvidenceSource::RuntimeLog.as_str()
                 } else {
-                    "runtime-log"
+                    EnvironmentEvidenceSource::StaleRuntimeLog.as_str()
                 },
             );
         }
@@ -107,17 +151,96 @@ impl Collector for EnvironmentCollector {
         }
         if let Some(layout) = layout {
             b = b.attr("layout", layout.as_str());
+            let (certainty, reason) = match layout {
+                LayoutKind::BareModsDir => ("inferred", "jar-directory-heuristic"),
+                LayoutKind::Unknown => ("unknown", "no-authoritative-layout-marker"),
+                _ => ("confirmed", "recognized-layout-markers"),
+            };
+            b = b
+                .attr("target_kind_certainty", certainty)
+                .attr("target_kind_reason", reason);
+        }
+        if matches!(
+            loader_source,
+            EnvironmentEvidenceSource::RuntimeLog | EnvironmentEvidenceSource::StaleRuntimeLog
+        ) && let Some(observed_at) = runtime_evidence.as_ref().and_then(|e| e.observed_at)
+        {
+            b = b.attr("loader_observed_at", observed_at as i64);
+            b = b.attr(
+                "runtime_observation_freshness",
+                if runtime_evidence.as_ref().is_some_and(|e| e.is_recent()) {
+                    "recent"
+                } else {
+                    "stale-or-unknown"
+                },
+            );
         }
         b.emit();
         emitted += 1;
 
+        let manifest_gaps = direct_manifest_gaps(
+            surface,
+            game_root,
+            layout,
+            ctx.settings.pack_manifest.as_deref(),
+        );
+        for (path, reason) in &manifest_gaps {
+            ctx.store
+                .fact(self.id(), kind::SCAN_TRUNCATED)
+                .subject(path.display().to_string())
+                .attr("layer", "environment")
+                .attr("reason", reason.clone())
+                .attr("coverage_scope", "manifest")
+                .attr("relevant_entry", true)
+                .source(intermed_doctor_core::facts::SourceRef::file(
+                    path.display().to_string(),
+                ))
+                .confidence(1.0)
+                .emit();
+            emitted += 1;
+        }
+        let layout_ambiguous = resolved_layout.as_ref().is_some_and(|resolution| {
+            resolution.mods_certainty == PathResolutionCertainty::Ambiguous
+        });
+        if layout_ambiguous {
+            let candidates = resolved_layout
+                .as_ref()
+                .expect("checked above")
+                .mods_candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            ctx.store
+                .fact(self.id(), kind::SCAN_TRUNCATED)
+                .subject(surface.display().to_string())
+                .attr("layer", "environment")
+                .attr(
+                    "reason",
+                    format!("ambiguous mods directories; candidates: {candidates}"),
+                )
+                .attr("coverage_scope", "artifact-inventory")
+                .attr("relevant_entry", true)
+                .source(intermed_doctor_core::facts::SourceRef::file(
+                    surface.display().to_string(),
+                ))
+                .confidence(1.0)
+                .emit();
+            emitted += 1;
+        }
+
         emitted += emit_loader_provided_capabilities(ctx, &loader_info, surface);
 
         if let Some(java) = runtime_evidence.as_ref().and_then(|e| e.java.clone()) {
-            ctx.store
+            let mut java_fact = ctx
+                .store
                 .fact(self.id(), kind::JAVA_RUNTIME)
                 .attr("version", java.as_str())
-                .attr("source", "runtime-log")
+                .attr("source", "runtime-log");
+            if let Some(observed_at) = runtime_evidence.as_ref().and_then(|e| e.observed_at) {
+                java_fact = java_fact.attr("observed_at", observed_at as i64);
+            }
+            java_fact
                 .source(intermed_doctor_core::facts::SourceRef::file(
                     runtime_evidence
                         .as_ref()
@@ -141,7 +264,17 @@ impl Collector for EnvironmentCollector {
         analysis.emit();
         emitted += 1;
 
-        CollectorOutcome::active(emitted, "environment detected")
+        if manifest_gaps.is_empty() && !layout_ambiguous {
+            CollectorOutcome::active(emitted, "environment detected")
+        } else {
+            CollectorOutcome::incomplete(
+                emitted,
+                format!(
+                    "environment detected with {} coverage gap(s)",
+                    manifest_gaps.len() + usize::from(layout_ambiguous)
+                ),
+            )
+        }
     }
 }
 
@@ -212,9 +345,8 @@ struct LoaderInfo {
 fn detect_instance_type_fallback(target: &Target) -> InstanceType {
     target.instance_type.unwrap_or(match target.kind {
         TargetKind::Server => InstanceType::Server,
-        TargetKind::ModsDir => InstanceType::Integrated,
-        TargetKind::Instance => InstanceType::Integrated,
-        _ => InstanceType::Integrated,
+        TargetKind::ModsDir | TargetKind::Instance | TargetKind::Unknown => InstanceType::Unknown,
+        _ => InstanceType::Unknown,
     })
 }
 
@@ -226,20 +358,25 @@ fn detect_loader_with_source(
     root: &Path,
     surface: &Path,
     target: &Target,
-) -> (LoaderInfo, &'static str) {
+) -> (LoaderInfo, EnvironmentEvidenceSource) {
     if let Some(from_pack) = loader_from_pack_metadata(surface, root) {
         return from_pack;
     }
     if let Some(runtime) = detect_runtime_environment(surface, root)
         && let Some(loader) = runtime.loader
     {
+        let source = if runtime.is_recent() {
+            EnvironmentEvidenceSource::RuntimeLog
+        } else {
+            EnvironmentEvidenceSource::StaleRuntimeLog
+        };
         return (
             LoaderInfo {
                 loader: Some(loader),
                 component: runtime.loader_component,
                 version: runtime.loader_version,
             },
-            "runtime-log",
+            source,
         );
     }
 
@@ -256,7 +393,7 @@ fn detect_loader_with_source(
                 component: Some("fabric-loader".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     if check_roots("libraries/org/quiltmc") || check_roots("quilt-server-launch.jar") {
@@ -266,7 +403,7 @@ fn detect_loader_with_source(
                 component: Some("quilt-loader".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     if check_roots("libraries/net/neoforged") {
@@ -276,7 +413,7 @@ fn detect_loader_with_source(
                 component: Some("neoforge".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     if check_roots("libraries/net/minecraftforge") || dir_has_prefixed_jar(root, "forge-") {
@@ -286,7 +423,7 @@ fn detect_loader_with_source(
                 component: Some("forge".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     // Most specific fork first: a Paper server ships Spigot/Bukkit compatibility
@@ -302,7 +439,7 @@ fn detect_loader_with_source(
                 component: Some("paper".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     if check_roots("plugins") && (check_roots("spigot.yml") || dir_has_prefixed_jar(root, "spigot"))
@@ -313,7 +450,7 @@ fn detect_loader_with_source(
                 component: Some("spigot".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
     if check_roots("plugins") && check_roots("bukkit.yml") {
@@ -323,7 +460,7 @@ fn detect_loader_with_source(
                 component: Some("bukkit".to_string()),
                 version: None,
             },
-            "filesystem-heuristic",
+            EnvironmentEvidenceSource::FilesystemHeuristic,
         );
     }
 
@@ -334,7 +471,7 @@ fn detect_loader_with_source(
             component: None,
             version: None,
         },
-        "undecidable",
+        EnvironmentEvidenceSource::Undecidable,
     )
 }
 
@@ -351,32 +488,32 @@ pub(crate) fn loader_for_target(target: &Target) -> Option<Loader> {
 fn loader_from_pack_metadata(
     surface: &Path,
     game_root: &Path,
-) -> Option<(LoaderInfo, &'static str)> {
+) -> Option<(LoaderInfo, EnvironmentEvidenceSource)> {
     // Pack declarations are authoritative configuration and outrank launcher
     // components. A cross-loader artifact remains a separate mismatch fact.
     if let Some(info) = loader_from_modrinth_index(&surface.join("modrinth.index.json")) {
-        return Some((info, "pack-manifest"));
+        return Some((info, EnvironmentEvidenceSource::PackManifest));
     }
     if let Some(info) = loader_from_modrinth_index(&game_root.join("modrinth.index.json")) {
-        return Some((info, "pack-manifest"));
+        return Some((info, EnvironmentEvidenceSource::PackManifest));
     }
     if let Some(info) = loader_from_curseforge_manifest(&surface.join("manifest.json")) {
-        return Some((info, "pack-manifest"));
+        return Some((info, EnvironmentEvidenceSource::PackManifest));
     }
     if let Some(info) = loader_from_curseforge_manifest(&game_root.join("manifest.json")) {
-        return Some((info, "pack-manifest"));
+        return Some((info, EnvironmentEvidenceSource::PackManifest));
     }
     if let Some(info) = loader_from_mmc_pack(&surface.join("mmc-pack.json")) {
-        return Some((info, "launcher-manifest"));
+        return Some((info, EnvironmentEvidenceSource::LauncherManifest));
     }
     if let Some(info) = loader_from_mmc_pack(&game_root.join("mmc-pack.json")) {
-        return Some((info, "launcher-manifest"));
+        return Some((info, EnvironmentEvidenceSource::LauncherManifest));
     }
     None
 }
 
 fn loader_from_mmc_pack(path: &Path) -> Option<LoaderInfo> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_manifest_text(path).ok().flatten()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let components = v.get("components")?.as_array()?;
     for component in components {
@@ -393,7 +530,7 @@ fn loader_from_mmc_pack(path: &Path) -> Option<LoaderInfo> {
 }
 
 fn loader_from_modrinth_index(path: &Path) -> Option<LoaderInfo> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_manifest_text(path).ok().flatten()?;
     loader_from_modrinth_text(&text)
 }
 
@@ -410,7 +547,7 @@ fn loader_from_modrinth_text(text: &str) -> Option<LoaderInfo> {
 }
 
 fn loader_from_curseforge_manifest(path: &Path) -> Option<LoaderInfo> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_manifest_text(path).ok().flatten()?;
     loader_from_curseforge_text(&text)
 }
 
@@ -460,7 +597,7 @@ fn loader_from_manifest_locator(path: &Path) -> Option<LoaderInfo> {
 fn mc_from_manifest_locator(path: &Path) -> Option<String> {
     let file_name = path.file_name().and_then(|name| name.to_str());
     if matches!(file_name, Some("modrinth.index.json" | "manifest.json")) {
-        let text = std::fs::read_to_string(path).ok()?;
+        let text = read_manifest_text(path).ok().flatten()?;
         return mc_from_manifest_text(&text);
     }
 
@@ -660,7 +797,7 @@ fn mc_version_paths(surface: &Path, game_root: &Path, layout: Option<LayoutKind>
 }
 
 fn read_mc_version_file(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_manifest_text(path).ok().flatten()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     if path.file_name().and_then(|n| n.to_str()) == Some("mmc-pack.json") {
         let components = v.get("components")?.as_array()?;
@@ -690,9 +827,28 @@ fn read_mc_version_file(path: &Path) -> Option<String> {
 
 /// Probe the `java` on PATH. Optional — absence is not an error.
 fn detect_java_version() -> Option<String> {
-    let output = Command::new("java").arg("-version").output().ok()?;
+    let mut child = Command::new("java")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut stderr = Vec::new();
+    child.stderr.take()?.read_to_end(&mut stderr).ok()?;
     // `java -version` writes to stderr.
-    let text = String::from_utf8_lossy(&output.stderr);
+    let text = String::from_utf8_lossy(&stderr);
     let line = text.lines().next()?;
     // e.g. openjdk version "21.0.1" 2023-10-17
     let start = line.find('"')?;
@@ -709,6 +865,19 @@ struct RuntimeEnvironmentEvidence {
     loader: Option<Loader>,
     loader_component: Option<String>,
     loader_version: Option<String>,
+    observed_at: Option<u64>,
+}
+
+impl RuntimeEnvironmentEvidence {
+    fn is_recent(&self) -> bool {
+        const RECENT_WINDOW_SECS: u64 = 30 * 24 * 60 * 60;
+        self.observed_at.is_some_and(|observed| {
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .is_some_and(|now| now.as_secs().saturating_sub(observed) <= RECENT_WINDOW_SECS)
+        })
+    }
 }
 
 /// Read a bounded set of target-owned runtime logs. Host process state is never
@@ -736,6 +905,12 @@ fn detect_runtime_environment(
             loader: None,
             loader_component: None,
             loader_version: None,
+            observed_at: path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs()),
         };
         for line in text.lines() {
             let lower = line.to_ascii_lowercase();
@@ -805,7 +980,113 @@ fn runtime_log_candidates(surface: &Path, game_root: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    paths.sort_by_key(|path| {
+        std::cmp::Reverse(
+            path.metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok(),
+        )
+    });
     paths
+}
+
+fn read_manifest_text(path: &Path) -> Result<Option<String>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let file = File::open(path).map_err(|error| error.to_string())?;
+    let mut bytes = Vec::new();
+    file.take(intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "manifest exceeds {} byte cap",
+            intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES
+        ));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|error| format!("manifest is not UTF-8: {error}"))
+}
+
+fn direct_manifest_gaps(
+    surface: &Path,
+    game_root: &Path,
+    layout: Option<LayoutKind>,
+    explicit: Option<&Path>,
+) -> Vec<(PathBuf, String)> {
+    let mut paths = vec![
+        surface.join("mmc-pack.json"),
+        game_root.join("mmc-pack.json"),
+        surface.join("modrinth.index.json"),
+        game_root.join("modrinth.index.json"),
+    ];
+    if matches!(layout, Some(LayoutKind::CurseForgePack)) {
+        paths.push(surface.join("manifest.json"));
+        paths.push(game_root.join("manifest.json"));
+    }
+    let explicit_archive = explicit.filter(|path| {
+        path.is_file()
+            && !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("mmc-pack.json" | "modrinth.index.json" | "manifest.json")
+            )
+    });
+    if let Some(explicit) = explicit.filter(|path| {
+        path.is_file()
+            && matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("mmc-pack.json" | "modrinth.index.json" | "manifest.json")
+            )
+    }) {
+        paths.push(explicit.to_path_buf());
+    }
+    paths.sort();
+    paths.dedup();
+    let mut gaps = paths
+        .into_iter()
+        .filter_map(|path| match read_manifest_text(&path) {
+            Err(reason) => Some((path, reason)),
+            Ok(Some(text)) => serde_json::from_str::<serde_json::Value>(&text)
+                .err()
+                .map(|error| (path, format!("manifest JSON is invalid: {error}"))),
+            Ok(None) => None,
+        })
+        .collect::<Vec<_>>();
+    if let Some(path) = explicit_archive
+        && let Some(reason) = archive_manifest_gap(path)
+    {
+        gaps.push((path.to_path_buf(), reason));
+    }
+    gaps
+}
+
+fn archive_manifest_gap(path: &Path) -> Option<String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => return Some(format!("pack manifest archive cannot be opened: {error}")),
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        Err(error) => return Some(format!("pack manifest archive is unreadable: {error}")),
+    };
+    for name in ["modrinth.index.json", "manifest.json"] {
+        match intermed_doctor_core::bounded_zip::read_zip_text_bounded(
+            &mut archive,
+            name,
+            intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES,
+        ) {
+            Ok(Some(text)) => {
+                return serde_json::from_str::<serde_json::Value>(&text)
+                    .err()
+                    .map(|error| format!("{name}: manifest JSON is invalid: {error}"));
+            }
+            Ok(None) => {}
+            Err(error) => return Some(error.reason()),
+        }
+    }
+    Some("pack archive contains no supported manifest".to_string())
 }
 
 fn value_after_marker(original: &str, lower: &str, marker: &str) -> Option<String> {
@@ -905,10 +1186,12 @@ mod tests {
             spark_report: None,
         };
         let mut store = intermed_doctor_core::facts::FactStore::new();
+        let inputs = intermed_doctor_core::facts::FactStore::new();
         let settings = intermed_doctor_core::DiagnosisSettings::default();
         let mut ctx = intermed_doctor_core::CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: &settings,
         };
@@ -1008,7 +1291,7 @@ mod tests {
         );
         let (info, source) = loader_from_pack_metadata(&root, &root).expect("loader");
         assert_eq!(info.loader, Some(Loader::Fabric));
-        assert_eq!(source, "pack-manifest");
+        assert_eq!(source, EnvironmentEvidenceSource::PackManifest);
         fs::remove_dir_all(root).ok();
     }
 
@@ -1037,7 +1320,7 @@ mod tests {
         };
         let (loader, source) = detect_loader_with_source(&root, &root, &target);
         assert_eq!(loader.loader, Some(Loader::NeoForge));
-        assert_eq!(source, "runtime-log");
+        assert_eq!(source, EnvironmentEvidenceSource::RuntimeLog);
         fs::remove_dir_all(root).ok();
     }
 
@@ -1054,10 +1337,12 @@ mod tests {
             spark_report: None,
         };
         let mut store = intermed_doctor_core::facts::FactStore::new();
+        let inputs = intermed_doctor_core::facts::FactStore::new();
         let settings = intermed_doctor_core::DiagnosisSettings::default();
         let mut ctx = intermed_doctor_core::CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: &settings,
         };
@@ -1126,6 +1411,7 @@ mod tests {
             spark_report: None,
         };
         let mut store = intermed_doctor_core::facts::FactStore::new();
+        let inputs = intermed_doctor_core::facts::FactStore::new();
         let settings = intermed_doctor_core::DiagnosisSettings {
             pack_manifest: Some(archive_path),
             ..intermed_doctor_core::DiagnosisSettings::default()
@@ -1133,6 +1419,7 @@ mod tests {
         let mut ctx = intermed_doctor_core::CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &inputs,
             jar_cache: None,
             settings: &settings,
         };
@@ -1184,6 +1471,44 @@ mod tests {
             detect_host_launcher(&root, Some(LayoutKind::ModrinthPack)),
             None
         );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn oversized_direct_manifest_is_an_explicit_incomplete_outcome() {
+        let root = temp("oversized-direct-manifest");
+        touch(
+            &root.join("modrinth.index.json"),
+            &vec![b'x'; intermed_doctor_core::bounded_zip::MAX_MANIFEST_BYTES as usize + 1],
+        );
+        let target = Target {
+            path: root.clone(),
+            kind: TargetKind::Instance,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: Some(LayoutKind::ModrinthPack),
+            instance_type: None,
+            spark_report: None,
+        };
+        let mut store = intermed_doctor_core::facts::FactStore::new();
+        let inputs = intermed_doctor_core::facts::FactStore::new();
+        let settings = intermed_doctor_core::DiagnosisSettings::default();
+        let mut ctx = intermed_doctor_core::CollectCtx {
+            target: &target,
+            store: &mut store,
+            inputs: &inputs,
+            jar_cache: None,
+            settings: &settings,
+        };
+        let outcome = EnvironmentCollector.collect(&mut ctx);
+        assert_eq!(
+            outcome.status,
+            intermed_doctor_core::CollectorStatus::Incomplete
+        );
+        assert!(store.by_kind(kind::SCAN_TRUNCATED).any(|fact| {
+            fact.attr("reason")
+                .is_some_and(|reason| reason.contains("byte cap"))
+        }));
         fs::remove_dir_all(root).ok();
     }
 }

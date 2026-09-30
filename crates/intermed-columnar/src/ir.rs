@@ -207,6 +207,11 @@ pub enum RelExpr {
         kinds: Vec<String>,
         group_col: String,
         distinct_attr: String,
+        /// Predicates applied before grouping. Keeping them on this specialised
+        /// node is intentional: declarative GroupDistinct rules may constrain
+        /// their input relation, and dropping those constraints changes the
+        /// program rather than merely changing its execution strategy.
+        filters: Vec<Predicate>,
         min_count: usize,
     },
 }

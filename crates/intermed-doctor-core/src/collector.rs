@@ -1,12 +1,13 @@
 //! The [`Collector`] contract.
 //!
 //! A collector observes a [`Target`] and writes [`Fact`](intermed_facts::Fact)s.
-//! It never produces findings and never reads other collectors' output —
-//! collectors are pure observation, rules are pure inference. This is what lets
-//! a future phase add a whole layer by writing one `Collector` impl and
-//! registering it; nothing else changes.
+//! It never produces findings. Cross-collector enrichment is permitted only
+//! through the immutable predicate snapshot declared by
+//! [`CollectorScope::consumes`]; the output sink itself is write-only. Rules
+//! remain the only inference stage.
 
-use intermed_facts::FactStore;
+use intermed_facts::FactRead;
+use intermed_facts::FactWrite;
 
 use crate::jar_cache::JarCache;
 use crate::layer::Layer;
@@ -14,10 +15,16 @@ use crate::scope::{CollectorScope, CompletenessModel};
 use crate::settings::DiagnosisSettings;
 use crate::target::Target;
 
-/// Context handed to a collector: the target and the store to write into.
+/// Context handed to a collector: target data, declared inputs, and a
+/// write-only fact sink.
 pub struct CollectCtx<'a> {
     pub target: &'a Target,
-    pub store: &'a mut FactStore,
+    /// Append-only observation channel. It deliberately has no query methods.
+    pub store: &'a mut dyn FactWrite,
+    /// Immutable snapshot containing only predicates declared by
+    /// [`CollectorScope::consumes`]. This makes cross-collector enrichment
+    /// explicit and independent of accidental access to the whole store.
+    pub inputs: &'a dyn FactRead,
     /// Per-jar scan cache (`None` when `--no-cache` or cache disabled).
     pub jar_cache: Option<&'a JarCache>,
     pub settings: &'a DiagnosisSettings,
@@ -32,8 +39,10 @@ pub enum CollectorStatus {
     Active,
     /// Ran and produced useful facts, but relevant input was truncated or failed.
     Incomplete,
-    /// Intentionally did not run (target not applicable).
-    Skipped,
+    /// The target or requested mode does not apply to this collector.
+    NotApplicable,
+    /// The relevant input region was authoritatively inspected and is empty.
+    CompleteEmpty,
     /// Layer not implemented yet — reserved for a later phase.
     Deferred,
     /// Ran but errored.
@@ -70,10 +79,17 @@ impl CollectorOutcome {
             message: message.into(),
         }
     }
-    pub fn skipped(message: impl Into<String>) -> Self {
+    pub fn not_applicable(message: impl Into<String>) -> Self {
         Self {
-            status: CollectorStatus::Skipped,
+            status: CollectorStatus::NotApplicable,
             facts_emitted: 0,
+            message: message.into(),
+        }
+    }
+    pub fn complete_empty(facts_emitted: usize, message: impl Into<String>) -> Self {
+        Self {
+            status: CollectorStatus::CompleteEmpty,
+            facts_emitted,
             message: message.into(),
         }
     }
@@ -171,9 +187,9 @@ pub trait Collector: Send + Sync {
     /// collector can explain *why* it did not run (skipped vs deferred). The
     /// default reports a plain skip.
     fn not_applicable(&self, _target: &Target) -> CollectorOutcome {
-        CollectorOutcome::skipped(format!(
-            "{} not applicable to this target.",
-            self.layer().label()
+        CollectorOutcome::not_applicable(format!(
+            "collector `{}` is not applicable to this target",
+            self.id()
         ))
     }
 }

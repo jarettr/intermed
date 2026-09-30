@@ -67,6 +67,22 @@ impl SemanticImpact {
             SemanticImpact::CrashRisk => "may crash",
         }
     }
+
+    /// Map the domain-specific impact to the report's typed cross-layer impact.
+    #[must_use]
+    pub fn evidence_impact(self) -> intermed_doctor_core::evidence::Impact {
+        use intermed_doctor_core::evidence::Impact;
+        match self {
+            Self::None | Self::Cosmetic | Self::Localization | Self::AssetVisual => {
+                Impact::PackHealth
+            }
+            Self::GameplayBehavior | Self::CompatRisk => Impact::CompatibilityRisk,
+            Self::DatapackLoadRisk | Self::ClientLoadRisk | Self::ServerLoadRisk => {
+                Impact::CompatibilityRisk
+            }
+            Self::CrashRisk => Impact::RuntimeFailure,
+        }
+    }
 }
 
 /// Derive severity from impact and the analysis confidence.

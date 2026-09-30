@@ -92,6 +92,14 @@ fn incompatible_mod_present_emits_error() {
         .find(|f| f.id == "incompatible-mod:create->radium")
         .expect("incompatible installed mod");
     assert_eq!(conflict.severity, Severity::Error);
+    let requirements = DependencyRule.requirements();
+    assert!(
+        conflict
+            .coverage_requirements
+            .iter()
+            .all(|requirement| requirements.minimum_coverage.contains(requirement)),
+        "every emitted typed coverage requirement must be declared by the rule"
+    );
     assert!(
         !conflict
             .coverage_requirements

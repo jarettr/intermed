@@ -24,8 +24,8 @@ assessment.
 `intermed-rule-pack-v3` is canonical from 0.1.6. From 0.1.7 every rule proposing
 Error or Fatal must also declare a typed `conclusion_kind`, in addition to its
 impact, proof kind, coverage prerequisites, and behavior
-when a prerequisite is missing. V1 and v2 packs remain loadable, but their
-Error/Fatal output is capped at Warn with a structured
+when a prerequisite is missing. V1 loading has been removed. V2 remains a
+migration-read-only format; its Error/Fatal output is capped at Warn with a structured
 `legacy-rule-pack-has-no-proof-contract` blocker. Local, remote, signed, and
 unsigned packs all pass through this policy; a signature authenticates bytes but
 does not grant permission to bypass the trust contract.
@@ -70,16 +70,24 @@ discovery mode: generated reports are still checked for internal consistency,
 but an attestation/replay campaign should replace it with the measured digest.
 Runtime observations are not silently migrated across incompatible schemas.
 
-`intermed-corpus-lock-v2` pins authoritative pack metadata and every materialized
-file by content hash, side applicability, and download coordinates. The v1 lock
-reader remains available for coordinate-based legacy corpora; v2 is required for
-full `.mrpack` target verification.
+`intermed-corpus-lock-v3` separates `content_digest`, `lock_manifest_digest`, and
+`acquisition_digest`. Changing a CDN URL no longer changes content identity.
+Locks also declare `verification_completeness` and `unhashed_files`; an unhashed
+lock remains usable but is never described as fully content-addressed. The v1
+and v2 readers remain migration-readable.
+
+`intermed-lab-run-v2` adds explicit inconclusive, harness, infrastructure, and
+skipped statuses. `intermed-compatibility-matrix-v2` counts these separately.
+`intermed-rule-accuracy-v4` represents undefined ratios as `null`, records
+eligible/excluded cases, and includes Wilson precision lower bounds. The v1 Lab
+run reader remains available; accuracy reports are regenerated rather than
+migrated.
 
 From 0.1.9, SBOM provenance can also consume the exact artifact SHA-256 values
 from `intermed-lab-materialization-v1`. This is an additive interpretation of an
 existing manifest: cached artifact metadata remains content-addressed, while the
-pack-specific provenance credit is recomputed for every target. Both corpus-lock
-v1 and v2 remain readable.
+pack-specific provenance credit is recomputed for every target. Corpus-lock v1,
+v2, and v3 remain readable.
 
 Artifact materialization is atomic and no-clobber under concurrent workers. An
 existing destination is verified rather than opened for writing, so a losing

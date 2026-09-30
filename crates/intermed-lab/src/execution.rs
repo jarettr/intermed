@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -21,6 +20,9 @@ use serde::{Deserialize, Serialize};
 use crate::LabError;
 use crate::corpus::{CorpusEnvironment, CorpusLock};
 use crate::run::RawSmokeOutput;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 /// Everything required to boot one lab environment (loader + MC + side).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,12 +57,19 @@ impl EnvironmentSpec {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionLimits {
+    /// Hard limits enforced directly by the in-process backend.
     pub wall_time_secs: u64,
     pub max_log_bytes: u64,
-    pub memory_bytes: u64,
-    pub cpu_quota_percent: u16,
-    pub max_processes: u32,
-    pub max_written_bytes: u64,
+    /// Requested limits that require an external sandbox/cgroup/quota backend.
+    /// They are never reported as enforced merely because they appear here.
+    #[serde(alias = "memory_bytes")]
+    pub requested_memory_bytes: u64,
+    #[serde(alias = "cpu_quota_percent")]
+    pub requested_cpu_quota_percent: u16,
+    #[serde(alias = "max_processes")]
+    pub requested_max_processes: u32,
+    #[serde(alias = "max_written_bytes")]
+    pub requested_max_written_bytes: u64,
 }
 
 impl Default for ExecutionLimits {
@@ -68,10 +77,10 @@ impl Default for ExecutionLimits {
         Self {
             wall_time_secs: 300,
             max_log_bytes: 32 * 1024 * 1024,
-            memory_bytes: 8 * 1024 * 1024 * 1024,
-            cpu_quota_percent: 400,
-            max_processes: 512,
-            max_written_bytes: 4 * 1024 * 1024 * 1024,
+            requested_memory_bytes: 8 * 1024 * 1024 * 1024,
+            requested_cpu_quota_percent: 400,
+            requested_max_processes: 512,
+            requested_max_written_bytes: 4 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -138,6 +147,7 @@ pub struct ProcessOutcome {
     pub harness_failure: bool,
     pub wall_time_ms: u64,
     pub enforced_limits: Vec<String>,
+    pub requested_limits: Vec<String>,
     pub isolation: String,
 }
 
@@ -187,6 +197,7 @@ pub fn outcome_to_smoke(environment: &str, outcome: ProcessOutcome) -> RawSmokeO
         skipped: false,
         wall_time_ms: Some(outcome.wall_time_ms),
         enforced_limits: outcome.enforced_limits,
+        requested_limits: outcome.requested_limits,
         isolation: outcome.isolation,
     }
 }
@@ -206,6 +217,17 @@ impl CommandExecutionBackend {
         if matches!(plan.sandbox, SandboxPolicy::Required) {
             return Err(LabError::new(
                 "execution refused: no sandbox backend configured (use an external sandbox prefix)",
+            ));
+        }
+        #[cfg(not(unix))]
+        if !matches!(plan.sandbox, SandboxPolicy::External { .. })
+            || !plan
+                .externally_enforced_limits
+                .iter()
+                .any(|limit| limit == "process-tree")
+        {
+            return Err(LabError::new(
+                "live execution requires an external sandbox that attests process-tree termination on this platform",
             ));
         }
         std::fs::create_dir_all(&plan.work_dir).map_err(|error| {
@@ -228,6 +250,8 @@ impl CommandExecutionBackend {
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
+        #[cfg(unix)]
+        command.process_group(0);
         let started = std::time::Instant::now();
         let mut child = command
             .spawn()
@@ -242,17 +266,23 @@ impl CommandExecutionBackend {
                     thread::sleep(Duration::from_millis(50));
                 }
                 Ok(None) => {
-                    let _ = child.kill();
+                    kill_process_tree(&mut child);
                     break (child.wait().ok(), true);
                 }
                 Err(error) => {
-                    let _ = child.kill();
+                    kill_process_tree(&mut child);
                     return Err(LabError::new(format!("wait for {}: {error}", plan.id)));
                 }
             }
         };
 
-        let (log, log_complete) = read_tail(&log_path, plan.limits.max_log_bytes)?;
+        let bounded = intermed_doctor_core::bounded_text::read_text_tail(
+            &log_path,
+            plan.limits.max_log_bytes,
+        )
+        .map_err(|error| LabError::new(format!("read {}: {error}", log_path.display())))?;
+        let log = bounded.text;
+        let log_complete = !bounded.truncated;
         let mut enforced_limits = vec!["wall-time".to_string(), "captured-log-bytes".to_string()];
         let isolation = match plan.sandbox {
             SandboxPolicy::Bubblewrap => {
@@ -260,10 +290,20 @@ impl CommandExecutionBackend {
                 if plan.network != NetworkPolicy::Allow {
                     enforced_limits.push("network-namespace".to_string());
                 }
+                #[cfg(unix)]
+                enforced_limits.push("process-tree".to_string());
                 "bubblewrap"
             }
-            SandboxPolicy::External { .. } => "external-sandbox",
-            SandboxPolicy::UnsafeHost => "unsafe-host",
+            SandboxPolicy::External { .. } => {
+                #[cfg(unix)]
+                enforced_limits.push("process-tree".to_string());
+                "external-sandbox"
+            }
+            SandboxPolicy::UnsafeHost => {
+                #[cfg(unix)]
+                enforced_limits.push("process-tree".to_string());
+                "unsafe-host"
+            }
             SandboxPolicy::Required => unreachable!("required sandbox rejected before launch"),
         };
         if matches!(plan.sandbox, SandboxPolicy::External { .. }) {
@@ -283,9 +323,27 @@ impl CommandExecutionBackend {
             harness_failure: false,
             wall_time_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
             enforced_limits,
+            requested_limits: requested_resource_limits(&plan.limits),
             isolation: isolation.to_string(),
         })
     }
+}
+
+fn requested_resource_limits(limits: &ExecutionLimits) -> Vec<String> {
+    let mut requested = Vec::new();
+    if limits.requested_memory_bytes > 0 {
+        requested.push("memory".to_string());
+    }
+    if limits.requested_cpu_quota_percent > 0 {
+        requested.push("cpu".to_string());
+    }
+    if limits.requested_max_processes > 0 {
+        requested.push("process-count".to_string());
+    }
+    if limits.requested_max_written_bytes > 0 {
+        requested.push("written-bytes".to_string());
+    }
+    requested
 }
 
 fn command_parts(plan: &ExecutionPlan) -> Result<(String, Vec<String>), LabError> {
@@ -309,10 +367,34 @@ fn command_parts(plan: &ExecutionPlan) -> Result<(String, Vec<String>), LabError
             if plan.network == NetworkPolicy::Allow {
                 args.push("--share-net".to_string());
             }
-            for root in ["/usr", "/lib", "/lib64", "/bin", "/sbin"] {
+            for root in [
+                "/usr",
+                "/lib",
+                "/lib64",
+                "/bin",
+                "/sbin",
+                "/nix/store",
+                "/opt",
+            ] {
                 if Path::new(root).exists() {
                     args.extend(["--ro-bind".to_string(), root.to_string(), root.to_string()]);
                 }
+            }
+            if let Some(runtime_root) = runtime_root(&plan.command[0], &plan.environment)
+                && ![
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/bin",
+                    "/sbin",
+                    "/nix/store",
+                    "/opt",
+                ]
+                .iter()
+                .any(|root| runtime_root.starts_with(root))
+            {
+                let root = runtime_root.display().to_string();
+                args.extend(["--ro-bind".to_string(), root.clone(), root]);
             }
             args.extend([
                 "--proc".to_string(),
@@ -328,27 +410,57 @@ fn command_parts(plan: &ExecutionPlan) -> Result<(String, Vec<String>), LabError
                 "/work".to_string(),
                 "--".to_string(),
             ]);
+            if plan.network == NetworkPolicy::LoopbackOnly {
+                let ip = ["/usr/bin/ip", "/bin/ip", "/usr/sbin/ip", "/sbin/ip"]
+                    .into_iter()
+                    .find(|path| Path::new(path).is_file())
+                    .ok_or_else(|| {
+                        LabError::new(
+                            "loopback-only sandbox requires the `ip` utility to bring `lo` up",
+                        )
+                    })?;
+                args.extend([
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("{ip} link set lo up && exec \"$@\""),
+                    "intermed-loopback".to_string(),
+                ]);
+            }
             args.extend(plan.command.iter().cloned());
             Ok(("bwrap".to_string(), args))
         }
     }
 }
 
-fn read_tail(path: &Path, max_bytes: u64) -> Result<(String, bool), LabError> {
-    use std::io::{Seek, SeekFrom};
-    let mut file = File::open(path)
-        .map_err(|error| LabError::new(format!("read {}: {error}", path.display())))?;
-    let len = file
-        .metadata()
-        .map_err(|error| LabError::new(format!("stat {}: {error}", path.display())))?
-        .len();
-    let start = len.saturating_sub(max_bytes);
-    file.seek(SeekFrom::Start(start))
-        .map_err(|error| LabError::new(format!("seek {}: {error}", path.display())))?;
-    let mut bytes = Vec::with_capacity((len - start).min(usize::MAX as u64) as usize);
-    file.read_to_end(&mut bytes)
-        .map_err(|error| LabError::new(format!("read {}: {error}", path.display())))?;
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), start == 0))
+fn runtime_root(program: &str, environment: &BTreeMap<String, String>) -> Option<PathBuf> {
+    let path = Path::new(program);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        environment
+            .get("PATH")
+            .into_iter()
+            .flat_map(|value| std::env::split_paths(value))
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())?
+    };
+    let canonical = resolved.canonicalize().unwrap_or(resolved);
+    let parent = canonical.parent()?;
+    if parent.file_name().and_then(|value| value.to_str()) == Some("bin") {
+        parent.parent().map(Path::to_path_buf)
+    } else {
+        Some(parent.to_path_buf())
+    }
+}
+
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // The child is launched as process-group leader. Negative pid targets
+        // every descendant that stayed in that group, not just the wrapper JVM.
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
 }
 
 #[cfg(test)]
@@ -399,7 +511,53 @@ mod tests {
         assert!(outcome.exited_ok);
         assert_eq!(outcome.isolation, "unsafe-host");
         assert!(outcome.enforced_limits.contains(&"wall-time".to_string()));
+        assert!(outcome.requested_limits.contains(&"memory".to_string()));
+        assert!(!outcome.enforced_limits.contains(&"memory".to_string()));
         assert!(outcome.log.contains("Done"));
         std::fs::remove_dir_all(work_dir).ok();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn timeout_terminates_the_process_group() {
+        let mut plan = plan(SandboxPolicy::UnsafeHost);
+        plan.command = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "sleep 30 & echo $! > descendant.pid; wait".into(),
+        ];
+        plan.limits.wall_time_secs = 1;
+        let work_dir = plan.work_dir.clone();
+        let outcome = CommandExecutionBackend.execute(&plan).unwrap();
+        assert!(outcome.timed_out);
+        let pid: u32 = std::fs::read_to_string(work_dir.join("descendant.pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!Path::new(&format!("/proc/{pid}")).exists());
+        std::fs::remove_dir_all(work_dir).ok();
+    }
+
+    #[test]
+    fn loopback_policy_is_not_lowered_like_network_deny() {
+        if !["/usr/bin/ip", "/bin/ip", "/usr/sbin/ip", "/sbin/ip"]
+            .iter()
+            .any(|path| Path::new(path).is_file())
+        {
+            return;
+        }
+        let mut loopback = plan(SandboxPolicy::Bubblewrap);
+        loopback.network = NetworkPolicy::LoopbackOnly;
+        let (_, loopback_args) = command_parts(&loopback).unwrap();
+        let deny = plan(SandboxPolicy::Bubblewrap);
+        let (_, deny_args) = command_parts(&deny).unwrap();
+        assert!(
+            loopback_args
+                .iter()
+                .any(|arg| arg.contains("link set lo up"))
+        );
+        assert!(!deny_args.iter().any(|arg| arg.contains("link set lo up")));
     }
 }

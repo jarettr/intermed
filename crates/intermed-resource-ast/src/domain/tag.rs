@@ -16,7 +16,7 @@ use crate::model::{
 use crate::semantic::namespace::namespace_of;
 
 /// Parser version — bump when tag lowering changes (cache-invalidating).
-pub const TAG_AST_VERSION: &str = "tag-r1";
+pub const TAG_AST_VERSION: &str = "tag-r2";
 
 /// Typed tag AST.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,15 @@ pub struct TagValue {
     pub required: Option<bool>,
 }
 
+/// One tag entry in the compact summary, with full metadata.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TagEntrySummary {
+    pub id: String,
+    pub is_tag: bool,
+    /// Effective required flag: `true` when not explicitly set (Minecraft default).
+    pub required: bool,
+}
+
 /// Compact tag summary stored in the cache / lowered to facts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TagSummary {
@@ -44,8 +53,8 @@ pub struct TagSummary {
     pub entry_count: usize,
     /// Whether any entry carries an explicit `required` flag.
     pub has_required_flag: bool,
-    /// Sorted, de-duplicated entry ids (for diff / safe-merge equality).
-    pub entries: Vec<String>,
+    /// Sorted, de-duplicated entries with full metadata (id, is_tag, required).
+    pub entries: Vec<TagEntrySummary>,
 }
 
 /// Derive the tag registry from a `data/<ns>/tags/<registry...>/<path>.json` path.
@@ -99,7 +108,16 @@ pub fn parse(path: &str, value: &Value) -> DomainParse {
         None => {} // a `replace`-only tag with no values is valid (clears the tag).
     }
 
-    let mut entries: Vec<String> = ast.values.iter().map(|v| v.id.clone()).collect();
+    let mut entries: Vec<TagEntrySummary> = ast
+        .values
+        .iter()
+        .map(|v| TagEntrySummary {
+            id: v.id.clone(),
+            is_tag: v.is_tag_ref,
+            // Effective required flag: true when not explicitly set (Minecraft default).
+            required: v.required.unwrap_or(true),
+        })
+        .collect();
     entries.sort();
     entries.dedup();
 
@@ -114,6 +132,7 @@ pub fn parse(path: &str, value: &Value) -> DomainParse {
             required: v.required.unwrap_or(true),
             conditions: Vec::new(),
             is_tag: v.is_tag_ref,
+            certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
         })
         .map(|mut r| {
             if !r.is_tag {

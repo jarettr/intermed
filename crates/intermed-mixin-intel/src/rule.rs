@@ -48,11 +48,6 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
                 intermed_doctor_core::TargetRegion::Mappings,
                 intermed_doctor_core::TargetRegion::Logs,
             ])
-            .coverage([
-                CoverageRequirement::CompleteClasspath,
-                CoverageRequirement::CompatibleMappings,
-                CoverageRequirement::ApplicableMixin,
-            ])
             .proofs([
                 ProofKind::Observation,
                 ProofKind::DeterministicDerivation,
@@ -159,7 +154,7 @@ impl intermed_doctor_core::Rule for MixinRiskRule {
                 .title(format!("Mixin risk {adjusted}/100: {}", f.subject))
                 .explanation(explanation)
                 .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.clone())
+                .affects(f.subject.to_string())
                 .fix(FixCandidate::advice(risk_advice(adjusted, hot_path)))
                 .tag("mixin")
                 .tag("risk-score")
@@ -438,7 +433,7 @@ fn mod_complexity_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     f.subject
                 ))
                 .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.clone())
+                .affects(f.subject.to_string())
                 .fix(FixCandidate::advice(
                     "Review whether this mod's mixins can be narrowed (fewer targets / @Overwrite \
                      replaced with @Inject), and prioritize it when checking compatibility.",
@@ -486,7 +481,7 @@ fn mixin_bloat_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     f.subject
                 ))
                 .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.clone())
+                .affects(f.subject.to_string())
                 .fix(FixCandidate::advice(
                     "Review handlers with no target-visible effect; if they also have no external \
                      side effect they can be removed or narrowed, as dead @Inject handlers still \
@@ -685,7 +680,7 @@ fn mixin_plugin_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     f.subject
                 ))
                 .evidence(EvidenceEdge::subject(f.id))
-                .affects(f.subject.clone())
+                .affects(f.subject.to_string())
                 .tag("mixin")
                 .tag("config-plugin")
                 .tag("mixin-detail")
@@ -703,17 +698,9 @@ fn mixin_plugin_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 /// `remap = false` on a Minecraft target, an unmatched method without `require`)
 /// are `Warn`.
 fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
-    const APPLY_KINDS: &[&str] = &[
-        "mixin_apply_target_class_missing",
-        "mixin_apply_target_method_missing",
-        "mixin_apply_descriptor_mismatch",
-        "mixin_apply_require_unsatisfied",
-        "mixin_apply_refmap_missing",
-        "mixin_apply_remap_false_suspicious",
-        "mixin_apply_ordinal_out_of_range",
-    ];
     let mut out = Vec::new();
-    for kind in APPLY_KINDS {
+    for failure_kind in crate::apply_failure::ApplyFailureKind::ALL {
+        let kind = failure_kind.as_str();
         for f in ctx.store.by_kind(kind) {
             let confirmed = f.attr_bool("confirmed").unwrap_or(false);
             let target = f.attr("target").unwrap_or("");
@@ -726,9 +713,6 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 RULE_ID,
                 format!("mixin-apply:{kind}:{}:{occurrence}", f.subject),
             )
-            .coverage_requirement(CoverageRequirement::CompleteClasspath)
-            .coverage_requirement(CoverageRequirement::CompatibleMappings)
-            .coverage_requirement(CoverageRequirement::ApplicableMixin)
             .proof_kind(if confirmed {
                 ProofKind::DeterministicDerivation
             } else {
@@ -753,7 +737,7 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             })
             .explanation(format!("`{}` ({mixin}): {detail}.", f.subject))
             .evidence(EvidenceEdge::subject(f.id))
-            .affects(f.subject.clone())
+            .affects(f.subject.to_string())
             .fix(FixCandidate::advice(
                 "Verify the target class/method exists in the installed version; rebuild the \
                      mixin against the correct Minecraft/mod mappings, or run with --minecraft-jar \
@@ -762,7 +746,15 @@ fn apply_failure_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .tag("mixin")
             .tag("apply-failure")
             .confidence(if confirmed { 0.95 } else { 0.6 });
-            builder = match *kind {
+            let requirements = failure_kind
+                .proof_requirements()
+                .iter()
+                .map(|requirement| requirement.coverage_requirement())
+                .collect::<std::collections::BTreeSet<_>>();
+            for requirement in requirements {
+                builder = builder.coverage_requirement(requirement);
+            }
+            builder = match kind {
                 "mixin_apply_target_class_missing" => builder
                     .conclusion_kind(ConclusionKind::ClassAbsent)
                     .runtime_refutability(RuntimeRefutability::ClassPresence),
@@ -798,7 +790,9 @@ fn stable_apply_failure_occurrence(
 /// structured failures and joins them to the static application-site facts, so a
 /// static "probable failure" the log also shows becomes a *confirmed* `Error`.
 fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
-    use crate::runtime_log::parse_runtime_failures;
+    use crate::runtime_log::{
+        RuntimeSiteIdentity, match_failure_to_candidates, parse_runtime_failures,
+    };
 
     // Mixin-apply log lines, with the originating fact id for citation.
     let log_lines: Vec<(FactId, String)> = ctx
@@ -814,36 +808,31 @@ fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     // Index application-site facts by simple mixin name for the join.
     let sites: Vec<&intermed_doctor_core::facts::Fact> =
         ctx.store.by_kind(kind::MIXIN_APPLICATION_SITE).collect();
+    let identities = sites
+        .iter()
+        .map(|site| RuntimeSiteIdentity {
+            config: site.attr("config").unwrap_or(""),
+            mixin_class: site.attr("mixin").unwrap_or(""),
+            target_class: site.attr("target_class").unwrap_or(""),
+            handler_method: site.attr("handler_method").unwrap_or(""),
+            target_method: site.attr("target_method").unwrap_or(""),
+            site_key: site.attr("site_key").unwrap_or(""),
+        })
+        .collect::<Vec<_>>();
 
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for (log_id, line) in &log_lines {
         for failure in parse_runtime_failures(line) {
-            let simple = failure
-                .mixin_class
-                .rsplit(['.', '$'])
-                .next()
-                .unwrap_or(&failure.mixin_class);
-            for site in &sites {
+            for candidate in match_failure_to_candidates(&failure, &identities) {
+                let site = sites[candidate.candidate_index];
                 let site_mixin = site.attr("mixin").unwrap_or("");
-                let site_simple = site_mixin.rsplit(['.', '$']).next().unwrap_or(site_mixin);
-                if site_simple != simple || simple.is_empty() {
-                    continue;
-                }
-                // If the log names an injection point, only confirm matching sites.
-                if !failure.injection_point.is_empty() {
-                    let tm = site.attr("target_method").unwrap_or("");
-                    let sk = site.attr("site_key").unwrap_or("");
-                    if !tm.contains(&failure.injection_point)
-                        && !sk.contains(&failure.injection_point)
-                    {
-                        continue;
-                    }
-                }
+                let strength = candidate.strength;
                 if !seen.insert((site.id, *log_id)) {
                     continue;
                 }
                 let mixin = site.attr("mixin").unwrap_or(site_mixin);
+                let confirmed = strength.confirms_site();
                 out.push(
                     Finding::builder(
                         RULE_ID,
@@ -852,14 +841,19 @@ fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     .coverage_requirement(CoverageRequirement::RuntimeEvidence)
                     .coverage_requirement(CoverageRequirement::TerminalRuntime)
                     .coverage_requirement(CoverageRequirement::LocalArtifact)
-                    .proof_kind(ProofKind::Observation)
+                    .proof_kind(if confirmed { ProofKind::Observation } else { ProofKind::Heuristic })
                     .impact(Impact::StartupBlocking)
                     .evidence_origin(EvidenceOrigin::ObservedRuntime)
-                    .severity(Severity::Error)
+                    .severity(if confirmed { Severity::Error } else { Severity::Warn })
                     .category(Category::Mixin)
-                    .title(format!("Mixin failure confirmed by runtime log: `{mixin}`"))
+                    .title(if confirmed {
+                        format!("Mixin failure confirmed by runtime log: `{mixin}`")
+                    } else {
+                        format!("Runtime Mixin failure may relate to `{mixin}`")
+                    })
                     .explanation(format!(
-                        "The game log shows this mixin failing to apply ({}): {}",
+                        "The game log contains a Mixin apply failure joined at `{}` strength ({}): {}",
+                        strength.as_str(),
                         failure.reason.as_str(),
                         failure.excerpt
                     ))
@@ -867,12 +861,15 @@ fn runtime_log_confirmation_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                     .evidence(EvidenceEdge::new(*log_id, Relation::Supports, 0.95))
                     .affects(mixin.to_string())
                     .fix(FixCandidate::advice(
-                        "This is a confirmed load-time failure — update or remove the mod, or report \
-                         the broken mixin upstream.",
+                        if confirmed {
+                            "This is a site-confirmed load-time failure — update or remove the mod, or report the broken mixin upstream."
+                        } else {
+                            "The log match is not site-specific; inspect the full mixin class/config identity before changing the pack."
+                        },
                     ))
                     .tag("mixin")
-                    .tag("runtime-confirmed")
-                    .confidence(0.95)
+                    .tag(if confirmed { "runtime-confirmed" } else { "runtime-correlated" })
+                    .confidence(if confirmed { 0.95 } else { 0.55 })
                     .build(),
                 );
             }
@@ -1121,7 +1118,9 @@ fn cross_layer_capability_resource_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let Some(cat) = f.attr("path").and_then(resource_category) else {
             continue;
         };
-        let entry = writers.entry((f.subject.clone(), cat as u8)).or_default();
+        let entry = writers
+            .entry((f.subject.to_string(), cat as u8))
+            .or_default();
         entry.0 += 1;
         // Keep a few evidence fact ids per (mod, category) — enough to cite, not all.
         if entry.1.len() < 8 {
@@ -1136,7 +1135,7 @@ fn cross_layer_capability_resource_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let mut caps: BTreeMap<(String, String), FactId> = BTreeMap::new();
     for f in ctx.store.by_kind(kind::MOD_CAPABILITY) {
         if let Some(cap) = f.attr("capability") {
-            caps.entry((f.subject.clone(), cap.to_string()))
+            caps.entry((f.subject.to_string(), cap.to_string()))
                 .or_insert(f.id);
         }
     }
@@ -1285,6 +1284,10 @@ fn capability_resource_finding(
 struct SurfaceGroup {
     reason: String,
     fact_ids: Vec<FactId>,
+    mod_id: String,
+    mixin: String,
+    handler_method: String,
+    handler_descriptor: String,
 }
 
 fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
@@ -1309,7 +1312,7 @@ fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     for (k, label) in DANGEROUS {
         for f in ctx.store.by_kind(k) {
             g_by_mod
-                .entry(f.subject.clone())
+                .entry(f.subject.to_string())
                 .or_default()
                 .push((f.id, label));
         }
@@ -1318,12 +1321,19 @@ fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     // the reflective-dispatch targets the handler names (e.g. `java.lang.Runtime`)
     // when known — the handler-granular evidence the security layer is otherwise
     // blind to. Prefer a handler that actually names targets over a bare one.
-    let mut reflective_handler: BTreeMap<String, (FactId, String)> = BTreeMap::new();
+    let mut reflective_handler: BTreeMap<(String, String, String, String), (FactId, String)> =
+        BTreeMap::new();
     for f in ctx.store.by_kind(kind::MIXIN_HANDLER_BODY) {
         if f.attr_bool("uses_reflection") == Some(true) {
             let targets = f.attr("reflective_targets").unwrap_or("").to_string();
+            let key = (
+                f.subject.to_string(),
+                f.attr("mixin").unwrap_or("").to_string(),
+                f.attr("handler_method").unwrap_or("").to_string(),
+                f.attr("handler_descriptor").unwrap_or("").to_string(),
+            );
             let entry = reflective_handler
-                .entry(f.subject.clone())
+                .entry(key)
                 .or_insert((f.id, String::new()));
             if entry.1.is_empty() && !targets.is_empty() {
                 *entry = (f.id, targets);
@@ -1331,23 +1341,36 @@ fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         }
     }
 
-    // Group security-surface facts by (mod, subsystem) so we emit one finding each.
-    let mut by_mod_sub: BTreeMap<(String, String), SurfaceGroup> = BTreeMap::new();
+    // Site/handler identity is the join key. A reflective sibling handler in the
+    // same mod must never elevate an unrelated woven surface.
+    let mut by_site_sub: BTreeMap<(String, String), SurfaceGroup> = BTreeMap::new();
     for f in ctx.store.by_kind(kind::MIXIN_SECURITY_SURFACE) {
         let sub = f.attr("subsystem").unwrap_or("").to_string();
         let reason = f.attr("reason").unwrap_or("").to_string();
-        let g = by_mod_sub.entry((f.subject.clone(), sub)).or_default();
+        let g = by_site_sub
+            .entry((f.attr("site_id").unwrap_or("").to_string(), sub))
+            .or_default();
         g.fact_ids.push(f.id);
+        g.mod_id = f.subject.to_string();
+        g.mixin = f.attr("mixin").unwrap_or("").to_string();
+        g.handler_method = f.attr("handler_method").unwrap_or("").to_string();
+        g.handler_descriptor = f.attr("handler_descriptor").unwrap_or("").to_string();
         if g.reason.is_empty() {
             g.reason = reason;
         }
     }
 
     let mut out = Vec::new();
-    for ((mod_id, subsystem), group) in &by_mod_sub {
+    for ((site_id, subsystem), group) in &by_site_sub {
+        let mod_id = &group.mod_id;
         let reason = group.reason.clone();
         let g_hits = g_by_mod.get(mod_id);
-        let reflective = reflective_handler.get(mod_id);
+        let reflective = reflective_handler.get(&(
+            mod_id.clone(),
+            group.mixin.clone(),
+            group.handler_method.clone(),
+            group.handler_descriptor.clone(),
+        ));
 
         let handler_targets = reflective
             .map(|(_, targets)| targets.as_str())
@@ -1407,7 +1430,7 @@ fn cross_layer_security_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             }
         }
 
-        let mut b = Finding::builder(RULE_ID, format!("mixin-security:{mod_id}:{subsystem}"))
+        let mut b = Finding::builder(RULE_ID, format!("mixin-security:{site_id}:{subsystem}"))
             .severity(severity)
             .category(Category::Mixin)
             .title(format!("Mixin weaves into the {subsystem} subsystem"))
@@ -1481,9 +1504,9 @@ fn resource_domain_of(diff_kind: Option<&str>, path: &str) -> Option<String> {
 }
 
 /// Findings from the site-level risk clusters (plan Phases 13/14). One actionable
-/// diagnosis per target, graded by the cluster's own unified severity, citing the
-/// participating application-site facts so the deep evidence survives compaction and
-/// shows up under `--explain`.
+/// diagnosis per target. The cluster supplies typed verdict strength while the
+/// central trust contract owns final severity/disposition. Participating site
+/// facts remain cited so deep evidence survives compaction and `--explain`.
 fn risk_cluster_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     // Prebuild a target-class → failing application-site fact ids index once.
     let mut sites_by_target: std::collections::BTreeMap<String, Vec<FactId>> =
@@ -1521,7 +1544,7 @@ fn risk_cluster_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let action = f
             .attr("recommended_action")
             .unwrap_or("Review the participating mixins.");
-        let confirmation = f.attr("confirmation_level").unwrap_or("");
+        let confirmation = f.attr("verdict_strength").unwrap_or("");
         let confidence = match confirmation {
             "runtime-confirmed" | "static-exact" => 0.9,
             "static-descriptor-aware" => 0.75,
@@ -1683,13 +1706,14 @@ fn handler_intelligence_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 
 fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
     let recs_by_site = recommendation_facts_grouped(ctx);
-    type EffectSiteKey = (String, String, String, String, String, String);
+    type EffectSiteKey = (String, String, String, String, String, String, String);
     let mut sites_by_effect = std::collections::BTreeMap::<EffectSiteKey, Vec<_>>::new();
     for site in ctx.store.by_kind(kind::MIXIN_APPLICATION_SITE) {
         let key = (
             site.attr("mod").unwrap_or("").to_string(),
             site.attr("mixin").unwrap_or("").to_string(),
             site.attr("handler_method").unwrap_or("").to_string(),
+            site.attr("handler_descriptor").unwrap_or("").to_string(),
             site.attr("target_class").unwrap_or("").to_string(),
             site.attr("target_method").unwrap_or("").to_string(),
             site.attr("site_key").unwrap_or("").to_string(),
@@ -1709,19 +1733,22 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
         let site_key = f.attr("site_key").unwrap_or("");
         let hot_path = f.attr_bool("hot_path").unwrap_or(false);
         let handler_method = f.attr("handler_method").unwrap_or("").to_string();
+        let handler_descriptor = f.attr("handler_descriptor").unwrap_or("").to_string();
         let handler_effect = lookup_handler_effect(
             ctx,
             f.subject.as_str(),
             f.attr("mixin").unwrap_or(""),
             &handler_method,
+            &handler_descriptor,
         );
 
         let effect = crate::model::MixinEffect {
-            mod_id: f.subject.clone(),
+            mod_id: f.subject.to_string(),
             mixin_class: f.attr("mixin").unwrap_or("").to_string(),
             target: target.to_string(),
             method: method.to_string(),
             handler_method,
+            handler_descriptor: handler_descriptor.clone(),
             operation,
             effect_kinds: parse_effect_kinds(f.attr("effect_kinds").unwrap_or("")),
             effect_description: description.to_string(),
@@ -1773,9 +1800,10 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 
         let site_facts = sites_by_effect
             .get(&(
-                f.subject.clone(),
+                f.subject.to_string(),
                 f.attr("mixin").unwrap_or("").to_string(),
                 f.attr("handler_method").unwrap_or("").to_string(),
+                handler_descriptor,
                 target.to_string(),
                 method.to_string(),
                 site_key.to_string(),
@@ -1788,6 +1816,7 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             f.subject.as_str(),
             f.attr("mixin").unwrap_or(""),
             f.attr("handler_method").unwrap_or(""),
+            f.attr("handler_descriptor").unwrap_or(""),
             target,
             method,
             site_key,
@@ -1837,11 +1866,11 @@ fn mixin_effect_summary_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
 
         for rec in &recs {
             let (text, confidence) = recommendation_as_fix(rec);
-            builder = builder.fix(FixCandidate {
-                description: text,
-                command: None,
-                confidence,
-            });
+            builder = builder.fix(
+                FixCandidate::advice(text)
+                    .action(intermed_doctor_core::evidence::RecommendationAction::Configure)
+                    .confidence(confidence),
+            );
             if let Some(fid) = recommendation_fact_id(ctx, site_key, &rec.id) {
                 builder =
                     builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
@@ -1901,11 +1930,11 @@ fn enhanced_overwrite_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
                 .confidence(if hot_path { 0.78 } else { 0.72 });
         for rec in &recs {
             let (text, confidence) = recommendation_as_fix(rec);
-            builder = builder.fix(FixCandidate {
-                description: text,
-                command: None,
-                confidence,
-            });
+            builder = builder.fix(
+                FixCandidate::advice(text)
+                    .action(intermed_doctor_core::evidence::RecommendationAction::Configure)
+                    .confidence(confidence),
+            );
             if let Some(fid) = recommendation_fact_id(ctx, site_key.as_str(), &rec.id) {
                 builder =
                     builder.evidence(EvidenceEdge::new(fid, Relation::Supports, rec.confidence));
@@ -1931,7 +1960,7 @@ fn recommendation_facts_grouped(
         .store
         .by_kind(kind::MIXIN_RECOMMENDATION)
         .map(|f| crate::model::MixinRecommendationRecord {
-            mod_id: f.subject.clone(),
+            mod_id: f.subject.to_string(),
             mixin_class: f.attr("mixin").unwrap_or("").to_string(),
             target: f.attr("target").unwrap_or("").to_string(),
             site_key: f.attr("site_key").unwrap_or("").to_string(),
@@ -1954,6 +1983,7 @@ fn lookup_handler_effect(
     mod_id: &str,
     mixin: &str,
     handler_method: &str,
+    handler_descriptor: &str,
 ) -> Option<HandlerEffect> {
     if handler_method.is_empty() {
         return None;
@@ -1964,9 +1994,12 @@ fn lookup_handler_effect(
             f.subject == mod_id
                 && f.attr("mixin") == Some(mixin)
                 && f.attr("handler_method") == Some(handler_method)
+                && (!handler_descriptor.is_empty()
+                    && f.attr("handler_descriptor") == Some(handler_descriptor))
         })
         .map(|f| HandlerEffect {
             handler_method: handler_method.to_string(),
+            bytecode_observed: f.attr_bool("bytecode_observed").unwrap_or(false),
             handler_local_store: f
                 .attr_bool("handler_local_store")
                 .or_else(|| f.attr_bool("modifies_locals"))
@@ -2133,7 +2166,7 @@ fn legacy_overlap_findings(ctx: &RuleCtx<'_>) -> Vec<Finding> {
             .title(format!("Mixin target overlap: {}", f.subject))
             .explanation(explanation)
             .evidence(EvidenceEdge::subject(f.id))
-            .affects(f.subject.clone())
+            .affects(f.subject.to_string())
             .fix(FixCandidate::advice(
                 "Check mod compatibility notes and prefer versions known to share this target.",
             ))

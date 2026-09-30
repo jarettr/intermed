@@ -252,7 +252,7 @@ fn collect_log_excerpts(run: &DiagnosticRun) -> Vec<TelemetryLogExcerpt> {
         .filter(|fact| fact.kind == kind::LOG_SIGNAL)
         .filter_map(|fact| {
             fact.attr("excerpt").map(|excerpt| TelemetryLogExcerpt {
-                signal: fact.subject.clone(),
+                signal: fact.subject.to_string(),
                 excerpt: redact_excerpt(excerpt),
             })
         })
@@ -325,10 +325,10 @@ mod tests {
             .diagnose_with_facts(&target);
         run.facts.push(intermed_doctor_core::facts::Fact {
             id: FactId(99),
-            kind: kind::LOG_SIGNAL.to_string(),
-            subject: "ClassNotFound".to_string(),
+            kind: kind::LOG_SIGNAL.into(),
+            subject: "ClassNotFound".into(),
             attributes: [(
-                "excerpt".to_string(),
+                "excerpt".into(),
                 "user alice@example.com at /home/alice/private-pack 10.1.2.3 https://host/x token=abc"
                     .into(),
             )]
@@ -336,7 +336,7 @@ mod tests {
             .collect(),
             source: SourceRef::file("/home/alice/private-pack/logs/latest.log"),
             confidence: 1.0,
-            extractor: "test".to_string(),
+            extractor: "test".into(),
         });
         run
     }

@@ -39,6 +39,8 @@ string_id!(RuntimeOccurrenceId);
 string_id!(ThrowableId);
 string_id!(MixinSiteId);
 string_id!(RecommendationId);
+string_id!(EnvironmentId);
+string_id!(JavaRuntimeId);
 
 impl ArtifactId {
     /// Construct the preferred content identity for an artifact.
@@ -79,6 +81,21 @@ pub enum DescriptorKind {
 }
 
 impl DescriptorKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fabric => "fabric",
+            Self::Quilt => "quilt",
+            Self::Forge => "forge",
+            Self::NeoForge => "neoforge",
+            Self::Bukkit => "bukkit",
+            Self::Paper => "paper",
+            Self::JarJar => "jarjar",
+            Self::Service => "service",
+            Self::Unknown => "unknown",
+        }
+    }
+
     #[must_use]
     pub fn from_token(value: &str) -> Self {
         match value.to_ascii_lowercase().as_str() {
@@ -127,6 +144,19 @@ pub enum MappingNamespace {
 }
 
 impl MappingNamespace {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Official => "official",
+            Self::MojmapNamed => "mojmap-named",
+            Self::YarnNamed => "yarn-named",
+            Self::Intermediary => "intermediary",
+            Self::Srg => "srg",
+            Self::NeoForm => "neoform",
+            Self::Unknown => "unknown",
+        }
+    }
+
     #[must_use]
     pub fn from_token(value: &str) -> Self {
         match value.to_ascii_lowercase().replace('_', "-").as_str() {
@@ -211,6 +241,69 @@ pub enum EntityRef {
     RuntimeEvent(RuntimeOccurrenceId),
     Throwable(ThrowableId),
     MixinSite(MixinSiteId),
+    Environment(EnvironmentId),
+    JavaRuntime(JavaRuntimeId),
+}
+
+impl EntityRef {
+    /// Stable semantic identity independent of the JSON wire representation.
+    ///
+    /// Lab datasets can outlive a report-schema revision.  Serializing this enum
+    /// and using the resulting JSON as an identity would make harmless serde
+    /// changes break longitudinal joins, so the identity is derived from tagged,
+    /// length-delimited semantic fields instead.
+    #[must_use]
+    pub fn canonical_semantic_id(&self) -> String {
+        let (kind, fields): (&str, Vec<String>) = match self {
+            Self::Artifact(id) => ("artifact", vec![id.0.clone()]),
+            Self::Mod(id) => (
+                "mod",
+                vec![
+                    id.artifact.0.clone(),
+                    id.declared_id.clone(),
+                    id.descriptor_kind.as_str().to_string(),
+                    id.ordinal.to_string(),
+                ],
+            ),
+            Self::Class(symbol) => (
+                "class",
+                vec![
+                    symbol.name.clone(),
+                    symbol.namespace.as_str().to_string(),
+                    symbol.mapping_graph.0.clone(),
+                ],
+            ),
+            Self::Method(symbol) => (
+                "method",
+                vec![
+                    symbol.owner.name.clone(),
+                    symbol.owner.namespace.as_str().to_string(),
+                    symbol.owner.mapping_graph.0.clone(),
+                    symbol.name.clone(),
+                    symbol.descriptor.0.clone(),
+                ],
+            ),
+            Self::Dependency(id) => ("dependency", vec![id.0.clone()]),
+            Self::Resource(id) => ("resource", vec![id.0.clone()]),
+            Self::RuntimeEvent(id) => ("runtime-event", vec![id.0.clone()]),
+            Self::Throwable(id) => ("throwable", vec![id.0.clone()]),
+            Self::MixinSite(id) => ("mixin-site", vec![id.0.clone()]),
+            Self::Environment(id) => ("environment", vec![id.0.clone()]),
+            Self::JavaRuntime(id) => ("java-runtime", vec![id.0.clone()]),
+        };
+        let mut digest = Sha256::new();
+        digest.update(b"intermed-entity-semantic-id-v1\0");
+        tagged_field(&mut digest, kind.as_bytes());
+        for field in fields {
+            tagged_field(&mut digest, field.as_bytes());
+        }
+        format!("entity:{kind}:{}", hex_digest(digest))
+    }
+}
+
+fn tagged_field(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
 }
 
 #[must_use]
@@ -258,5 +351,19 @@ mod tests {
         };
         assert!(exact.is_overload_safe());
         assert!(!unknown.is_overload_safe());
+    }
+
+    #[test]
+    fn semantic_entity_identity_is_tagged_and_wire_independent() {
+        let artifact = EntityRef::Artifact(ArtifactId::new("ab:c"));
+        let dependency = EntityRef::Dependency(DependencyEdgeId::new("ab:c"));
+        assert_ne!(
+            artifact.canonical_semantic_id(),
+            dependency.canonical_semantic_id()
+        );
+        assert_eq!(
+            artifact.canonical_semantic_id(),
+            EntityRef::Artifact(ArtifactId::new("ab:c")).canonical_semantic_id()
+        );
     }
 }

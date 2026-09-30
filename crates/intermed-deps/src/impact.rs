@@ -13,6 +13,7 @@ use intermed_doctor_core::facts::{FactStore, kind};
 use serde::{Deserialize, Serialize};
 
 use crate::effective::EffectiveModel;
+use crate::relation::DependencyRelation;
 use crate::semver::version_in_range_with_dialect;
 
 /// Resources that reference the target namespace, broken down by referencing domain.
@@ -86,7 +87,15 @@ pub fn remove_impact(store: &FactStore, target: &str) -> RemoveImpact {
         let mut v: Vec<String> = model
             .declared
             .iter()
-            .filter(|d| d.to == target)
+            .filter(|d| {
+                d.to == target
+                    && matches!(
+                        &d.relation,
+                        DependencyRelation::Requires
+                            | DependencyRelation::Recommends
+                            | DependencyRelation::Includes
+                    )
+            })
             .map(|d| d.from.clone())
             .collect();
         v.sort_unstable();
@@ -114,6 +123,10 @@ pub fn remove_impact(store: &FactStore, target: &str) -> RemoveImpact {
     let mut provides: Vec<String> = store
         .by_kind(kind::PROVIDED_DEPENDENCY)
         .filter(|f| f.subject == target)
+        .filter(|f| {
+            f.attr("identity_certainty")
+                .is_none_or(|certainty| certainty == "confirmed")
+        })
         .filter_map(|f| f.attr("provides").map(str::to_string))
         .collect();
     provides.sort_unstable();
@@ -168,20 +181,45 @@ pub fn update_impact(
     let mut undecidable = Vec::new();
 
     for dep in model.declared.iter().filter(|d| d.to == target) {
+        if dep.relation.is_ordering()
+            || matches!(
+                &dep.relation,
+                DependencyRelation::Suggests | DependencyRelation::Unknown(_)
+            )
+        {
+            continue;
+        }
         let entry = BreakingDep {
             mod_id: dep.from.clone(),
             range: dep.range.clone(),
             mandatory: dep.mandatory,
         };
-        match version_in_range_with_dialect(to, &dep.range, dep.version_dialect) {
+        let to_matches = version_in_range_with_dialect(to, &dep.range, dep.version_dialect);
+        let from_matches = from.and_then(|from_v| {
+            version_in_range_with_dialect(from_v, &dep.range, dep.version_dialect)
+        });
+        if dep.relation.is_negative() {
+            match to_matches {
+                // Entering a negative range introduces an incompatibility.
+                Some(true) => {
+                    if from_matches != Some(true) {
+                        breaks.push(entry);
+                    }
+                }
+                // Leaving a negative range resolves the declared conflict.
+                Some(false) => {
+                    if from_matches == Some(true) {
+                        now_satisfied.push(entry);
+                    }
+                }
+                None => undecidable.push(entry),
+            }
+            continue;
+        }
+        match to_matches {
             Some(true) => {
                 // Accepts `to`. If it rejected `from`, the bump fixes it.
-                if let Some(from_v) = from
-                    && matches!(
-                        version_in_range_with_dialect(from_v, &dep.range, dep.version_dialect),
-                        Some(false)
-                    )
-                {
+                if from_matches == Some(false) {
                     now_satisfied.push(entry);
                 }
             }
@@ -227,6 +265,17 @@ mod tests {
             .emit();
     }
 
+    fn declared_relation(store: &mut FactStore, from: &str, to: &str, range: &str, relation: &str) {
+        store
+            .fact("meta", kind::DEPENDENCY)
+            .subject(from)
+            .attr("dep", to)
+            .attr("range", range)
+            .attr("mandatory", true)
+            .attr("relation", relation)
+            .emit();
+    }
+
     fn reference(store: &mut FactStore, path: &str, domain: &str, ns: &str) {
         store
             .fact("resource-ast-scanner", kind::RESOURCE_AST_PARSED)
@@ -240,6 +289,19 @@ mod tests {
             .attr("to", format!("{ns}:thing"))
             .attr("namespace", ns)
             .emit();
+    }
+
+    #[test]
+    fn leaving_breaks_range_is_a_fix_not_a_breakage() {
+        let mut store = FactStore::new();
+        mod_fact(&mut store, "consumer", "1.0.0");
+        mod_fact(&mut store, "target", "1.5.0");
+        declared_relation(&mut store, "consumer", "target", "<2.0", "breaks");
+        let impact = update_impact(&store, "target", Some("1.5.0"), "3.0.0");
+        assert!(impact.breaks.is_empty());
+        assert_eq!(impact.now_satisfied.len(), 1);
+        let removal = remove_impact(&store, "target");
+        assert!(removal.declared_dependents.is_empty());
     }
 
     #[test]

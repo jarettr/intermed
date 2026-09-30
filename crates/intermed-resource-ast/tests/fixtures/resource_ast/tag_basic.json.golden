@@ -4,6 +4,7 @@
   "parse_status": "parsed",
   "references": [
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "create",
@@ -12,6 +13,7 @@
       "target": "create:zinc_ingot"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "minecraft",
@@ -20,6 +22,7 @@
       "target": "minecraft:gold_ingot"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": false,
       "namespace": "minecraft",
@@ -28,6 +31,7 @@
       "target": "minecraft:iron_ingot"
     },
     {
+      "certainty": "exact-schema-reference",
       "conditions": [],
       "is_tag": true,
       "namespace": "c",
@@ -39,10 +43,26 @@
   "resource_path": "data/c/tags/items/ingots.json",
   "summary": {
     "entries": [
-      "c:ingots/copper",
-      "create:zinc_ingot",
-      "minecraft:gold_ingot",
-      "minecraft:iron_ingot"
+      {
+        "id": "c:ingots/copper",
+        "is_tag": true,
+        "required": true
+      },
+      {
+        "id": "create:zinc_ingot",
+        "is_tag": false,
+        "required": false
+      },
+      {
+        "id": "minecraft:gold_ingot",
+        "is_tag": false,
+        "required": true
+      },
+      {
+        "id": "minecraft:iron_ingot",
+        "is_tag": false,
+        "required": true
+      }
     ],
     "entry_count": 4,
     "has_required_flag": true,

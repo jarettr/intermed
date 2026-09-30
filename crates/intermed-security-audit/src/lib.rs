@@ -31,20 +31,21 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use intermed_doctor_core::evidence::{
-    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, Severity,
+    Category, EvidenceEdge, Finding, FindingVisibility, FixCandidate, ProofKind, Severity,
 };
 use intermed_doctor_core::facts::{SourceRef, kind};
 use intermed_doctor_core::{
-    CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target, TargetKind,
+    CollectCtx, Collector, CollectorOutcome, JarCache, Layer, Rule, RuleCtx, Target,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 const EXTRACTOR: &str = "security-scanner";
 /// Cache key version for this collector's payload. The crate version invalidates
 /// the cache automatically on every release; bump the trailing revision when the
 /// detection logic changes within a single release.
-const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r6");
+const CACHE_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-r7");
 
 /// Implementation status for help text.
 pub const STATUS: &str = "active: Phase 6";
@@ -62,6 +63,12 @@ pub fn rule() -> impl Rule {
 /// Per-mod security signals aggregated from all classes in a jar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModSecurityRecord {
+    /// Content-addressed cross-layer join key.
+    #[serde(default)]
+    pub artifact_id: String,
+    /// Exact physical locator; not an identity key.
+    #[serde(default)]
+    pub source_locator: String,
     pub archive: String,
     pub mod_id: String,
     /// Detected signals, each tagged with its provenance (structural vs
@@ -150,20 +157,27 @@ impl Collector for SecurityCollector {
             kind::USES_REFLECTION_SET_ACCESSIBLE,
             kind::USES_UNSAFE,
             kind::USES_NATIVE_LIBRARY,
+            kind::USES_DYNAMIC_CLASS_DEFINITION,
+            kind::USES_REFLECTIVE_INVOCATION,
+            kind::USES_SCRIPT_ENGINE,
+            kind::USES_DESERIALIZATION,
+            kind::USES_SYSTEM_EXIT,
+            kind::USES_METHOD_HANDLES,
+            kind::SCAN_TRUNCATED,
+            kind::UNPARSEABLE_ARCHIVE,
         ])
+        .consumes([kind::ARTIFACT_ROLE])
         .regions([intermed_doctor_core::TargetRegion::Artifacts])
     }
 
     fn applies(&self, target: &Target) -> bool {
-        mods_dir(target).is_some()
+        !target.artifact_roots().is_empty()
     }
 
     fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
-        let Some(dir) = mods_dir(ctx.target) else {
-            return CollectorOutcome::skipped("no mods directory for security scan");
-        };
-        match scan_mods_dir_filtered(&dir, ctx.jar_cache, &ctx.settings.scan) {
-            Ok(scan) => {
+        match scan_target_filtered(ctx.target, ctx.jar_cache, &ctx.settings.scan) {
+            Ok(mut scan) => {
+                apply_canonical_metadata_identities(&mut scan, ctx.inputs);
                 let emitted = emit_scan(ctx, &scan);
                 // Mods that carry signals but sit below the finding threshold
                 // (`should_emit_finding`) are otherwise invisible — surface the
@@ -194,6 +208,37 @@ impl Collector for SecurityCollector {
     }
 }
 
+fn apply_canonical_metadata_identities(
+    scan: &mut SecurityScan,
+    facts: &dyn intermed_doctor_core::facts::FactRead,
+) {
+    let mut identities: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for fact in facts.by_kind(kind::ARTIFACT_ROLE) {
+        if fact.attr("identity_certainty") != Some("confirmed")
+            || !matches!(
+                fact.attr("activation"),
+                Some("active" | "self-loader-bootstrap")
+            )
+        {
+            continue;
+        }
+        let Some(declared_id) = fact.attr("declared_id") else {
+            continue;
+        };
+        identities
+            .entry(fact.subject.replace('\\', "/"))
+            .or_default()
+            .insert(declared_id.to_string());
+    }
+    for record in &mut scan.records {
+        if let Some(canonical) = identities.get(&record.source_locator)
+            && let Some(primary) = canonical.first()
+        {
+            record.mod_id = primary.clone();
+        }
+    }
+}
+
 /// Numeric counts are emitted as typed `Int` attributes, never strings: the typed
 /// fact model and the DuckDB `val_int` column both require it, and writing a count
 /// as a string silently produced `NULL` in SQL aggregation (a backend divergence).
@@ -204,6 +249,8 @@ fn count_attr(value: usize) -> i64 {
 fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SecurityScan) -> usize {
     let mut emitted = 0usize;
     for r in &scan.records {
+        let report_locator =
+            intermed_doctor_core::portable_artifact_locator(&r.source_locator, &r.archive);
         for reason in &r.truncations {
             ctx.store
                 .fact(EXTRACTOR, kind::SCAN_TRUNCATED)
@@ -219,7 +266,9 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SecurityScan) -> usize {
             ctx.store
                 .fact(EXTRACTOR, detection.signal.fact_kind())
                 .subject(r.mod_id.clone())
+                .attr("artifact_id", r.artifact_id.clone())
                 .attr("archive", r.archive.clone())
+                .attr("source_locator", r.source_locator.clone())
                 .attr("provenance", detection.provenance.as_str())
                 .attr("evidence_strength", detection.strength.as_str())
                 .attr("dangerous_classes", count_attr(r.dangerous_classes))
@@ -237,7 +286,7 @@ fn emit_scan(ctx: &mut CollectCtx<'_>, scan: &SecurityScan) -> usize {
                             .unwrap_or(0),
                     ),
                 )
-                .source(SourceRef::inside(r.archive.clone(), "classes"))
+                .source(SourceRef::inside(report_locator.clone(), "classes"))
                 .confidence(
                     detection
                         .provenance
@@ -361,7 +410,7 @@ pub fn aggregate_security_drafts(ctx: &RuleCtx<'_>) -> BTreeMap<String, Security
             continue;
         };
         for f in ctx.store.by_kind(kind_name) {
-            let draft = by_mod.entry(f.subject.clone()).or_default();
+            let draft = by_mod.entry(f.subject.to_string()).or_default();
             draft.record_signal(
                 signal,
                 f.id,
@@ -451,6 +500,7 @@ pub fn security_findings_from_drafts(
             Finding::builder("security-api-risk", format!("security-api-risk:{mod_id}"))
                 .severity(severity)
                 .category(Category::Security)
+                .proof_kind(ProofKind::Observation)
                 .confidence(confidence)
                 .title(format!(
                     "Mod `{mod_id}` — {} security API signal(s) in {} of {} class(es)",
@@ -556,10 +606,26 @@ pub fn signal_for_fact_kind(kind_name: &str) -> Option<SecuritySignal> {
 // ── Scanner ──────────────────────────────────────────────────────────────
 
 pub fn scan_target(target: &Target) -> Result<SecurityScan, SecurityScanError> {
-    let Some(dir) = mods_dir(target) else {
-        return Err(SecurityScanError("target has no mods directory".into()));
-    };
-    scan_mods_dir(&dir)
+    scan_target_filtered(target, None, &intermed_doctor_core::ScanSettings::default())
+}
+
+fn scan_target_filtered(
+    target: &Target,
+    cache: Option<&JarCache>,
+    scan: &intermed_doctor_core::ScanSettings,
+) -> Result<SecurityScan, SecurityScanError> {
+    let mut jars = Vec::new();
+    for root in target.artifact_roots() {
+        let mut root_jars = intermed_doctor_core::list_jar_archives(&root.path, scan)
+            .map_err(|e| SecurityScanError(format!("read {}: {e}", root.path.display())))?;
+        jars.append(&mut root_jars);
+    }
+    jars.sort();
+    jars.dedup();
+    if jars.is_empty() && target.artifact_roots().is_empty() {
+        return Err(SecurityScanError("target has no artifact roots".into()));
+    }
+    scan_jars(&jars, cache, &target.path.display().to_string())
 }
 
 pub fn scan_mods_dir(dir: &Path) -> Result<SecurityScan, SecurityScanError> {
@@ -589,25 +655,36 @@ pub fn scan_mods_dir_filtered(
     let jars = intermed_doctor_core::list_jar_archives(dir, scan)
         .map_err(|e| SecurityScanError(format!("read {}: {e}", dir.display())))?;
 
+    scan_jars(&jars, cache, &dir.display().to_string())
+}
+
+fn scan_jars(
+    jars: &[PathBuf],
+    cache: Option<&JarCache>,
+    target_label: &str,
+) -> Result<SecurityScan, SecurityScanError> {
     // Each jar is parsed independently; fan out across cores. `par_iter().map()`
     // preserves input order, so the aggregated output stays deterministic.
-    let scanned: Vec<(String, CachedSecurityJar)> = jars
+    let scanned: Vec<(String, String, CachedSecurityJar)> = jars
         .par_iter()
         .map(|jar| {
             let archive = file_name_of(jar);
+            let source_locator = jar.display().to_string().replace('\\', "/");
             let cached = match cache {
                 Some(c) => c.get_or_scan(EXTRACTOR, CACHE_VERSION, jar, || scan_jar_cached(jar)),
                 None => scan_jar_cached(jar),
             };
-            (archive, cached)
+            (archive, source_locator, cached)
         })
         .collect();
 
     let mut records = Vec::new();
     let mut failures = Vec::new();
-    for (archive, cached) in scanned {
+    for (archive, source_locator, cached) in scanned {
         match cached {
             CachedSecurityJar::Ok(partial) => records.push(ModSecurityRecord {
+                artifact_id: partial.artifact_id,
+                source_locator,
                 archive,
                 mod_id: partial.mod_id,
                 signals: partial.signals,
@@ -624,7 +701,7 @@ pub fn scan_mods_dir_filtered(
     }
 
     Ok(SecurityScan {
-        target: dir.display().to_string(),
+        target: target_label.to_string(),
         records,
         failures,
     })
@@ -632,6 +709,7 @@ pub fn scan_mods_dir_filtered(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedSecurityPartial {
+    artifact_id: String,
     mod_id: String,
     signals: Vec<DetectedSignal>,
     classes_scanned: usize,
@@ -665,6 +743,7 @@ fn scan_jar(jar: &Path) -> Result<CachedSecurityPartial, SecurityScanError> {
         .unwrap_or("?")
         .to_string();
 
+    let artifact_id = artifact_id(jar)?;
     let file = std::fs::File::open(jar)
         .map_err(|e| SecurityScanError(format!("open {}: {e}", jar.display())))?;
     let mut zip = zip::ZipArchive::new(file)
@@ -747,6 +826,7 @@ fn scan_jar(jar: &Path) -> Result<CachedSecurityPartial, SecurityScanError> {
     }
 
     Ok(CachedSecurityPartial {
+        artifact_id,
         mod_id,
         signals: collapse::collapse_per_capability(all_signals),
         classes_scanned,
@@ -755,6 +835,24 @@ fn scan_jar(jar: &Path) -> Result<CachedSecurityPartial, SecurityScanError> {
         framework_classes_excluded,
         truncations,
     })
+}
+
+fn artifact_id(path: &Path) -> Result<String, SecurityScanError> {
+    let mut file = std::fs::File::open(path).map_err(|error| {
+        SecurityScanError(format!("open {} for hashing: {error}", path.display()))
+    })?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| SecurityScanError(format!("hash {}: {error}", path.display())))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{:x}", digest.finalize()))
 }
 
 /// Code under these package roots belongs to a runtime framework, not to the
@@ -773,17 +871,6 @@ const MAX_CLASS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_CLASS_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CLASSES: usize = 100_000;
 
-fn mods_dir(target: &Target) -> Option<PathBuf> {
-    target.mods_dir.clone().or_else(|| {
-        if target.kind == TargetKind::ModsDir {
-            Some(target.path.clone())
-        } else {
-            let dir = target.path.join("mods");
-            dir.is_dir().then_some(dir)
-        }
-    })
-}
-
 fn is_class_entry(name: &str) -> bool {
     name.ends_with(".class") && !name.contains("..")
 }
@@ -799,9 +886,12 @@ fn file_name_of(path: &Path) -> String {
 mod tests {
     use super::*;
     use detect::EvidenceStrength;
+    use std::io::Write;
 
     fn record_with(signals: &[SecuritySignal]) -> ModSecurityRecord {
         ModSecurityRecord {
+            artifact_id: "sha256:test".into(),
+            source_locator: "m.jar".into(),
             archive: "m.jar".into(),
             mod_id: "m".into(),
             signals: signals
@@ -821,6 +911,40 @@ mod tests {
     }
 
     #[test]
+    fn target_scan_includes_plugin_artifact_root() {
+        let root = std::env::temp_dir().join(format!(
+            "intermed-security-plugin-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let mut zip =
+            zip::ZipWriter::new(std::fs::File::create(plugins.join("plugin.jar")).unwrap());
+        zip.start_file("plugin.yml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"name: Plugin\nversion: 1\nmain: example.Plugin\n")
+            .unwrap();
+        zip.finish().unwrap();
+        let target = Target {
+            path: root.clone(),
+            kind: intermed_doctor_core::TargetKind::Server,
+            mods_dir: None,
+            game_root: Some(root.clone()),
+            layout: None,
+            instance_type: None,
+            spark_report: None,
+        };
+        let scan = scan_target(&target).unwrap();
+        assert_eq!(scan.records.len(), 1);
+        assert_eq!(scan.records[0].archive, "plugin.jar");
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn emitted_numeric_attrs_are_typed_ints_not_strings() {
         use intermed_doctor_core::facts::{AttrValue, FactStore};
         use intermed_doctor_core::settings::DiagnosisSettings;
@@ -837,7 +961,7 @@ mod tests {
 
         let target = Target {
             path: ".".into(),
-            kind: TargetKind::ModsDir,
+            kind: intermed_doctor_core::TargetKind::ModsDir,
             mods_dir: None,
             game_root: None,
             layout: None,
@@ -849,6 +973,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };

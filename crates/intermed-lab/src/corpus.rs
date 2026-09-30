@@ -18,8 +18,17 @@ use crate::{LabError, read_json, write_json_atomic};
 /// Schema tag for the candidate-pool input.
 pub const CORPUS_CANDIDATES_SCHEMA: &str = "intermed-corpus-candidates-v1";
 /// Canonical schema tag for the emitted lock.
-pub const CORPUS_LOCK_SCHEMA: &str = "intermed-corpus-lock-v2";
+pub const CORPUS_LOCK_SCHEMA: &str = "intermed-corpus-lock-v3";
+pub const CORPUS_LOCK_SCHEMA_V2: &str = "intermed-corpus-lock-v2";
 pub const CORPUS_LOCK_SCHEMA_V1: &str = "intermed-corpus-lock-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerificationCompleteness {
+    Complete,
+    #[default]
+    Partial,
+}
 
 /// The environment a corpus is pinned for.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -112,9 +121,24 @@ pub struct CorpusLock {
     pub files: Vec<LockedPackFile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pack: Option<PackIdentity>,
-    /// SHA-256 over the canonical lock contents — the lock's identity. Two locks
-    /// with this digest pin the exact same corpus for the exact same environment.
+    /// Compatibility alias for `lock_manifest_digest` in v3.
     pub digest: String,
+    /// Identity of materialized paths and their content hashes. Acquisition URLs
+    /// and provider coordinates do not participate.
+    #[serde(default)]
+    pub content_digest: String,
+    /// Identity of the complete canonical lock declaration excluding transport
+    /// URLs.
+    #[serde(default)]
+    pub lock_manifest_digest: String,
+    /// Identity of acquisition URLs only. A CDN migration changes this value but
+    /// not `content_digest`.
+    #[serde(default)]
+    pub acquisition_digest: String,
+    #[serde(default)]
+    pub verification_completeness: VerificationCompleteness,
+    #[serde(default)]
+    pub unhashed_files: usize,
 }
 
 /// Source of candidate mods. The default ([`FileCandidateProvider`]) reads a
@@ -178,31 +202,49 @@ impl CorpusLock {
             })
             .collect();
 
-        let digest = lock_digest(&candidates.environment, &mods, &[], None);
+        let digests = lock_digests(&candidates.environment, &mods, &[], None);
         CorpusLock {
             schema: CORPUS_LOCK_SCHEMA.to_string(),
             environment: candidates.environment.clone(),
             mods,
             files: Vec::new(),
             pack: None,
-            digest,
+            digest: digests.manifest.clone(),
+            content_digest: digests.content,
+            lock_manifest_digest: digests.manifest,
+            acquisition_digest: digests.acquisition,
+            verification_completeness: digests.completeness,
+            unhashed_files: digests.unhashed_files,
         }
     }
 
     /// Recompute the digest and verify it matches the stored one (lock integrity).
     #[must_use]
     pub fn verify_digest(&self) -> bool {
-        let expected = if self.schema == CORPUS_LOCK_SCHEMA_V1 {
-            legacy_lock_digest(&self.environment, &self.mods)
-        } else {
-            lock_digest(
-                &self.environment,
-                &self.mods,
-                &self.files,
-                self.pack.as_ref(),
-            )
-        };
-        self.digest == expected
+        if self.schema == CORPUS_LOCK_SCHEMA_V1 {
+            return self.digest == legacy_lock_digest(&self.environment, &self.mods);
+        }
+        if self.schema == CORPUS_LOCK_SCHEMA_V2 {
+            return self.digest
+                == v2_lock_digest(
+                    &self.environment,
+                    &self.mods,
+                    &self.files,
+                    self.pack.as_ref(),
+                );
+        }
+        let expected = lock_digests(
+            &self.environment,
+            &self.mods,
+            &self.files,
+            self.pack.as_ref(),
+        );
+        self.digest == expected.manifest
+            && self.lock_manifest_digest == expected.manifest
+            && self.content_digest == expected.content
+            && self.acquisition_digest == expected.acquisition
+            && self.verification_completeness == expected.completeness
+            && self.unhashed_files == expected.unhashed_files
     }
 
     #[must_use]
@@ -232,31 +274,177 @@ impl CorpusLock {
                 }
             })
             .collect::<Vec<_>>();
-        let digest = lock_digest(&environment, &mods, &files, Some(&pack));
+        let digests = lock_digests(&environment, &mods, &files, Some(&pack));
         Self {
             schema: CORPUS_LOCK_SCHEMA.to_string(),
             environment,
             mods,
             files,
             pack: Some(pack),
-            digest,
+            digest: digests.manifest.clone(),
+            content_digest: digests.content,
+            lock_manifest_digest: digests.manifest,
+            acquisition_digest: digests.acquisition,
+            verification_completeness: digests.completeness,
+            unhashed_files: digests.unhashed_files,
         }
     }
 }
 
-/// Canonical content digest: environment + each pinned
-/// `project_id@version_id#sha512` (sorted), independent of JSON formatting.
-///
-/// The artifact hash is part of the digest on purpose. The lock is sold as a
-/// *supply-chain* guarantee ("two locks with one digest pin the exact same
-/// corpus"), so it must address *content*, not just coordinates. With only
-/// `project_id@version_id`, an artifact re-uploaded under the same `version_id`
-/// with a different payload would still match — the precise substitution attack
-/// the lock claims to stop. The `CandidateProvider` trait is provider-agnostic
-/// (Modrinth's immutable `version_id` is not guaranteed elsewhere), and `sha512`
-/// exists specifically to pin content, so it is folded in here. Mods without a
-/// known hash contribute an empty field, leaving them coordinate-pinned only.
-fn lock_digest(
+struct LockDigests {
+    content: String,
+    manifest: String,
+    acquisition: String,
+    completeness: VerificationCompleteness,
+    unhashed_files: usize,
+}
+
+fn digest_field(hasher: &mut Sha256, tag: &str, value: &str) {
+    hasher.update((tag.len() as u64).to_be_bytes());
+    hasher.update(tag.as_bytes());
+    hasher.update((value.len() as u64).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn lock_digests(
+    env: &CorpusEnvironment,
+    mods: &[LockedMod],
+    files: &[LockedPackFile],
+    pack: Option<&PackIdentity>,
+) -> LockDigests {
+    let mut content = Sha256::new();
+    let mut manifest = Sha256::new();
+    let mut acquisition = Sha256::new();
+    for hasher in [&mut content, &mut manifest, &mut acquisition] {
+        hasher.update(b"intermed-corpus-lock-v3\0");
+    }
+    for (tag, value) in [
+        ("loader", env.loader.as_str()),
+        ("minecraft", env.mc_version.as_str()),
+        ("side", env.side.as_str()),
+        (
+            "loader-version",
+            env.loader_version.as_deref().unwrap_or(""),
+        ),
+    ] {
+        digest_field(&mut manifest, tag, value);
+    }
+
+    let mut unhashed_files = 0usize;
+    if files.is_empty() {
+        let mut ordered = mods.to_vec();
+        ordered.sort();
+        for module in &ordered {
+            digest_field(&mut content, "path", &module.file_name);
+            digest_field(
+                &mut content,
+                "sha512",
+                module.sha512.as_deref().unwrap_or("unverified"),
+            );
+            if module.sha512.is_none() {
+                unhashed_files += 1;
+            }
+        }
+    } else {
+        let mut ordered = files.to_vec();
+        ordered.sort();
+        for file in &ordered {
+            digest_field(&mut content, "path", &file.path);
+            let hash = file
+                .sha512
+                .as_deref()
+                .map(|value| format!("sha512:{value}"))
+                .or_else(|| {
+                    file.sha256
+                        .as_deref()
+                        .map(|value| format!("sha256:{value}"))
+                });
+            digest_field(
+                &mut content,
+                "content-hash",
+                hash.as_deref().unwrap_or("unverified"),
+            );
+            if hash.is_none() {
+                unhashed_files += 1;
+            }
+        }
+    }
+    if let Some(pack) = pack {
+        digest_field(&mut content, "manifest-sha256", &pack.manifest_sha256);
+    }
+
+    let mut ordered_mods = mods.to_vec();
+    ordered_mods.sort();
+    for module in &ordered_mods {
+        digest_field(&mut manifest, "project", &module.project_id);
+        digest_field(&mut manifest, "version", &module.version_id);
+        digest_field(&mut manifest, "file", &module.file_name);
+        digest_field(
+            &mut manifest,
+            "sha512",
+            module.sha512.as_deref().unwrap_or(""),
+        );
+        digest_field(
+            &mut acquisition,
+            "download",
+            module.download_url.as_deref().unwrap_or(""),
+        );
+    }
+    let mut ordered_files = files.to_vec();
+    ordered_files.sort();
+    for file in &ordered_files {
+        digest_field(&mut manifest, "path", &file.path);
+        digest_field(
+            &mut manifest,
+            "sha512",
+            file.sha512.as_deref().unwrap_or(""),
+        );
+        digest_field(
+            &mut manifest,
+            "sha256",
+            file.sha256.as_deref().unwrap_or(""),
+        );
+        digest_field(
+            &mut manifest,
+            "client",
+            if file.client_required { "1" } else { "0" },
+        );
+        digest_field(
+            &mut manifest,
+            "server",
+            if file.server_required { "1" } else { "0" },
+        );
+        let mut downloads = file.downloads.clone();
+        downloads.sort();
+        for download in downloads {
+            digest_field(&mut acquisition, "download", &download);
+        }
+    }
+    if let Some(pack) = pack {
+        digest_field(&mut manifest, "pack-provider", &pack.provider);
+        digest_field(&mut manifest, "pack-name", &pack.name);
+        digest_field(&mut manifest, "pack-version", &pack.version_id);
+        digest_field(&mut manifest, "manifest-sha256", &pack.manifest_sha256);
+    }
+    let content_digest = format!("{:x}", content.finalize());
+    digest_field(&mut manifest, "content-digest", &content_digest);
+    LockDigests {
+        content: content_digest,
+        manifest: format!("{:x}", manifest.finalize()),
+        acquisition: format!("{:x}", acquisition.finalize()),
+        completeness: if unhashed_files == 0 {
+            VerificationCompleteness::Complete
+        } else {
+            VerificationCompleteness::Partial
+        },
+        unhashed_files,
+    }
+}
+
+/// Reproduce the v2 lock digest byte-for-byte for migration reads. V2 mixed
+/// environment, provider coordinates, content hashes, and acquisition URLs into
+/// one value; v3 deliberately separates those identities in [`lock_digests`].
+fn v2_lock_digest(
     env: &CorpusEnvironment,
     mods: &[LockedMod],
     files: &[LockedPackFile],
@@ -363,11 +551,11 @@ pub fn read_lock(path: &Path) -> Result<CorpusLock, LabError> {
     let lock: CorpusLock = read_json(path)?;
     if !matches!(
         lock.schema.as_str(),
-        CORPUS_LOCK_SCHEMA | CORPUS_LOCK_SCHEMA_V1
+        CORPUS_LOCK_SCHEMA | CORPUS_LOCK_SCHEMA_V2 | CORPUS_LOCK_SCHEMA_V1
     ) {
         return Err(LabError::schema(
             path,
-            "intermed-corpus-lock-v1 or intermed-corpus-lock-v2",
+            "intermed-corpus-lock-v1, v2, or v3",
             &lock.schema,
         ));
     }
@@ -479,6 +667,40 @@ mod tests {
         let lock_b = CorpusLock::from_candidates(&swapped);
 
         assert_ne!(lock_a.digest, lock_b.digest);
+    }
+
+    #[test]
+    fn acquisition_url_does_not_change_content_identity() {
+        let mut candidate = candidate("a", "1", 1);
+        candidate.sha512 = Some("a".repeat(128));
+        candidate.download_url = Some("https://cdn-a.invalid/a.jar".into());
+        let base = CorpusCandidates {
+            schema: CORPUS_CANDIDATES_SCHEMA.into(),
+            environment: env(),
+            candidates: vec![candidate],
+        };
+        let lock_a = CorpusLock::from_candidates(&base);
+        let mut moved = base.clone();
+        moved.candidates[0].download_url = Some("https://cdn-b.invalid/a.jar".into());
+        let lock_b = CorpusLock::from_candidates(&moved);
+        assert_eq!(lock_a.content_digest, lock_b.content_digest);
+        assert_eq!(lock_a.lock_manifest_digest, lock_b.lock_manifest_digest);
+        assert_ne!(lock_a.acquisition_digest, lock_b.acquisition_digest);
+    }
+
+    #[test]
+    fn unhashed_files_are_explicitly_partial() {
+        let lock = CorpusLock::from_candidates(&CorpusCandidates {
+            schema: CORPUS_CANDIDATES_SCHEMA.into(),
+            environment: env(),
+            candidates: vec![candidate("a", "1", 1)],
+        });
+        assert_eq!(
+            lock.verification_completeness,
+            VerificationCompleteness::Partial
+        );
+        assert_eq!(lock.unhashed_files, 1);
+        assert!(lock.verify_digest());
     }
 
     #[test]

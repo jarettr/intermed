@@ -73,7 +73,8 @@ impl Side {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActivationStatus {
-    /// Positive runtime evidence the mixin applied (reserved for log-join).
+    /// Canonical artifact/environment evidence confirms the declaration is
+    /// applicable (runtime evidence may further confirm a concrete site).
     ActiveConfirmed,
     /// Declared in a config with no gating — assumed to apply, not confirmed.
     ActiveAssumed,
@@ -123,11 +124,21 @@ pub struct TargetNamespace {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MixinConfigRecord {
     pub archive: String,
+    #[serde(default)]
+    pub artifact_id: String,
     pub path: String,
     pub mod_id: String,
+    #[serde(default)]
+    pub identity_certainty: String,
     pub package: String,
     pub priority: i64,
     pub refmap: Option<String>,
+    /// Refmap lifecycle state: NotDeclared, DeclaredAndLoaded, DeclaredMissing,
+    /// DeclaredUnreadable, DeclaredTooLarge, or DeclaredInvalid. This tracks the
+    /// actual runtime truth of whether the refmap is available for resolution,
+    /// distinct from whether it was merely declared.
+    #[serde(default)]
+    pub refmap_status: crate::refmap::RefmapStatus,
     pub mixins: Vec<String>,
     /// A `plugin` class declared by the config (`IMixinConfigPlugin`). A plugin
     /// can enable/disable mixins dynamically at load time, so static analysis of
@@ -146,7 +157,11 @@ pub struct MixinConfigRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MixinClassRecord {
     pub archive: String,
+    #[serde(default)]
+    pub artifact_id: String,
     pub mod_id: String,
+    #[serde(default)]
+    pub identity_certainty: String,
     pub config: String,
     pub class_name: String,
     pub class_path: String,
@@ -339,6 +354,21 @@ pub struct ResolvedInjectionPoint {
     /// The `@At` `target` member (INVOKE/FIELD), dotted, when present.
     #[serde(default)]
     pub at_target_member: String,
+    /// Typed `@At` constraints required for instruction-accurate verification.
+    /// Keeping these separate from the human-readable `at_detail` prevents the
+    /// production site builder from silently discarding opcode/shift/slice data.
+    #[serde(default)]
+    pub at_constraints: AtVerificationConstraints,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd, Default)]
+pub struct AtVerificationConstraints {
+    pub slice: String,
+    pub shift: String,
+    pub by: Option<i32>,
+    pub opcode: Option<i32>,
+    pub args: Vec<String>,
+    pub id: String,
 }
 
 fn default_injection_type() -> String {
@@ -684,6 +714,10 @@ impl HandlerDataflow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Ord, PartialOrd)]
 pub struct HandlerEffect {
     pub handler_method: String,
+    /// The handler's Code attribute was decoded. A zero call count is proof of
+    /// replacement only when this is true; absent bytecode is unknown, not zero.
+    #[serde(default)]
+    pub bytecode_observed: bool,
     /// Handler writes to its own locals — an implementation detail, not a
     /// target-frame mutation. See [`HandlerBodySummary::handler_local_store`].
     #[serde(alias = "modifies_locals")]
@@ -769,6 +803,8 @@ pub struct MixinEffect {
     pub target: String,
     pub method: String,
     pub handler_method: String,
+    #[serde(default)]
+    pub handler_descriptor: String,
     pub operation: MixinOperation,
     #[serde(default)]
     pub effect_kinds: Vec<EffectiveEffectKind>,
@@ -1310,6 +1346,12 @@ pub struct MixinScan {
     #[serde(default)]
     pub security_surfaces: Vec<crate::subsystem::MixinSecuritySurface>,
     pub failures: Vec<MixinScanFailure>,
+    /// Environment conflict detected during collection: authoritative mc_version or
+    /// loader could not be resolved (multiple conflicting facts). Degrades certainty
+    /// for activation, runtime namespace, mapping compatibility, and apply-failure
+    /// proofs — all depend on knowing the authoritative environment.
+    #[serde(default)]
+    pub environment_conflicted: bool,
 }
 
 /// Post-collection analysis output consumed by fact emission and rules.

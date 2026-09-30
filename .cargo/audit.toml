@@ -10,6 +10,10 @@ ignore = [
     "RUSTSEC-2024-0384",
     # `paste` is unmaintained (proc-macro dep, transitive); no vulnerability.
     "RUSTSEC-2024-0436",
+    # `fxhash` is unmaintained but has no vulnerability. It is a transitive
+    # implementation dependency of the security-patched Wasmtime 36 branch
+    # used only by the optional WASM backend.
+    "RUSTSEC-2025-0057",
     # `rkyv` 0.7 OOB read in Rc/Arc archive validation (RUSTSEC-2026-0235).
     # Transitive: duckdb → rust_decimal → rkyv 0.7.  InterMed never
     # deserializes rkyv archives; the code path is unreachable.  Waiting on

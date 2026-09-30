@@ -353,7 +353,11 @@ fn collect_layer_c_facts(
         // Layer M — resource/data semantics: needed for the implicit + effective
         // dependency levels (`implicit_dependency_edge` / `resource_reference`).
         .collector(intermed_resource_ast::collector())
-        .build();
+        .build_checked()
+        .map_err(|error| {
+            eprintln!("error: invalid dependency-analysis registration: {error}");
+            ExitCode::from(2)
+        })?;
     let run = engine.diagnose_with_facts(target);
     Ok(intermed_doctor_core::facts::FactStore::from_snapshot(
         run.facts,

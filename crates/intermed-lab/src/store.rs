@@ -601,6 +601,11 @@ mod tests {
             files: Vec::new(),
             pack: None,
             digest: String::new(),
+            content_digest: String::new(),
+            lock_manifest_digest: String::new(),
+            acquisition_digest: String::new(),
+            verification_completeness: crate::corpus::VerificationCompleteness::Partial,
+            unhashed_files: 0,
         };
         // Use the public canonical builder to obtain a valid digest.
         let candidates = crate::corpus::CorpusCandidates {

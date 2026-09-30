@@ -75,7 +75,7 @@ impl Collector for ModpackManifestCollector {
                     ),
                 );
             }
-            return CollectorOutcome::skipped("no modpack manifest present");
+            return CollectorOutcome::not_applicable("no modpack manifest present");
         };
         let mut emitted = 0usize;
         let locator = manifest.locator.clone();
@@ -550,6 +550,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };
@@ -601,6 +602,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };
@@ -634,6 +636,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };
@@ -668,6 +671,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };
@@ -690,6 +694,7 @@ mod tests {
         let mut ctx = CollectCtx {
             target: &target,
             store: &mut store,
+            inputs: &FactStore::new(),
             jar_cache: None,
             settings: &settings,
         };

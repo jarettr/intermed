@@ -1,7 +1,7 @@
 {
   "schema": "intermed-rule-pack-v2",
   "id": "intermed-core",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "publisher": "intermed",
   "rules": [
     {
@@ -129,7 +129,7 @@
         "category": "resource",
         "title": "JSON resource needs merge review: {subject}",
         "explanation": "{writer_count} writer(s) touch this path: {writers_list}. {attr:reason}",
-        "fix": "Review the JSON files; InterMed can stage a deterministic overlay preview.",
+        "fix": "Review the domain semantics and choose an explicit merge or winner; no automatic safe merge is available.",
         "tags": ["resource", "json-merge-candidate"]
       }
     },
@@ -200,6 +200,22 @@
       }
     },
     {
+      "id": "resource-conflict-tag-remove",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "tag-remove-order-dependent" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Tag patch is order-dependent (remove): {subject}",
+        "explanation": "{writer_count} writer(s) touch this tag: {writers_list}. {attr:reason}",
+        "fix": "Inspect the NeoForge remove patch in effective resource-pack order; it cannot be represented as a commutative union.",
+        "tags": ["resource", "tag-remove-order-dependent"]
+      }
+    },
+    {
       "id": "resource-conflict-tag-invalid",
       "kind": "fact-finding",
       "input_kinds": ["resource_collision"],
@@ -251,12 +267,28 @@
       "finding": {
         "id": "resource-conflict:{attr:class}:{subject}",
         "rule_id": "resource-conflict",
+        "severity": "warn",
+        "category": "resource",
+        "title": "Legacy object-union classification requires review: {subject}",
+        "explanation": "{writer_count} writer(s) were classified by a legacy generic-object rule: {writers_list}. Domain semantics were not proven.",
+        "fix": "Re-scan with the current VFS classifier and review this domain manually.",
+        "tags": ["resource", "legacy-json-object-classification"]
+      }
+    },
+    {
+      "id": "resource-conflict-sound-event-merge",
+      "kind": "fact-finding",
+      "input_kinds": ["resource_collision"],
+      "where_all": { "attr:class": "sound-event-merge" },
+      "finding": {
+        "id": "resource-conflict:{attr:class}:{subject}",
+        "rule_id": "resource-conflict",
         "severity": "note",
         "category": "resource",
-        "title": "Resource merges as a safe object union: {subject}",
-        "explanation": "{writer_count} writer(s) define disjoint keys in this {attr:domain}: {writers_list}. {attr:reason}",
-        "fix": "No action needed; an overlay can union these deterministically.",
-        "tags": ["resource", "safe-json-object-merge", "safe-merge"]
+        "title": "Sound events can be merged safely: {subject}",
+        "explanation": "{writer_count} writer(s) append compatible sound event definitions: {writers_list}. {attr:reason}",
+        "fix": "No action is required; a safe overlay can materialize the event-level append.",
+        "tags": ["resource", "sound-event-merge", "safe-merge"]
       }
     },
     {
@@ -390,8 +422,8 @@
     {
       "id": "tag-replace-platform",
       "kind": "fact-finding",
-      "input_kinds": ["security_suspect_modification"],
-      "where_all": { "attr:detail": "platform_tag_replace" },
+      "input_kinds": ["resource_platform_observation"],
+      "where_all": { "attr:observation": "tag_replace" },
       "finding": {
         "id": "tag-replace-platform:{subject}",
         "rule_id": "resource-semantics",
@@ -406,8 +438,8 @@
     {
       "id": "recipe-disabled-platform",
       "kind": "fact-finding",
-      "input_kinds": ["security_suspect_modification"],
-      "where_all": { "attr:detail": "platform_recipe_disabled" },
+      "input_kinds": ["resource_platform_observation"],
+      "where_all": { "attr:observation": "recipe_output_empty" },
       "finding": {
         "id": "recipe-disabled-platform:{subject}",
         "rule_id": "resource-semantics",
@@ -489,7 +521,7 @@
         "id": "unknown-source:{subject}",
         "severity": "note",
         "category": "metadata",
-        "title": "Artifact identity could not be established: {subject}",
+        "title": "Artifact identity could not be established: {attr:archive}",
         "explanation": "This jar has no recognizable modern or legacy loader descriptor. Its mod identity could not be established from packaging metadata; this is a packaging/provenance limitation, not evidence that the artifact is unsafe.",
         "fix": "Prefer mods from Modrinth or CurseForge with verifiable metadata.",
         "tags": ["sbom", "provenance"]
@@ -506,7 +538,7 @@
         "severity": "note",
         "category": "security",
         "visibility": "explain-only",
-        "title": "Jar is not JAR-signed: {subject}",
+        "title": "Jar is not JAR-signed: {attr:archive}",
         "explanation": "No META-INF/*.SF signature block was found. Most Fabric/Forge mods ship unsigned; this is informational only.",
         "fix": "Verify mod source manually if supply-chain trust matters.",
         "tags": ["sbom", "signature"]
@@ -562,22 +594,21 @@
     {
       "id": "sbom-security-correlation",
       "kind": "correlation",
-      "anchor": { "kind": "sbom", "alias": "s", "select": ["subject", "attr:trust_score"] },
+      "anchor": { "kind": "sbom", "alias": "s", "select": ["subject", "attr:archive", "attr:trust_score", "attr:provenance_correlation_eligible"] },
       "related_kinds": [
         "uses_process_spawn",
-        "uses_unsafe",
         "uses_dynamic_class_definition",
         "uses_script_engine"
       ],
-      "match_on": "s.subject = related.attr:archive",
-      "where": "s.attr:trust_score < {settings.sbom.well_identified_trust}",
+      "match_on": "s.subject = related.attr:artifact_id",
+      "where": "s.attr:provenance_correlation_eligible = true",
       "finding": {
         "id": "low-trust-capability:{subject}",
         "severity": "warn",
         "category": "security",
-        "title": "Low-provenance jar `{subject}` exercises high-risk capability",
-        "explanation": "`{subject}` could not be confidently identified (trust score {trust}/100) yet statically references high-risk capability/capabilities: {capabilities}. Unknown provenance combined with a dangerous capability is a stronger supply-chain concern than either signal alone.",
-        "fix": "Establish the mod's provenance (known platform + signed/manifest) before trusting a jar that spawns processes, loads native code, or evaluates scripts.",
+        "title": "Low-provenance jar `{attr:archive}` exercises high-risk capability",
+        "explanation": "`{attr:archive}` could not be confidently identified (trust score {trust}/100) yet statically references high-risk capability/capabilities: {capabilities}. Unknown provenance combined with a dangerous capability is a stronger supply-chain concern than either signal alone.",
+        "fix": "Establish the mod's provenance (known project or exact binary pin) before trusting a jar that spawns processes, defines classes, or evaluates scripts; signature integrity alone does not identify the signer.",
         "tags": ["sbom", "security", "correlation"]
       }
     },

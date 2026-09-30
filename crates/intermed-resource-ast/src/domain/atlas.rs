@@ -9,7 +9,7 @@ use crate::domain::DomainParse;
 use crate::model::{ParseStatus, RefRelation, ResourceReference, ResourceSummary};
 use crate::semantic::namespace::namespace_of;
 
-pub const ATLAS_AST_VERSION: &str = "atlas-r2";
+pub const ATLAS_AST_VERSION: &str = "atlas-r3";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AtlasSummary {
@@ -39,8 +39,11 @@ pub fn parse(value: &Value) -> DomainParse {
         };
         let kind = obj.get("type").and_then(Value::as_str).unwrap_or("");
         if kind.ends_with("single") {
+            // Single source: descriptor is `single:{canonical_json_of_object}` for
+            // lossless comparison. The reference edge is still created for resolution.
             if let Some(resource) = obj.get("resource").and_then(Value::as_str) {
-                descriptors.push(format!("single:{resource}"));
+                let canonical = serde_json::to_string(obj).unwrap_or_default();
+                descriptors.push(format!("single:{canonical}"));
                 references.push(ResourceReference {
                     relation: RefRelation::AtlasSource,
                     namespace: namespace_of(resource),
@@ -48,20 +51,16 @@ pub fn parse(value: &Value) -> DomainParse {
                     required: true,
                     conditions: Vec::new(),
                     is_tag: false,
+                    certainty: crate::model::ReferenceCertainty::ExactSchemaReference,
                 });
             }
         } else {
             has_non_single_source = true;
-            // Identify the source by its `source`/`namespace`/`id` payload so two
-            // writers' directory/filter sources can be compared.
-            let detail = obj
-                .get("source")
-                .or_else(|| obj.get("namespace"))
-                .or_else(|| obj.get("id"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            // Directory/filter sources: full canonical JSON of the object (excluding
+            // the `type` field) for precise comparison.
             let short = kind.rsplit(':').next().unwrap_or(kind);
-            descriptors.push(format!("{short}:{detail}"));
+            let canonical = serde_json::to_string(obj).unwrap_or_default();
+            descriptors.push(format!("{short}:{canonical}"));
         }
     }
     descriptors.sort();

@@ -93,6 +93,10 @@ The canonical JSON report is schema `intermed-doctor-report-v2`. Its fields are 
 | `intermed-lab-campaign-v1` | immutable Layer-K campaign plan |
 | `intermed-lab-campaign-state-v1` | resumable campaign state |
 | `intermed-execution-observation-v1` | coverage-aware structured runtime observation |
+| `intermed-corpus-lock-v3` | separated content, manifest, and acquisition identities with hash completeness |
+| `intermed-lab-run-v2` | per-environment smoke outcomes including inconclusive and harness states |
+| `intermed-compatibility-matrix-v2` | compatibility-only matrix with non-evidence attempts counted separately |
+| `intermed-rule-accuracy-v4` | coverage-aware accuracy with nullable ratios and Wilson bounds |
 | `intermed-lab-campaign-report-v1` | campaign metrics and mismatch triage |
 
 See [Schema and migration policy](schema-migrations.md) for the v1 compatibility
@@ -106,7 +110,9 @@ predicate whose row may legitimately omit some terms.
 
 ## Rule backends
 
-Rules run on an in-process engine by default (`--logic columnar`). The same rules
-can run on external backends over the same fact IR — Soufflé (`--logic souffle`,
-needs the `souffle` binary) or DuckDB (`--logic duckdb`, needs a `--features
-duckdb` build). The backend changes where the reasoning runs, not the result.
+Rules run on the native in-process engine by default (`--logic columnar`). DuckDB
+is the production SQL/reference backend (`--logic duckdb`, requiring a
+`--features duckdb` build). Soufflé (`--logic souffle`) and the DataFusion,
+Polars, Ascent, and WASM adapters are experimental surfaces. A backend may reject
+an unsupported IR shape, but a shape it accepts must produce the same findings as
+the reference interpreter; silently approximating rule semantics is forbidden.

@@ -13,8 +13,7 @@
 //! unconditioned: a recipe **serializer type** whose mod is absent. Everything
 //! else is left to the verbose facts for explain, not raised as a finding.
 
-use std::collections::BTreeSet;
-
+use crate::model::ResolvedDependencyModel;
 use intermed_doctor_core::RuleCtx;
 use intermed_doctor_core::evidence::{Category, EvidenceEdge, Finding, FixCandidate, Severity};
 use intermed_doctor_core::facts::kind;
@@ -29,7 +28,8 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
         return Vec::new();
     }
 
-    let installed = installed_providers(ctx);
+    let dependency_model = ResolvedDependencyModel::from_store(ctx.store);
+    let installed = dependency_model.confirmed_provider_ids();
 
     // Keep only candidates that are genuinely actionable, low-FP signals:
     // an unconditioned recipe serializer type whose namespace is neither installed,
@@ -43,6 +43,16 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     for c in &candidates {
         let ns = c.subject.as_str();
         if ns.is_empty() {
+            continue;
+        }
+        // Absence conclusions must never be based solely on a registry heuristic
+        // or an arbitrary `id` field from an opaque custom serializer.
+        if c.attr("reference_certainty")
+            .is_some_and(|certainty| certainty != "exact-schema-reference")
+        {
+            continue;
+        }
+        if dependency_model.has_unresolved_provider(ns) {
             continue;
         }
         // Trust the Layer-M resolve model (§18) when present: only a
@@ -121,32 +131,6 @@ pub fn implicit_findings(ctx: &RuleCtx<'_>, rule_id: &str) -> Vec<Finding> {
     vec![builder.confidence(0.7).build()]
 }
 
-/// The set of namespaces an installed jar can satisfy: every mod / plugin id, plus
-/// declared `provides` alias ids, plus every namespace a resource is *owned* under
-/// (a jar may declare its mod id differently from its resource namespace).
-fn installed_providers(ctx: &RuleCtx<'_>) -> BTreeSet<String> {
-    let mut set = BTreeSet::new();
-    for f in ctx
-        .store
-        .by_kind(kind::MOD)
-        .chain(ctx.store.by_kind(kind::PLUGIN))
-    {
-        set.insert(f.subject.clone());
-    }
-    for f in ctx.store.by_kind(kind::PROVIDED_DEPENDENCY) {
-        if let Some(p) = f.attr("provides") {
-            set.insert(p.to_string());
-        }
-    }
-    // `namespace_owner` (Layer M) maps a namespace to a writer that ships resources
-    // under it — a strong "this namespace exists in the pack" signal that catches
-    // mod-id≠namespace cases the metadata layer alone would miss.
-    for f in ctx.store.by_kind(kind::NAMESPACE_OWNER) {
-        set.insert(f.subject.clone());
-    }
-    set
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +156,7 @@ mod tests {
             .attr("from_path", format!("data/x/recipe/{ns}.json"))
             .attr("required", required)
             .attr("via_recipe_type", via_recipe_type)
+            .attr("reference_certainty", "exact-schema-reference")
             .emit();
     }
 
@@ -232,6 +217,20 @@ mod tests {
     fn conditioned_only_reference_is_not_flagged() {
         let mut store = FactStore::new();
         candidate(&mut store, "thermal", false, true);
+        assert!(run(&store).is_empty());
+    }
+
+    #[test]
+    fn heuristic_reference_cannot_produce_missing_dependency() {
+        let mut store = FactStore::new();
+        store
+            .fact("resource-ast-scanner", kind::IMPLICIT_DEPENDENCY_CANDIDATE)
+            .subject("thermal")
+            .attr("from_path", "data/x/worldgen/example.json")
+            .attr("required", true)
+            .attr("via_recipe_type", true)
+            .attr("reference_certainty", "heuristic-registry-reference")
+            .emit();
         assert!(run(&store).is_empty());
     }
 }

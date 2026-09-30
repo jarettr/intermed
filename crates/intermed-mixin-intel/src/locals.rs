@@ -24,7 +24,8 @@ pub enum LocalCaptureStatus {
     /// The site does not capture any target-method locals.
     NoLocalCapture,
     /// The captured local type is present in the target method's frame.
-    ExactLocalsMatch,
+    #[serde(alias = "exact-locals-match")]
+    CompatibleAtInjectionPoint,
     /// The captured local type is not declared in the target method's frame.
     LocalMissing,
     /// The target frame is available but the captured type could not be pinned to a
@@ -33,6 +34,10 @@ pub enum LocalCaptureStatus {
     /// The target method has neither an LVT nor a StackMapTable — locals cannot be
     /// recovered, and a `CAPTURE_FAILHARD` injector would hard-fail.
     FrameUnavailable,
+    /// Multiple selected injection offsets did not yield one uniform verdict.
+    /// This is intentionally neutral: a definite failure is reported separately,
+    /// while mixed compatible/unknown frames cannot be called exact.
+    PartialAcrossInjectionPoints,
     /// Not checked — the target class/method was not indexed.
     #[default]
     Unchecked,
@@ -42,10 +47,11 @@ impl LocalCaptureStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             LocalCaptureStatus::NoLocalCapture => "no-local-capture",
-            LocalCaptureStatus::ExactLocalsMatch => "exact-locals-match",
+            LocalCaptureStatus::CompatibleAtInjectionPoint => "compatible-at-injection-point",
             LocalCaptureStatus::LocalMissing => "local-missing",
             LocalCaptureStatus::FrameAvailable => "frame-available",
             LocalCaptureStatus::FrameUnavailable => "frame-unavailable",
+            LocalCaptureStatus::PartialAcrossInjectionPoints => "partial-across-injection-points",
             LocalCaptureStatus::Unchecked => "unchecked",
         }
     }
@@ -54,6 +60,31 @@ impl LocalCaptureStatus {
     pub fn is_failure(self) -> bool {
         matches!(self, LocalCaptureStatus::LocalMissing)
     }
+}
+
+/// Combine per-offset local-frame checks for an injector that selects more than
+/// one instruction. Mixin applies at every selected point, so any definite local
+/// mismatch is a failure; otherwise only unanimous compatibility is exact.
+pub fn aggregate_local_capture(
+    statuses: impl IntoIterator<Item = LocalCaptureStatus>,
+) -> LocalCaptureStatus {
+    let statuses = statuses.into_iter().collect::<Vec<_>>();
+    if statuses.is_empty() {
+        return LocalCaptureStatus::Unchecked;
+    }
+    if statuses.contains(&LocalCaptureStatus::LocalMissing) {
+        return LocalCaptureStatus::LocalMissing;
+    }
+    if statuses
+        .iter()
+        .all(|status| *status == LocalCaptureStatus::CompatibleAtInjectionPoint)
+    {
+        return LocalCaptureStatus::CompatibleAtInjectionPoint;
+    }
+    if statuses.iter().all(|status| *status == statuses[0]) {
+        return statuses[0];
+    }
+    LocalCaptureStatus::PartialAcrossInjectionPoints
 }
 
 /// Inputs describing a site's local capture intent.
@@ -117,19 +148,26 @@ pub fn verify_local_capture(
                 LocalCaptureStatus::FrameAvailable
             } else if !frame.local_descriptors.contains(&ty) {
                 LocalCaptureStatus::LocalMissing
+            } else if frame.scope_offset.is_none() {
+                // We know the local exists somewhere in the method but not that
+                // its live range covers this injection point.
+                LocalCaptureStatus::FrameAvailable
             } else if let Some(idx) = site.local_index {
-                // The type exists, but we must also confirm the *slot index* is
-                // actually present in the LVT. Three int locals don't make slot 4
-                // valid — without index validation we produce a false-positive
-                // ExactLocalsMatch that masks a runtime InvalidInjectionException.
+                // Type and slot must belong to the same live LVT entry. Checking
+                // two independent sets would accept `int` at slot 3 merely because
+                // some unrelated type occupies slot 3 and an int exists elsewhere.
                 let slot = u16::try_from(idx).unwrap_or(u16::MAX);
-                if frame.local_slots.contains(&slot) {
-                    LocalCaptureStatus::ExactLocalsMatch
+                if frame
+                    .locals
+                    .iter()
+                    .any(|local| local.slot == slot && local.descriptor == ty)
+                {
+                    LocalCaptureStatus::CompatibleAtInjectionPoint
                 } else {
                     LocalCaptureStatus::LocalMissing
                 }
             } else {
-                LocalCaptureStatus::ExactLocalsMatch
+                LocalCaptureStatus::CompatibleAtInjectionPoint
             }
         }
         // Frame exists but we can't pin a concrete captured type — stay neutral.
@@ -146,11 +184,25 @@ mod tests {
         // is the normal bytecode convention (each variable occupies one slot,
         // category-2 types like long/double skipping the next).
         let local_slots = (0u16..locals.len() as u16).collect();
+        let scoped_locals = locals
+            .iter()
+            .enumerate()
+            .map(
+                |(slot, descriptor)| crate::apply_failure::LocalVariableScope {
+                    start_pc: 0,
+                    end_pc: 10,
+                    descriptor: (*descriptor).to_string(),
+                    slot: slot as u16,
+                },
+            )
+            .collect();
         MethodFrame {
             has_lvt,
             has_stackmap,
             local_descriptors: locals.iter().map(|s| s.to_string()).collect(),
             local_slots,
+            locals: scoped_locals,
+            scope_offset: Some(0),
         }
     }
 
@@ -198,7 +250,7 @@ mod tests {
         let f = frame(true, true, &["Lfoo/Bar;", "Lfoo/Bar;", "I"]);
         assert_eq!(
             verify_local_capture(&site, Some(&f)),
-            LocalCaptureStatus::ExactLocalsMatch
+            LocalCaptureStatus::CompatibleAtInjectionPoint
         );
     }
 
@@ -206,7 +258,7 @@ mod tests {
     fn matching_type_but_wrong_slot_index_is_a_failure() {
         // The method has three `int` locals (slots 0, 1, 2) and the mixin tries
         // to capture slot 4 — the type exists in the LVT but the index does not.
-        // This must return LocalMissing, not ExactLocalsMatch.
+        // This must return LocalMissing, not CompatibleAtInjectionPoint.
         let f = frame(true, true, &["I", "I", "I"]);
         // Manually insert slots 1 and 2 (slot 0 is always `this`).
         let mut frame_with_slots = f;
@@ -221,6 +273,42 @@ mod tests {
         let status = verify_local_capture(&site, Some(&frame_with_slots));
         assert_eq!(status, LocalCaptureStatus::LocalMissing);
         assert!(status.is_failure());
+    }
+
+    #[test]
+    fn all_selected_offsets_must_be_compatible() {
+        assert_eq!(
+            aggregate_local_capture([
+                LocalCaptureStatus::CompatibleAtInjectionPoint,
+                LocalCaptureStatus::LocalMissing,
+            ]),
+            LocalCaptureStatus::LocalMissing
+        );
+        assert_eq!(
+            aggregate_local_capture([
+                LocalCaptureStatus::CompatibleAtInjectionPoint,
+                LocalCaptureStatus::FrameAvailable,
+            ]),
+            LocalCaptureStatus::PartialAcrossInjectionPoints
+        );
+    }
+
+    #[test]
+    fn type_and_slot_must_match_the_same_live_lvt_entry() {
+        let mut f = frame(true, true, &["I", "Ljava/lang/String;"]);
+        // `I` is live in slot 0 and slot 1 is live, but slot 1 is not an int.
+        f.local_slots = [0u16, 1].into_iter().collect();
+        let site = CaptureSite {
+            operation: "modify-variable",
+            local_capture: "",
+            mutates_target_local: true,
+            local_index: Some(1),
+            handler_descriptor: "(I)I",
+        };
+        assert_eq!(
+            verify_local_capture(&site, Some(&f)),
+            LocalCaptureStatus::LocalMissing
+        );
     }
 
     #[test]

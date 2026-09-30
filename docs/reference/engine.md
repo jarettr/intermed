@@ -38,12 +38,12 @@ machine underneath.
 | `--logic` | Engine | Availability |
 | --- | --- | --- |
 | `columnar` *(default)* | In-process columnar engine, pure Rust | Always |
-| `souffle` | Datalog via the external `souffle` binary | Needs `souffle` in `PATH` |
+| `souffle` *(experimental)* | Datalog parity/research backend via the external `souffle` binary | Needs `souffle` in `PATH` |
 | `duckdb` | Vectorized SQL over DuckDB relations | Needs a build with `--features duckdb` |
 
-The in-process columnar backend is the default precisely because it needs no
-external tool and no extra build feature. Souffle and DuckDB are alternative
-executors over the identical lowered plan; `--logic duckdb` additionally routes the
+The supported production surfaces are the in-process columnar backend and
+DuckDB/reference oracle. Soufflé remains an explicit experimental parity backend.
+All execute the identical lowered plan; `--logic duckdb` additionally routes the
 log, security, and SBOM analyses through their declarative SQL forms. A backend
 that is requested but unavailable fails the run with a clear message rather than
 silently falling back.

@@ -34,6 +34,55 @@ pub enum LayoutKind {
     Unknown,
 }
 
+/// Physical placement of the game root, independent of which launcher or pack
+/// format produced it. A nested `.minecraft` directory is topology evidence;
+/// it is not, by itself, evidence for Prism or MultiMC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LayoutTopology {
+    DirectGameRoot,
+    NestedDotMinecraft,
+    OverridesRoot,
+    BareArtifacts,
+    DedicatedServer,
+    Unknown,
+}
+
+impl LayoutTopology {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectGameRoot => "direct-game-root",
+            Self::NestedDotMinecraft => "nested-dot-minecraft",
+            Self::OverridesRoot => "overrides-root",
+            Self::BareArtifacts => "bare-artifacts",
+            Self::DedicatedServer => "dedicated-server",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Launcher provenance established by launcher-specific files. Pack export
+/// formats deliberately do not imply that the target was run by that launcher.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LauncherKind {
+    Prism,
+    MultiMc,
+    Vanilla,
+}
+
+impl LauncherKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Prism => "prism",
+            Self::MultiMc => "multimc",
+            Self::Vanilla => "vanilla",
+        }
+    }
+}
+
 impl LayoutKind {
     /// Stable snake-free label for facts and reports.
     #[must_use]
@@ -59,11 +108,56 @@ pub struct ResolvedLayout {
     /// Directory where Minecraft expects `mods/`, `config/`, `options.txt`, etc.
     pub game_root: PathBuf,
     pub layout: LayoutKind,
+    /// Filesystem topology, kept separate from launcher provenance.
+    pub topology: LayoutTopology,
+    /// Launcher identity only when launcher-specific markers establish it.
+    pub launcher: Option<LauncherKind>,
     pub instance_type: InstanceType,
+    pub instance_resolution: InstanceTypeResolution,
     /// Resolved mod jar directory, if any.
     pub mods_dir: Option<PathBuf>,
     /// Bukkit-family plugin directory, when present.
     pub plugins_dir: Option<PathBuf>,
+    /// All equally plausible fallback `mods/` paths. Non-empty with no selected
+    /// path means discovery abstained instead of choosing by directory order.
+    pub mods_candidates: Vec<PathBuf>,
+    pub mods_certainty: PathResolutionCertainty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InstanceResolutionCertainty {
+    Confirmed,
+    Inferred,
+    Conflict,
+    Unknown,
+}
+
+/// Field-wise resolution for the runtime shape. The legacy `instance_type`
+/// projection remains available, while consumers that gate hard conclusions
+/// can distinguish confirmed, inferred, conflicting and absent evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceTypeResolution {
+    pub value: InstanceType,
+    pub certainty: InstanceResolutionCertainty,
+    pub server_markers: bool,
+    pub client_markers: bool,
+    pub reason: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathResolutionCertainty {
+    ConfirmedKnownLayout,
+    InferredUnique,
+    Ambiguous,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModsDirectoryResolution {
+    pub selected: Option<PathBuf>,
+    pub candidates: Vec<PathBuf>,
+    pub certainty: PathResolutionCertainty,
 }
 
 /// Maximum directory depth when searching for a nested `mods/` folder.
@@ -84,32 +178,91 @@ const MODS_CANDIDATE_RELS: &[&str] = &[
 pub fn resolve_layout(surface_root: &Path) -> ResolvedLayout {
     let layout = detect_layout_kind(surface_root);
     let game_root = resolve_game_root(surface_root, layout);
-    let mods_dir = find_mods_directory(surface_root).or_else(|| find_mods_directory(&game_root));
+    let mut mods_resolution = find_mods_directory_resolution(surface_root);
+    if mods_resolution.selected.is_none()
+        && mods_resolution.certainty != PathResolutionCertainty::Ambiguous
+        && game_root != surface_root
+    {
+        mods_resolution = find_mods_directory_resolution(&game_root);
+    }
+    let mods_dir = mods_resolution.selected.clone();
     let plugins_dir = find_plugins_directory(surface_root, &game_root);
-    let instance_type = detect_instance_type(
+    let instance_resolution = resolve_instance_type(
         &game_root,
         layout,
         mods_dir.as_deref(),
         plugins_dir.as_deref(),
     );
+    let topology = resolve_topology(surface_root, &game_root, layout);
+    let launcher = detect_launcher_kind(surface_root, layout);
 
     ResolvedLayout {
         surface_root: surface_root.to_path_buf(),
         game_root,
         layout,
-        instance_type,
+        topology,
+        launcher,
+        instance_type: instance_resolution.value,
+        instance_resolution,
         mods_dir,
         plugins_dir,
+        mods_candidates: mods_resolution.candidates,
+        mods_certainty: mods_resolution.certainty,
+    }
+}
+
+fn resolve_topology(surface_root: &Path, game_root: &Path, layout: LayoutKind) -> LayoutTopology {
+    match layout {
+        LayoutKind::DedicatedServer => LayoutTopology::DedicatedServer,
+        LayoutKind::BareModsDir => LayoutTopology::BareArtifacts,
+        LayoutKind::CurseForgePack | LayoutKind::ModrinthPack
+            if game_root == surface_root.join("overrides") =>
+        {
+            LayoutTopology::OverridesRoot
+        }
+        LayoutKind::PrismInstance | LayoutKind::MultiMcInstance
+            if game_root == surface_root.join(".minecraft") =>
+        {
+            LayoutTopology::NestedDotMinecraft
+        }
+        LayoutKind::Unknown if game_root == surface_root.join(".minecraft") => {
+            LayoutTopology::NestedDotMinecraft
+        }
+        LayoutKind::Unknown => LayoutTopology::Unknown,
+        _ => LayoutTopology::DirectGameRoot,
+    }
+}
+
+fn detect_launcher_kind(root: &Path, layout: LayoutKind) -> Option<LauncherKind> {
+    match layout {
+        LayoutKind::PrismInstance => Some(LauncherKind::Prism),
+        LayoutKind::MultiMcInstance => Some(LauncherKind::MultiMc),
+        LayoutKind::DotMinecraft
+            if root.join("launcher_profiles.json").is_file()
+                || root.join("launcher_accounts.json").is_file() =>
+        {
+            Some(LauncherKind::Vanilla)
+        }
+        _ => None,
     }
 }
 
 /// Find a `mods/` directory under `root`, checking known layouts then subdirectories.
 #[must_use]
 pub fn find_mods_directory(root: &Path) -> Option<PathBuf> {
+    find_mods_directory_resolution(root).selected
+}
+
+#[must_use]
+pub fn find_mods_directory_resolution(root: &Path) -> ModsDirectoryResolution {
     for rel in MODS_CANDIDATE_RELS {
         let candidate = root.join(rel);
         if is_mods_directory(&candidate) {
-            return Some(candidate);
+            return ModsDirectoryResolution {
+                selected: Some(candidate.clone()),
+                candidates: vec![candidate],
+                certainty: PathResolutionCertainty::ConfirmedKnownLayout,
+            };
         }
     }
     search_mods_bfs(root, MODS_SEARCH_MAX_DEPTH)
@@ -140,6 +293,12 @@ pub fn resolve_game_root(surface_root: &Path, layout: LayoutKind) -> PathBuf {
         .is_some_and(|n| n == ".minecraft")
     {
         return surface_root.to_path_buf();
+    }
+
+    // Topology alone may identify the game root without proving a launcher.
+    let nested_dot_mc = surface_root.join(".minecraft");
+    if nested_dot_mc.is_dir() {
+        return nested_dot_mc;
     }
 
     surface_root.to_path_buf()
@@ -181,9 +340,7 @@ fn detect_layout_kind(root: &Path) -> LayoutKind {
     {
         return LayoutKind::DotMinecraft;
     }
-    if has(".minecraft") {
-        return LayoutKind::PrismInstance;
-    }
+    // A nested `.minecraft` establishes topology, not Prism provenance.
     LayoutKind::Unknown
 }
 
@@ -195,17 +352,73 @@ pub fn detect_instance_type(
     mods_dir: Option<&Path>,
     plugins_dir: Option<&Path>,
 ) -> InstanceType {
+    resolve_instance_type(game_root, layout, mods_dir, plugins_dir).value
+}
+
+#[must_use]
+pub fn resolve_instance_type(
+    game_root: &Path,
+    layout: LayoutKind,
+    mods_dir: Option<&Path>,
+    plugins_dir: Option<&Path>,
+) -> InstanceTypeResolution {
     let server = has_dedicated_server_markers(game_root, plugins_dir);
     let client = has_client_markers(game_root, layout);
 
-    match (server, client) {
-        (true, true) => InstanceType::Integrated,
-        (true, false) => InstanceType::Server,
-        (false, true) if is_launcher_integrated_layout(layout) => InstanceType::Integrated,
-        (false, true) if is_client_only_mods_path(mods_dir) => InstanceType::Client,
-        (false, true) => InstanceType::Integrated,
-        (false, false) if is_client_only_mods_path(mods_dir) => InstanceType::Client,
-        (false, false) => infer_instance_type_from_layout(layout, mods_dir),
+    let (value, certainty, reason) = match (server, client) {
+        (true, true) => (
+            InstanceType::Unknown,
+            InstanceResolutionCertainty::Conflict,
+            "server-and-client-markers-conflict",
+        ),
+        (true, false) => (
+            InstanceType::Server,
+            InstanceResolutionCertainty::Confirmed,
+            "dedicated-server-markers",
+        ),
+        (false, true) if is_launcher_integrated_layout(layout) => (
+            InstanceType::Integrated,
+            InstanceResolutionCertainty::Confirmed,
+            "client-markers-in-instance-layout",
+        ),
+        (false, true) if is_client_only_mods_path(mods_dir) => (
+            InstanceType::Client,
+            InstanceResolutionCertainty::Confirmed,
+            "client-only-artifact-root",
+        ),
+        (false, true) => (
+            InstanceType::Integrated,
+            InstanceResolutionCertainty::Inferred,
+            "client-markers-without-launcher-provenance",
+        ),
+        (false, false) if is_client_only_mods_path(mods_dir) => (
+            InstanceType::Client,
+            InstanceResolutionCertainty::Inferred,
+            "client-only-artifact-root",
+        ),
+        (false, false) => {
+            let inferred = infer_instance_type_from_layout(layout, mods_dir);
+            if inferred == InstanceType::Unknown {
+                (
+                    inferred,
+                    InstanceResolutionCertainty::Unknown,
+                    "no-runtime-shape-evidence",
+                )
+            } else {
+                (
+                    inferred,
+                    InstanceResolutionCertainty::Inferred,
+                    "layout-implies-runtime-shape",
+                )
+            }
+        }
+    };
+    InstanceTypeResolution {
+        value,
+        certainty,
+        server_markers: server,
+        client_markers: client,
+        reason,
     }
 }
 
@@ -234,7 +447,7 @@ fn infer_instance_type_from_layout(layout: LayoutKind, mods_dir: Option<&Path>) 
             if is_client_only_mods_path(mods_dir) {
                 InstanceType::Client
             } else {
-                InstanceType::Integrated
+                InstanceType::Unknown
             }
         }
         LayoutKind::PrismInstance
@@ -242,7 +455,7 @@ fn infer_instance_type_from_layout(layout: LayoutKind, mods_dir: Option<&Path>) 
         | LayoutKind::DotMinecraft
         | LayoutKind::CurseForgePack
         | LayoutKind::ModrinthPack => InstanceType::Integrated,
-        LayoutKind::Unknown => InstanceType::Integrated,
+        LayoutKind::Unknown => InstanceType::Unknown,
     }
 }
 
@@ -294,12 +507,17 @@ fn is_mods_directory(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn search_mods_bfs(root: &Path, max_depth: usize) -> Option<PathBuf> {
+fn search_mods_bfs(root: &Path, max_depth: usize) -> ModsDirectoryResolution {
     if max_depth == 0 {
-        return None;
+        return ModsDirectoryResolution {
+            selected: None,
+            candidates: Vec::new(),
+            certainty: PathResolutionCertainty::Unavailable,
+        };
     }
     let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
-    let mut best: Option<PathBuf> = None;
+    let mut candidates = Vec::new();
+    let mut best_depth = None;
 
     while let Some((dir, depth)) = queue.pop_front() {
         if depth > max_depth {
@@ -308,7 +526,9 @@ fn search_mods_bfs(root: &Path, max_depth: usize) -> Option<PathBuf> {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
-        for entry in entries.flatten() {
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -319,12 +539,19 @@ fn search_mods_bfs(root: &Path, max_depth: usize) -> Option<PathBuf> {
                 .is_some_and(|n| n == "mods")
                 && is_mods_directory(&path);
             if is_mods {
-                let replace = match &best {
-                    None => true,
-                    Some(current) => path.components().count() < current.components().count(),
-                };
-                if replace {
-                    best = Some(path.clone());
+                let candidate_depth = depth + 1;
+                match best_depth {
+                    None => {
+                        best_depth = Some(candidate_depth);
+                        candidates.push(path.clone());
+                    }
+                    Some(best) if candidate_depth < best => {
+                        best_depth = Some(candidate_depth);
+                        candidates.clear();
+                        candidates.push(path.clone());
+                    }
+                    Some(best) if candidate_depth == best => candidates.push(path.clone()),
+                    Some(_) => {}
                 }
             }
             if depth < max_depth {
@@ -332,7 +559,25 @@ fn search_mods_bfs(root: &Path, max_depth: usize) -> Option<PathBuf> {
             }
         }
     }
-    best
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [selected] => ModsDirectoryResolution {
+            selected: Some(selected.clone()),
+            candidates,
+            certainty: PathResolutionCertainty::InferredUnique,
+        },
+        [] => ModsDirectoryResolution {
+            selected: None,
+            candidates,
+            certainty: PathResolutionCertainty::Unavailable,
+        },
+        _ => ModsDirectoryResolution {
+            selected: None,
+            candidates,
+            certainty: PathResolutionCertainty::Ambiguous,
+        },
+    }
 }
 
 fn dir_has_jars(path: &Path) -> bool {
@@ -515,14 +760,48 @@ mod tests {
     }
 
     #[test]
-    fn integrated_when_client_and_server_markers() {
+    fn conflicting_client_and_server_markers_remain_unknown() {
         let root = temp_root("integrated");
         touch(&root.join("server.properties"), b"");
         touch(&root.join("options.txt"), b"fov:70");
         touch(&root.join("mods/both.jar"), b"j");
 
         let layout = resolve_layout(&root);
-        assert_eq!(layout.instance_type, InstanceType::Integrated);
+        assert_eq!(layout.instance_type, InstanceType::Unknown);
+        assert_eq!(
+            layout.instance_resolution.certainty,
+            InstanceResolutionCertainty::Conflict
+        );
+        assert_eq!(
+            layout.instance_resolution.reason,
+            "server-and-client-markers-conflict"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn nested_dot_minecraft_does_not_claim_prism_launcher() {
+        let root = temp_root("nested-dot-minecraft");
+        touch(&root.join(".minecraft/mods/example.jar"), b"j");
+
+        let layout = resolve_layout(&root);
+        assert_eq!(layout.layout, LayoutKind::Unknown);
+        assert_eq!(layout.game_root, root.join(".minecraft"));
+        assert_eq!(layout.topology, LayoutTopology::NestedDotMinecraft);
+        assert_eq!(layout.launcher, None);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn equal_depth_fallback_mods_directories_are_ambiguous() {
+        let root = temp_root("ambiguous-mods");
+        touch(&root.join("backup/mods/a.jar"), b"j");
+        touch(&root.join("instance/mods/b.jar"), b"j");
+
+        let resolution = find_mods_directory_resolution(&root);
+        assert_eq!(resolution.selected, None);
+        assert_eq!(resolution.certainty, PathResolutionCertainty::Ambiguous);
+        assert_eq!(resolution.candidates.len(), 2);
         fs::remove_dir_all(root).ok();
     }
 }

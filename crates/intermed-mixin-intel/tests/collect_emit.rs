@@ -38,10 +38,12 @@ fn collector_emits_effect_recommendation_and_handler_facts() {
         spark_report: None,
     };
     let mut store = FactStore::new();
+    let inputs = FactStore::new();
     let settings = DiagnosisSettings::default();
     let mut ctx = CollectCtx {
         target: &target,
         store: &mut store,
+        inputs: &inputs,
         jar_cache: None,
         settings: &settings,
     };
@@ -69,6 +71,19 @@ fn collector_emits_effect_recommendation_and_handler_facts() {
     assert!(effect.attr("site_key").is_some_and(|k| !k.is_empty()));
     assert!(effect.attr("effect_kinds").is_some());
 
+    let config = store.by_kind(kind::MIXIN_CONFIG).next().unwrap();
+    assert!(
+        config
+            .attr("artifact_id")
+            .is_some_and(|id| id.starts_with("sha256:"))
+    );
+    assert_eq!(
+        config.attr("identity_certainty"),
+        Some("unresolved-display-fallback")
+    );
+    assert_eq!(store.by_kind(kind::MIXIN_REFMAP_STATUS).count(), 1);
+    assert_eq!(store.by_kind(kind::MIXIN_REFMAP_LOADED).count(), 0);
+
     // Complexity scores emit end-to-end (analysis → scan → facts), with their
     // transparent component breakdown carried on the fact.
     assert!(store.by_kind(kind::MIXIN_CLASS_COMPLEXITY).count() >= 1);
@@ -79,5 +94,64 @@ fn collector_emits_effect_recommendation_and_handler_facts() {
     assert!(mod_cx.attr_int("score").is_some_and(|s| s > 0));
     assert!(mod_cx.attr("components").is_some_and(|c| !c.is_empty()));
 
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
+fn collector_uses_layer_b_active_artifact_role_for_mod_identity() {
+    let root = temp_dir("canonical-role");
+    let mods = root.join("mods");
+    std::fs::create_dir_all(&mods).unwrap();
+    let jar = mods.join("display-name.jar");
+    let class = fixtures::mixin_class(
+        "canonical/mixin/TestMixin",
+        "net/minecraft/server/MinecraftServer",
+        &["Inject"],
+    );
+    write_mixin_jar(
+        &jar,
+        "descriptor-id-ignored-by-f",
+        "canonical.mixins.json",
+        "canonical.mixin",
+        &[("TestMixin", class.as_slice())],
+    );
+    let target = Target {
+        path: mods.clone(),
+        kind: TargetKind::ModsDir,
+        mods_dir: Some(mods),
+        game_root: None,
+        layout: None,
+        instance_type: None,
+        spark_report: None,
+    };
+    let mut inputs = FactStore::new();
+    inputs
+        .fact("metadata-scanner", kind::ARTIFACT_ROLE)
+        .subject(jar.display().to_string())
+        .attr("declared_id", "canonical-id")
+        .attr("activation", "active")
+        .attr("identity_certainty", "confirmed")
+        .emit();
+    let mut store = FactStore::new();
+    let settings = DiagnosisSettings::default();
+    let mut ctx = CollectCtx {
+        target: &target,
+        store: &mut store,
+        inputs: &inputs,
+        jar_cache: None,
+        settings: &settings,
+    };
+    collector().collect(&mut ctx);
+    let config = store
+        .by_kind(kind::MIXIN_CONFIG)
+        .next()
+        .expect("mixin config");
+    assert_eq!(config.attr("mod"), Some("canonical-id"));
+    assert_eq!(config.attr("identity_certainty"), Some("confirmed"));
+    assert!(
+        config
+            .attr("artifact_id")
+            .is_some_and(|id| id.starts_with("sha256:"))
+    );
     std::fs::remove_dir_all(root).ok();
 }

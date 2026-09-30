@@ -1,0 +1,14 @@
+name: SanitizedPaperPlugin
+version: 2.0.0
+main: example.paper.ModernPlugin
+api-version: '1.20'
+dependencies:
+  bootstrap:
+    RegistryPlugin:
+      load: BEFORE
+      required: true
+      join-classpath: false
+  server:
+    OptionalPlugin:
+      load: AFTER
+      required: false

@@ -7,10 +7,12 @@ use std::time::Instant;
 
 use intermed_evidence::Finding;
 use intermed_facts::{Fact, FactStore};
+use thiserror::Error;
 
 use crate::collector::{CollectCtx, Collector};
 use crate::jar_cache::JarCache;
 use crate::profile::{DiagnosticProfile, PhaseTiming};
+use crate::reconciler::{CrossLayerReconciler, Reconciler};
 use crate::report::{self, DoctorReport, OperationalError, RuleStat};
 use crate::rule::{Rule, RuleCtx};
 use crate::settings::DiagnosisSettings;
@@ -38,6 +40,7 @@ pub struct DiagnosticEngine {
     tool_version: String,
     collectors: Vec<Box<dyn Collector>>,
     rules: Vec<Box<dyn Rule>>,
+    reconcilers: Vec<Box<dyn Reconciler>>,
     jar_cache: Option<JarCache>,
     settings: DiagnosisSettings,
 }
@@ -60,6 +63,7 @@ impl DiagnosticEngine {
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
             collectors: Vec::new(),
             rules: Vec::new(),
+            reconcilers: vec![Box::new(CrossLayerReconciler)],
             jar_cache: None,
             settings: DiagnosisSettings::default(),
         }
@@ -80,6 +84,7 @@ impl DiagnosticEngine {
         // semantics and could silently remove findings.
         let mut store = FactStore::new();
         let mut collector_outcomes = Vec::with_capacity(self.collectors.len());
+        let mut collector_contract_errors = Vec::new();
         let collector_scopes = self
             .collectors
             .iter()
@@ -91,23 +96,57 @@ impl DiagnosticEngine {
         for c in &self.collectors {
             let phase_start = Instant::now();
             let facts_before = store.len();
-            let outcome = if c.applies(target) {
+            let scope = c.scope();
+            let mut outcome = if c.applies(target) {
+                let inputs = intermed_facts::FilteredFactView::new(&store, &scope.consumes);
+                let mut staged = store.staging_after();
                 let mut ctx = CollectCtx {
                     target,
-                    store: &mut store,
+                    store: &mut staged,
+                    inputs: &inputs,
                     jar_cache: jar_cache_ref,
                     settings: &self.settings,
                 };
-                c.collect(&mut ctx)
+                let outcome = c.collect(&mut ctx);
+                store.append_staged(staged);
+                outcome
             } else {
                 c.not_applicable(target)
             };
+            let facts_after = store.len();
+            let facts_emitted = facts_after.saturating_sub(facts_before);
+            outcome.facts_emitted = facts_emitted;
+            if !scope.produces.is_empty() {
+                let undeclared = store.all()[facts_before..facts_after]
+                    .iter()
+                    .filter(|fact| !scope.produces.contains(fact.kind.as_str()))
+                    .map(|fact| fact.kind.clone())
+                    .collect::<std::collections::BTreeSet<_>>();
+                if !undeclared.is_empty() {
+                    let message = format!(
+                        "collector emitted predicates absent from its scope: {}",
+                        undeclared.into_iter().collect::<Vec<_>>().join(", ")
+                    );
+                    collector_contract_errors.push(OperationalError {
+                        stage: "collector-contract".to_string(),
+                        component: c.id().to_string(),
+                        message: message.clone(),
+                    });
+                    if matches!(
+                        outcome.status,
+                        crate::CollectorStatus::Active | crate::CollectorStatus::CompleteEmpty
+                    ) {
+                        outcome.status = crate::CollectorStatus::Incomplete;
+                        outcome.message = format!("{}; {message}", outcome.message);
+                    }
+                }
+            }
             collector_timings.push(PhaseTiming {
                 id: c.id().to_string(),
                 duration_ms: phase_start.elapsed().as_millis() as u64,
                 input_facts: facts_before,
                 output_records: outcome.facts_emitted,
-                store_facts_after: store.len(),
+                store_facts_after: facts_after,
             });
             collector_outcomes.push((c.id(), c.layer(), outcome));
         }
@@ -121,9 +160,10 @@ impl DiagnosticEngine {
         let mut findings: Vec<Finding> = Vec::new();
         let mut rule_stats: Vec<RuleStat> = Vec::with_capacity(self.rules.len());
         let mut rule_timings = Vec::with_capacity(self.rules.len());
-        let mut operational_errors = Vec::new();
+        let mut operational_errors = collector_contract_errors;
         for r in &self.rules {
             let phase_start = Instant::now();
+            let requirements = r.requirements();
             let result = r.evaluate(&rctx);
             rule_timings.push(PhaseTiming {
                 id: r.id().to_string(),
@@ -132,7 +172,7 @@ impl DiagnosticEngine {
                 output_records: result.as_ref().map_or(0, Vec::len),
                 store_facts_after: store.len(),
             });
-            let produced = match result {
+            let mut produced = match result {
                 Ok(findings) => findings,
                 Err(error) => {
                     operational_errors.push(OperationalError {
@@ -143,6 +183,45 @@ impl DiagnosticEngine {
                     Vec::new()
                 }
             };
+            let mut contract_violations = Vec::new();
+            for finding in &mut produced {
+                let proof_is_invalid = finding.proof_kind.is_some_and(|proof| {
+                    !requirements.permitted_proof_kinds.is_empty()
+                        && !requirements.permitted_proof_kinds.contains(&proof)
+                }) || (finding.proof_kind.is_none()
+                    && finding.severity >= intermed_evidence::Severity::Error
+                    && !requirements.permitted_proof_kinds.is_empty());
+                if proof_is_invalid {
+                    contract_violations.push(format!(
+                        "finding `{}` used proof {:?} outside {:?}",
+                        finding.id, finding.proof_kind, requirements.permitted_proof_kinds
+                    ));
+                    mark_rule_contract_violation(finding, "rule-proof-contract-violation");
+                }
+                let undeclared_coverage = finding
+                    .coverage_requirements
+                    .iter()
+                    .filter(|requirement| {
+                        !requirements.minimum_coverage.is_empty()
+                            && !requirements.minimum_coverage.contains(requirement)
+                    })
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !undeclared_coverage.is_empty() {
+                    contract_violations.push(format!(
+                        "finding `{}` used undeclared coverage requirements {:?}",
+                        finding.id, undeclared_coverage
+                    ));
+                    mark_rule_contract_violation(finding, "rule-coverage-contract-violation");
+                }
+            }
+            if !contract_violations.is_empty() {
+                operational_errors.push(OperationalError {
+                    stage: "rule-contract".to_string(),
+                    component: r.id().to_string(),
+                    message: contract_violations.join("; "),
+                });
+            }
             rule_stats.push(RuleStat {
                 id: r.id().to_string(),
                 findings: produced.len(),
@@ -154,6 +233,8 @@ impl DiagnosticEngine {
         if incremental {
             append_partial_analysis_notice(&mut findings);
         }
+        let mut pipeline_timings = Vec::new();
+        let phase_start = Instant::now();
         let capabilities = crate::TargetCapabilities::derive_with_scopes(
             target,
             &store,
@@ -161,10 +242,66 @@ impl DiagnosticEngine {
             &collector_scopes,
             &self.settings,
         );
+        pipeline_timings.push(PhaseTiming {
+            id: "coverage".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: 1,
+            store_facts_after: store.len(),
+        });
+        let phase_start = Instant::now();
         crate::assessment::assess_findings(&store, &capabilities, &mut findings, incremental);
+        pipeline_timings.push(PhaseTiming {
+            id: "assessment".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: findings.len(),
+            store_facts_after: store.len(),
+        });
+        let phase_start = Instant::now();
         let mut evidence_graph = crate::coherence::build_evidence_graph(&store);
-        crate::coherence::reconcile_findings(&store, &mut evidence_graph, &mut findings);
+        pipeline_timings.push(PhaseTiming {
+            id: "coherence-graph".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: evidence_graph.links.len(),
+            store_facts_after: store.len(),
+        });
+        for reconciler in &self.reconcilers {
+            let phase_start = Instant::now();
+            match reconciler.reconcile(&store, &mut evidence_graph, &mut findings) {
+                Ok(outcome) => pipeline_timings.push(PhaseTiming {
+                    id: format!("reconciliation:{}", reconciler.id()),
+                    duration_ms: phase_start.elapsed().as_millis() as u64,
+                    input_facts: store.len(),
+                    output_records: outcome.findings_adjusted,
+                    store_facts_after: store.len(),
+                }),
+                Err(error) => {
+                    operational_errors.push(OperationalError {
+                        stage: "reconciler".to_string(),
+                        component: reconciler.id().to_string(),
+                        message: error.to_string(),
+                    });
+                    pipeline_timings.push(PhaseTiming {
+                        id: format!("reconciliation:{}", reconciler.id()),
+                        duration_ms: phase_start.elapsed().as_millis() as u64,
+                        input_facts: store.len(),
+                        output_records: 0,
+                        store_facts_after: store.len(),
+                    });
+                }
+            }
+        }
+        let phase_start = Instant::now();
         crate::coherence::stabilize_finding_identities(&store, &evidence_graph, &mut findings);
+        pipeline_timings.push(PhaseTiming {
+            id: "identity".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: findings.len(),
+            store_facts_after: store.len(),
+        });
 
         // Now that findings (and their evidence edges) are computed, compact the
         // store so the persisted/exported snapshot stays bounded. Compaction is
@@ -178,10 +315,18 @@ impl DiagnosticEngine {
             .collect();
         cited_facts.extend(evidence_graph.cited_facts());
         let generated_fact_stats = store.emitted_stats();
+        let phase_start = Instant::now();
         let snapshot_facts_dropped =
             store.compact_preserving(&self.settings.facts.retention, &cited_facts);
         let facts_dropped = snapshot_facts_dropped;
         let retained_fact_stats = store.stats();
+        pipeline_timings.push(PhaseTiming {
+            id: "compaction".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: generated_fact_stats.values().sum(),
+            output_records: store.len(),
+            store_facts_after: store.len(),
+        });
 
         // The on-disk cache walk is the only expensive part of profiling, so it
         // stays gated on the cache being enabled. Per-phase (collector/rule)
@@ -199,17 +344,19 @@ impl DiagnosticEngine {
                 }
             })
             .unwrap_or_default();
-        let profile = DiagnosticProfile::new(
+        let mut profile = DiagnosticProfile::new(
             started.elapsed().as_millis() as u64,
             collector_timings,
             rule_timings,
             cache_stats,
         )
+        .with_pipeline(pipeline_timings)
         .with_facts_dropped(facts_dropped)
         .with_fact_inventory(generated_fact_stats, retained_fact_stats)
         .with_peak_rss(process_peak_rss_bytes());
 
-        let report = report::assemble_with_settings_and_capabilities(
+        let phase_start = Instant::now();
+        let mut report = report::assemble_with_settings_and_capabilities(
             &self.tool_version,
             target,
             &store,
@@ -221,6 +368,21 @@ impl DiagnosticEngine {
             &self.settings,
             capabilities,
         );
+        // Report assembly appends the explicitly modelled triage,
+        // recommendation, and incident-synthesis phases.
+        if let Some(report_profile) = report.profile.take() {
+            profile = report_profile;
+        }
+        profile.pipeline.push(PhaseTiming {
+            id: "report-postprocess".to_string(),
+            duration_ms: phase_start.elapsed().as_millis() as u64,
+            input_facts: store.len(),
+            output_records: report.findings.len(),
+            store_facts_after: store.len(),
+        });
+        profile.total_ms = started.elapsed().as_millis() as u64;
+        profile.peak_rss_bytes = process_peak_rss_bytes();
+        report.profile = Some(profile.clone());
         DiagnosticRun {
             report,
             facts: store.all().to_vec(),
@@ -270,8 +432,16 @@ pub struct EngineBuilder {
     tool_version: String,
     collectors: Vec<Box<dyn Collector>>,
     rules: Vec<Box<dyn Rule>>,
+    reconcilers: Vec<Box<dyn Reconciler>>,
     jar_cache: Option<JarCache>,
     settings: DiagnosisSettings,
+}
+
+/// Invalid collector/rule wiring detected before a production analysis starts.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid diagnostic engine configuration: {issues}", issues = .issues.join("; "))]
+pub struct EngineConfigError {
+    pub issues: Vec<String>,
 }
 
 impl EngineBuilder {
@@ -295,6 +465,11 @@ impl EngineBuilder {
         self
     }
 
+    pub fn reconciler(mut self, reconciler: impl Reconciler + 'static) -> Self {
+        self.reconcilers.push(Box::new(reconciler));
+        self
+    }
+
     pub fn jar_cache(mut self, cache: Option<JarCache>) -> Self {
         self.jar_cache = cache;
         self
@@ -310,9 +485,86 @@ impl EngineBuilder {
             tool_version: self.tool_version,
             collectors: self.collectors,
             rules: self.rules,
+            reconcilers: self.reconcilers,
             jar_cache: self.jar_cache,
             settings: self.settings,
         }
+    }
+
+    /// Validate the registered analysis graph before constructing the engine.
+    ///
+    /// The unchecked [`EngineBuilder::build`] remains available for small
+    /// third-party/test engines during the 0.1 series. Production composition
+    /// roots should use this method so a forgotten producer cannot silently
+    /// turn into missing findings.
+    pub fn build_checked(self) -> Result<DiagnosticEngine, EngineConfigError> {
+        let mut issues = Vec::new();
+        let mut collector_ids = std::collections::BTreeSet::new();
+        let mut rule_ids = std::collections::BTreeSet::new();
+        let mut reconciler_ids = std::collections::BTreeSet::new();
+        let mut produced = std::collections::BTreeSet::new();
+        let mut covered_regions = std::collections::BTreeSet::new();
+
+        for collector in &self.collectors {
+            if !collector_ids.insert(collector.id()) {
+                issues.push(format!("duplicate collector id `{}`", collector.id()));
+            }
+            let scope = collector.scope();
+            for prerequisite in &scope.prerequisites {
+                if !covered_regions.contains(&prerequisite.region) {
+                    issues.push(format!(
+                        "collector `{}` requires region `{:?}` (`{}`), but no earlier registered collector declares it",
+                        collector.id(), prerequisite.region, prerequisite.id
+                    ));
+                }
+            }
+            for consumed in &scope.consumes {
+                if !produced.contains(consumed) {
+                    issues.push(format!(
+                        "collector `{}` consumes `{consumed}`, but no earlier registered collector declares that predicate",
+                        collector.id()
+                    ));
+                }
+            }
+            produced.extend(scope.produces);
+            covered_regions.extend(scope.target_regions);
+        }
+        for rule in &self.rules {
+            if !rule_ids.insert(rule.id()) {
+                issues.push(format!("duplicate rule id `{}`", rule.id()));
+            }
+            let requirements = rule.requirements();
+            for required in requirements.required_fact_kinds {
+                if !produced.contains(&required) {
+                    issues.push(format!(
+                        "rule `{}` requires `{required}`, but no registered collector declares that predicate",
+                        rule.id()
+                    ));
+                }
+            }
+            // Required regions are runtime capabilities, not necessarily
+            // collector-owned predicates. External classpaths and mappings may
+            // legitimately be absent; central assessment must then abstain.
+        }
+        for reconciler in &self.reconcilers {
+            if !reconciler_ids.insert(reconciler.id()) {
+                issues.push(format!("duplicate reconciler id `{}`", reconciler.id()));
+            }
+        }
+        issues.sort();
+        issues.dedup();
+        if issues.is_empty() {
+            Ok(self.build())
+        } else {
+            Err(EngineConfigError { issues })
+        }
+    }
+}
+
+fn mark_rule_contract_violation(finding: &mut Finding, tag: &str) {
+    finding.severity = finding.severity.min(intermed_evidence::Severity::Warn);
+    if !finding.machine_tags.iter().any(|existing| existing == tag) {
+        finding.machine_tags.push(tag.to_string());
     }
 }
 
@@ -365,6 +617,8 @@ mod partial_tests {
             mappings: CoverageState::Complete,
             logs: CoverageState::Complete,
             configs: CoverageState::Complete,
+            script_sources: CoverageState::Complete,
+            runtime_mutation_logs: CoverageState::Complete,
             scripts: CoverageState::Complete,
             runtime_mutators: CoverageState::Complete,
             resource_blobs: CoverageState::Complete,
@@ -638,5 +892,323 @@ mod partial_tests {
         assess_findings(&store, &unavailable, &mut findings, false);
         assert_eq!(findings[0].assessment, once);
         assert_eq!(findings[0].severity, Severity::Warn);
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::{
+        CollectorOutcome, CollectorScope, CompletenessModel, Layer, RuleRequirements, TargetKind,
+    };
+    use intermed_evidence::{Finding, ProofKind, Severity};
+    use intermed_facts::kind;
+
+    struct Producer {
+        id: &'static str,
+    }
+
+    impl Collector for Producer {
+        fn id(&self) -> &'static str {
+            self.id
+        }
+
+        fn layer(&self) -> Layer {
+            Layer::Metadata
+        }
+
+        fn scope(&self) -> CollectorScope {
+            CollectorScope::new(CompletenessModel::AllOrNothing).produces([kind::MOD, kind::PLUGIN])
+        }
+
+        fn applies(&self, _target: &Target) -> bool {
+            true
+        }
+
+        fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+            ctx.store.fact(self.id, kind::MOD).subject("visible").emit();
+            ctx.store
+                .fact(self.id, kind::PLUGIN)
+                .subject("not-declared-as-input")
+                .emit();
+            CollectorOutcome::active(2, "produced")
+        }
+    }
+
+    struct Consumer;
+
+    impl Collector for Consumer {
+        fn id(&self) -> &'static str {
+            "consumer"
+        }
+
+        fn layer(&self) -> Layer {
+            Layer::Dependency
+        }
+
+        fn scope(&self) -> CollectorScope {
+            CollectorScope::new(CompletenessModel::AllOrNothing)
+                .consumes([kind::MOD])
+                .produces([kind::DEPENDENCY])
+        }
+
+        fn applies(&self, _target: &Target) -> bool {
+            true
+        }
+
+        fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+            assert_eq!(ctx.inputs.by_kind(kind::MOD).count(), 1);
+            assert_eq!(ctx.inputs.by_kind(kind::PLUGIN).count(), 0);
+            ctx.store
+                .fact(self.id(), kind::DEPENDENCY)
+                .subject("visible")
+                .attr("dep", "api")
+                .emit();
+            CollectorOutcome::active(1, "enriched")
+        }
+    }
+
+    struct UndeclaredProducer;
+
+    impl Collector for UndeclaredProducer {
+        fn id(&self) -> &'static str {
+            "undeclared-producer"
+        }
+
+        fn layer(&self) -> Layer {
+            Layer::Metadata
+        }
+
+        fn scope(&self) -> CollectorScope {
+            CollectorScope::new(CompletenessModel::AllOrNothing).produces([kind::MOD])
+        }
+
+        fn applies(&self, _target: &Target) -> bool {
+            true
+        }
+
+        fn collect(&self, ctx: &mut CollectCtx<'_>) -> CollectorOutcome {
+            ctx.store
+                .fact(self.id(), kind::PLUGIN)
+                .subject("undeclared")
+                .emit();
+            CollectorOutcome::active(99, "bad count and kind")
+        }
+    }
+
+    struct ContractRule;
+
+    impl Rule for ContractRule {
+        fn id(&self) -> &'static str {
+            "contract-rule"
+        }
+
+        fn requirements(&self) -> RuleRequirements {
+            RuleRequirements::default()
+                .facts([kind::DEPENDENCY])
+                .proofs([ProofKind::Observation])
+        }
+
+        fn evaluate(&self, _ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, crate::RuleError> {
+            Ok(vec![
+                Finding::builder(self.id(), "contract-violation")
+                    .severity(Severity::Error)
+                    .proof_kind(ProofKind::Heuristic)
+                    .build(),
+            ])
+        }
+    }
+
+    struct CoverageRule;
+
+    impl Rule for CoverageRule {
+        fn id(&self) -> &'static str {
+            "coverage-rule"
+        }
+
+        fn requirements(&self) -> RuleRequirements {
+            RuleRequirements::default()
+                .facts([kind::DEPENDENCY])
+                .coverage([intermed_evidence::CoverageRequirement::CompletePack])
+                .proofs([ProofKind::DeterministicDerivation])
+        }
+
+        fn evaluate(&self, _ctx: &RuleCtx<'_>) -> Result<Vec<Finding>, crate::RuleError> {
+            Ok(vec![
+                Finding::builder(self.id(), "undeclared-coverage")
+                    .severity(Severity::Error)
+                    .proof_kind(ProofKind::DeterministicDerivation)
+                    .coverage_requirement(intermed_evidence::CoverageRequirement::CompleteClasspath)
+                    .build(),
+            ])
+        }
+    }
+
+    fn target() -> Target {
+        Target::with_kind("/does/not/exist", TargetKind::Unknown)
+    }
+
+    #[test]
+    fn checked_builder_rejects_duplicate_ids_and_missing_producers() {
+        let result = DiagnosticEngine::builder()
+            .collector(Producer { id: "duplicate" })
+            .collector(Producer { id: "duplicate" })
+            .rule(ContractRule)
+            .build_checked();
+        let error = match result {
+            Ok(_) => panic!("invalid graph must fail before analysis"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.contains("duplicate collector id `duplicate`"))
+        );
+        assert!(
+            error
+                .issues
+                .iter()
+                .any(|issue| issue.contains("requires `dependency`"))
+        );
+    }
+
+    #[test]
+    fn checked_builder_rejects_out_of_order_collector_inputs() {
+        let result = DiagnosticEngine::builder()
+            .collector(Consumer)
+            .collector(Producer { id: "producer" })
+            .build_checked();
+        let error = match result {
+            Ok(_) => panic!("consumers must follow their declared producers"),
+            Err(error) => error,
+        };
+        assert!(error.issues.iter().any(|issue| {
+            issue.contains("collector `consumer` consumes `mod`")
+                && issue.contains("no earlier registered collector")
+        }));
+    }
+
+    #[test]
+    fn collector_receives_only_declared_predicates() {
+        let engine = DiagnosticEngine::builder()
+            .collector(Producer { id: "producer" })
+            .collector(Consumer)
+            .build_checked()
+            .expect("valid graph");
+        let run = engine.diagnose_with_facts(&target());
+        assert_eq!(
+            run.facts
+                .iter()
+                .filter(|fact| fact.kind == kind::DEPENDENCY)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn undeclared_collector_output_is_incomplete_and_operational() {
+        let report = DiagnosticEngine::builder()
+            .collector(UndeclaredProducer)
+            .build_checked()
+            .expect("registration itself is structurally valid")
+            .diagnose(&target());
+        let collector = report
+            .collectors
+            .iter()
+            .find(|collector| collector.id == "undeclared-producer")
+            .expect("collector report");
+        assert_eq!(collector.status, "incomplete");
+        assert_eq!(collector.facts_emitted, 1, "engine owns the actual count");
+        assert!(report.operational_errors.iter().any(|error| {
+            error.stage == "collector-contract"
+                && error.component == "undeclared-producer"
+                && error.message.contains("plugin")
+        }));
+    }
+
+    #[test]
+    fn undeclared_rule_proof_is_capped_and_reported_operationally() {
+        let engine = DiagnosticEngine::builder()
+            .collector(Producer { id: "producer" })
+            .collector(Consumer)
+            .rule(ContractRule)
+            .build_checked()
+            .expect("valid graph");
+        let report = engine.diagnose(&target());
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.id == "contract-violation")
+            .expect("finding retained");
+        assert!(finding.severity <= Severity::Warn);
+        assert!(
+            finding
+                .machine_tags
+                .iter()
+                .any(|tag| tag == "rule-proof-contract-violation")
+        );
+        assert!(
+            report.operational_errors.iter().any(|error| {
+                error.stage == "rule-contract" && error.component == "contract-rule"
+            })
+        );
+    }
+
+    #[test]
+    fn undeclared_rule_coverage_is_capped_and_reported_operationally() {
+        let engine = DiagnosticEngine::builder()
+            .collector(Producer { id: "producer" })
+            .collector(Consumer)
+            .rule(CoverageRule)
+            .build_checked()
+            .expect("valid graph");
+        let report = engine.diagnose(&target());
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.id == "undeclared-coverage")
+            .expect("finding retained");
+        assert!(finding.severity <= Severity::Warn);
+        assert!(
+            finding
+                .machine_tags
+                .iter()
+                .any(|tag| tag == "rule-coverage-contract-violation")
+        );
+        assert!(
+            report.operational_errors.iter().any(|error| {
+                error.stage == "rule-contract" && error.component == "coverage-rule"
+            })
+        );
+    }
+
+    #[test]
+    fn profile_includes_every_post_rule_stage() {
+        let engine = DiagnosticEngine::builder()
+            .build_checked()
+            .expect("empty engine is valid");
+        let run = engine.diagnose_with_facts(&target());
+        let ids = run
+            .profile
+            .pipeline
+            .iter()
+            .map(|phase| phase.id.as_str())
+            .collect::<Vec<_>>();
+        for required in [
+            "coverage",
+            "assessment",
+            "coherence-graph",
+            "reconciliation:cross-layer-coherence",
+            "identity",
+            "compaction",
+            "triage:default-triage",
+            "recommendations",
+            "incident-synthesis",
+            "report-postprocess",
+        ] {
+            assert!(ids.contains(&required), "missing profile phase {required}");
+        }
+        assert_eq!(run.report.profile.as_ref(), Some(&run.profile));
     }
 }

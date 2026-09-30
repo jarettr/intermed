@@ -24,8 +24,9 @@
 mod sections;
 
 pub use sections::{
-    CacheSection, LabSection, LogSection, MetadataSection, MixinSection, PerformanceSection,
-    ResourceSection, RulesSection, RuntimeSection, SbomSection, SecuritySection,
+    CacheSection, LabSection, LogSection, MetadataLevelConfig, MetadataSection, MixinLevelConfig,
+    MixinSection, PerformanceSection, ResourceLevelConfig, ResourceSection, RulesSection,
+    RuntimeSection, SbomSection, SecuritySection,
 };
 
 use std::env;
@@ -112,6 +113,12 @@ pub enum ConfigError {
     Parse { path: PathBuf, message: String },
     #[error("unsupported config schema `{found}` in {path} (expected {CONFIG_SCHEMA})")]
     UnsupportedSchema { path: PathBuf, found: String },
+    #[error("invalid value `{value}` for {setting}; expected {expected}")]
+    InvalidValue {
+        setting: &'static str,
+        value: String,
+        expected: &'static str,
+    },
 }
 
 impl IntermedConfig {
@@ -165,7 +172,7 @@ impl IntermedConfig {
             Some(value) => from_merged_value(value)?,
             None => Self::defaults(),
         };
-        apply_env(&mut cfg);
+        apply_env(&mut cfg)?;
         Ok(cfg)
     }
 
@@ -184,7 +191,7 @@ impl IntermedConfig {
     pub fn diagnosis_settings(&self) -> DiagnosisSettings {
         DiagnosisSettings {
             metadata: MetadataSettings {
-                level: parse_metadata_level(&self.metadata.level),
+                level: self.metadata.level.into(),
             },
             security: SecuritySettings {
                 min_note_signals: self.security.min_note_signals,
@@ -192,6 +199,7 @@ impl IntermedConfig {
             },
             sbom: SbomSettings {
                 well_identified_trust: self.sbom.well_identified_trust,
+                signature_verify_timeout_secs: self.sbom.signature_verify_timeout_secs,
             },
             log: LogSettings {
                 parallel_line_threshold: self.log.parallel_line_threshold,
@@ -210,7 +218,7 @@ impl IntermedConfig {
     #[must_use]
     pub fn resource_settings(&self) -> ResourceSettings {
         ResourceSettings {
-            level: parse_resource_level(&self.resource.level),
+            level: self.resource.level.into(),
             max_json_bytes: self.resource.max_json_bytes,
             max_lang_json_bytes: self.resource.max_lang_json_bytes,
             max_ast_facts_per_resource: self.resource.max_ast_facts_per_resource,
@@ -220,7 +228,7 @@ impl IntermedConfig {
     /// Layer-F mixin analysis toggles for collectors and rules.
     #[must_use]
     pub fn mixin_settings(&self) -> MixinSettings {
-        let level = parse_mixin_level(&self.mixin.level);
+        let level = self.mixin.level.into();
         let mut settings = MixinSettings::from_level(level);
         if let Some(v) = self.mixin.handler_effects {
             settings.handler_effects = v;
@@ -312,27 +320,37 @@ fn from_merged_value(value: toml::Value) -> Result<IntermedConfig, ConfigError> 
         })
 }
 
-fn parse_mixin_level(raw: &str) -> MixinLevel {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "basic" | "normal" => MixinLevel::Basic,
-        "full" => MixinLevel::Full,
-        _ => MixinLevel::Standard,
+impl From<MixinLevelConfig> for MixinLevel {
+    fn from(value: MixinLevelConfig) -> Self {
+        match value {
+            MixinLevelConfig::Basic => Self::Basic,
+            MixinLevelConfig::Standard => Self::Standard,
+            MixinLevelConfig::Full => Self::Full,
+        }
     }
 }
 
-fn parse_metadata_level(raw: &str) -> MetadataLevel {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "basic" => MetadataLevel::Basic,
-        "full" => MetadataLevel::Full,
-        _ => MetadataLevel::Enriched,
+impl From<MetadataLevelConfig> for MetadataLevel {
+    fn from(value: MetadataLevelConfig) -> Self {
+        match value {
+            MetadataLevelConfig::Basic => Self::Basic,
+            MetadataLevelConfig::Enriched => Self::Enriched,
+            MetadataLevelConfig::Full => Self::Full,
+        }
     }
 }
 
-fn parse_resource_level(raw: &str) -> ResourceAstLevel {
-    ResourceAstLevel::parse(raw).unwrap_or_default()
+impl From<ResourceLevelConfig> for ResourceAstLevel {
+    fn from(value: ResourceLevelConfig) -> Self {
+        match value {
+            ResourceLevelConfig::Basic => Self::Basic,
+            ResourceLevelConfig::Semantic => Self::Semantic,
+            ResourceLevelConfig::Full => Self::Full,
+        }
+    }
 }
 
-fn apply_env(cfg: &mut IntermedConfig) {
+fn apply_env(cfg: &mut IntermedConfig) -> Result<(), ConfigError> {
     env_u64("INTERMED_CACHE_MAX_MIB", &mut cfg.cache.max_size_mib);
     env_u64("INTERMED_CACHE_MAX_AGE_DAYS", &mut cfg.cache.max_age_days);
     env_u64(
@@ -371,6 +389,10 @@ fn apply_env(cfg: &mut IntermedConfig) {
         "INTERMED_SBOM_WELL_IDENTIFIED_TRUST",
         &mut cfg.sbom.well_identified_trust,
     );
+    env_u64(
+        "INTERMED_SBOM_SIGNATURE_VERIFY_TIMEOUT_SECS",
+        &mut cfg.sbom.signature_verify_timeout_secs,
+    );
     env_usize(
         "INTERMED_LOG_PARALLEL_LINE_THRESHOLD",
         &mut cfg.log.parallel_line_threshold,
@@ -389,12 +411,20 @@ fn apply_env(cfg: &mut IntermedConfig) {
     if let Ok(v) = env::var("INTERMED_METADATA_LEVEL")
         && !v.trim().is_empty()
     {
-        cfg.metadata.level = v;
+        cfg.metadata.level = MetadataLevelConfig::parse(&v).ok_or(ConfigError::InvalidValue {
+            setting: "INTERMED_METADATA_LEVEL",
+            value: v,
+            expected: "basic, enriched, or full",
+        })?;
     }
     if let Ok(v) = env::var("INTERMED_MIXIN_LEVEL")
         && !v.trim().is_empty()
     {
-        cfg.mixin.level = v;
+        cfg.mixin.level = MixinLevelConfig::parse(&v).ok_or(ConfigError::InvalidValue {
+            setting: "INTERMED_MIXIN_LEVEL",
+            value: v,
+            expected: "basic, standard, or full",
+        })?;
         cfg.mixin.enabled = true;
     }
     env_bool("INTERMED_MIXIN_ENABLED", &mut cfg.mixin.enabled);
@@ -409,8 +439,13 @@ fn apply_env(cfg: &mut IntermedConfig) {
     if let Ok(v) = env::var("INTERMED_RESOURCE_LEVEL")
         && !v.trim().is_empty()
     {
-        cfg.resource.level = v;
+        cfg.resource.level = ResourceLevelConfig::parse(&v).ok_or(ConfigError::InvalidValue {
+            setting: "INTERMED_RESOURCE_LEVEL",
+            value: v,
+            expected: "basic, semantic, or full",
+        })?;
     }
+    Ok(())
 }
 
 fn env_bool(key: &str, target: &mut bool) {
@@ -485,6 +520,8 @@ fn env_f32(key: &str, target: &mut f32) {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn default_schema_is_valid() {
         let cfg = IntermedConfig::defaults();
@@ -502,6 +539,41 @@ mod tests {
         let text = cfg.to_toml().unwrap();
         let parsed: IntermedConfig = toml::from_str(&text).unwrap();
         assert_eq!(parsed, cfg);
+    }
+
+    #[test]
+    fn invalid_analysis_depths_are_rejected_in_config() {
+        for (section, key) in [
+            ("metadata", "metadata.level"),
+            ("mixin", "mixin.level"),
+            ("resource", "resource.level"),
+        ] {
+            let value = toml::from_str::<toml::Value>(&format!(
+                "schema = \"{CONFIG_SCHEMA}\"\n[{section}]\nlevel = \"ful\"\n"
+            ))
+            .unwrap();
+            let err = from_merged_value(value).unwrap_err();
+            assert!(matches!(err, ConfigError::Parse { .. }), "{key}: {err}");
+            assert!(err.to_string().contains("ful"), "{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn legacy_mixin_depth_aliases_serialize_canonically() {
+        for (alias, expected, canonical) in [
+            ("normal", MixinLevelConfig::Basic, "basic"),
+            ("detailed", MixinLevelConfig::Standard, "standard"),
+        ] {
+            let value = toml::from_str::<toml::Value>(&format!(
+                "schema = \"{CONFIG_SCHEMA}\"\n[mixin]\nlevel = \"{alias}\"\n"
+            ))
+            .unwrap();
+            let cfg = from_merged_value(value).unwrap();
+            assert_eq!(cfg.mixin.level, expected);
+            let serialized = cfg.to_toml().unwrap();
+            assert!(serialized.contains(&format!("level = \"{canonical}\"")));
+            assert!(!serialized.contains(&format!("level = \"{alias}\"")));
+        }
     }
 
     #[test]
@@ -558,11 +630,33 @@ mod tests {
 
     #[test]
     fn env_overrides_win_over_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let key = "INTERMED_PERF_TICK_SPIKE_MS";
-        // SAFETY: test runs single-threaded; env is restored on drop.
+        // SAFETY: environment-mutating config tests are serialized by ENV_LOCK.
         unsafe { env::set_var(key, "77") };
         let cfg = IntermedConfig::load(None).unwrap();
         unsafe { env::remove_var(key) };
         assert_eq!(cfg.performance.tick_spike_ms, 77);
+    }
+
+    #[test]
+    fn invalid_analysis_depth_environment_overrides_are_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in [
+            "INTERMED_METADATA_LEVEL",
+            "INTERMED_MIXIN_LEVEL",
+            "INTERMED_RESOURCE_LEVEL",
+        ] {
+            // SAFETY: environment-mutating config tests are serialized by ENV_LOCK.
+            unsafe { env::set_var(key, "ful") };
+            let err = apply_env(&mut IntermedConfig::defaults()).unwrap_err();
+            unsafe { env::remove_var(key) };
+
+            assert!(matches!(
+                err,
+                ConfigError::InvalidValue { setting, .. } if setting == key
+            ));
+            assert!(err.to_string().contains("ful"));
+        }
     }
 }

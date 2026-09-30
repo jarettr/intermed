@@ -8,8 +8,8 @@
 //! `Rc<ConstantPoolEntry>` on some *malformed* constant pools (valid `CAFEBABE`
 //! magic, corrupt body). Valid class files do not leak; our code drops the parsed
 //! class and retains only owned `String`s, so the cycle is internal to the crate.
-//! Impact is bounded and only on corrupt classes. Run with `-detect_leaks=0` to
-//! fuzz purely for panics/OOB.
+//! Impact is bounded and only on corrupt classes. Run with
+//! `ASAN_OPTIONS=detect_leaks=0` to fuzz purely for panics/OOB.
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

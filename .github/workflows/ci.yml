@@ -119,8 +119,8 @@ jobs:
             # constant pools. Keep ASan/OOB/panic coverage for the class parser,
             # but leave LeakSanitizer enabled for every other target.
             if [ "$target" = class_parser ]; then
-              ASAN_OPTIONS=detect_leaks=0 cargo fuzz run "$target" -- "${args[@]}"
+              ASAN_OPTIONS=detect_leaks=0 cargo +nightly fuzz run "$target" -- "${args[@]}"
               continue
             fi
-            cargo fuzz run "$target" -- "${args[@]}"
+            cargo +nightly fuzz run "$target" -- "${args[@]}"
           done

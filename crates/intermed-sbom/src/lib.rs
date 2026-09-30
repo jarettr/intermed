@@ -1766,6 +1766,15 @@ fn run_command_bounded(
     command: &mut Command,
     timeout: Duration,
 ) -> std::io::Result<BoundedCommandOutput> {
+    // Give the verifier its own process group on Unix. Killing only the direct
+    // child is not a wall-clock bound when a wrapper leaves descendants alive:
+    // they retain the stdout/stderr pipe writers and make the drain threads
+    // wait until those descendants exit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1794,6 +1803,13 @@ fn run_command_bounded(
             });
         }
         if started.elapsed() >= timeout {
+            #[cfg(unix)]
+            // SAFETY: the spawned child is the leader of a fresh process group,
+            // so the negative PID targets only that verifier process tree.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            #[cfg(not(unix))]
             let _ = child.kill();
             let _ = child.wait();
             if let Some(reader) = stdout {
